@@ -43,6 +43,8 @@ namespace vcs::freecam
 
         std::mutex g_poseMutex;
         Pose g_pose;
+        bool g_placed = false; // place(): a pose waiting for the next update (under g_poseMutex)
+        float g_place[5] = {};
 
         float rdf(const uint8_t *ram, uint32_t a)
         {
@@ -97,6 +99,15 @@ namespace vcs::freecam
 
             g_yaw = std::remainder(g_yaw + in.turn + in.turnRate * kTurnRate * dt, 6.2831855f);
             g_pitch = std::clamp(g_pitch + in.tilt + in.tiltRate * kTurnRate * dt, -kPitchLimit, kPitchLimit);
+            {
+                std::lock_guard<std::mutex> lock(g_poseMutex);
+                if (g_placed)
+                {
+                    g_x = g_place[0], g_y = g_place[1], g_z = g_place[2];
+                    g_yaw = g_place[3], g_pitch = std::clamp(g_place[4], -kPitchLimit, kPitchLimit);
+                    g_placed = false;
+                }
+            }
             g_fov = std::clamp(g_fov - in.zoom * kZoomRate * dt, 20.0f, 110.0f);
 
             const float cy = std::cos(g_yaw), sy = std::sin(g_yaw), cp = std::cos(g_pitch), sp = std::sin(g_pitch);
@@ -153,6 +164,13 @@ namespace vcs::freecam
     }
 
     bool flying() { return g_installed.load(std::memory_order_relaxed) && trainer::toggle(trainer::FreeCamera) && trainer::ready(); }
+
+    void place(float x, float y, float z, float yaw, float pitch)
+    {
+        std::lock_guard<std::mutex> lock(g_poseMutex);
+        g_place[0] = x, g_place[1] = y, g_place[2] = z, g_place[3] = yaw, g_place[4] = pitch;
+        g_placed = true;
+    }
 
     Pose pose()
     {

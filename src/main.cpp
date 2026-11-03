@@ -29,6 +29,7 @@
 #include "game/vcs_volume.h"
 #include "game/vcs_fog.h"
 #include "mods/modloader.h"
+#include "mods/rwconv.h"
 #include "platform/platform.h"
 #include "render/presenter.h"
 #include "rhi/rhi.h"
@@ -817,6 +818,8 @@ namespace
 
 int main(int argc, char *argv[])
 {
+    if (const int code = vcs::rwconv::commandLine(argc, argv); code >= 0) // --rwconv-dff / --rwconv-txd: no game
+        return code;
     vcs::installCrashHandlers();
     try
     {

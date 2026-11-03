@@ -10,6 +10,7 @@
 // (VCS_TEXTURE_PACK, textures/SLUS-21590) only with VCS_TEXTURE_REPLACEMENTS=1 - or both with VCS_TEST_MODS=1, which
 // leaves the switches free for the `setting` command (an environment value fixes its setting).
 #include "mods/modloader.h"
+#include "mods/rwconv.h"
 
 #include "game/vcs_stream.h"
 #include "platform/platform.h"
@@ -282,8 +283,10 @@ namespace vcs::mods
             return n;
         }
 
-        // Game files (vcs::setStreamFiles): GTA3PS2.IMG entries - `<model name>.mdl`, or `#<streaming index>.<any>` as
-        // tools/img.py extracts the entries it has no name for; anywhere in the mod (dumps/ aside)
+        // Game files (vcs::setStreamFiles): GTA3PS2.IMG entries - `<model name>.mdl`, `<texture dictionary>.xtx`, or
+        // `#<streaming index>.<any>` as tools/img.py extracts the entries it has no name for; loose disc files (.gxt,
+        // .scm); PC VC cars - `<model name>.dff`, and the `.txd` of the same name (only beside a .dff: a PC mod's other
+        // dictionaries - hud, generic - hold VC's textures, not VCS's); anywhere in the mod (dumps/ aside)
         std::vector<fs::path> gameFilesIn(const fs::path &folder)
         {
             std::vector<fs::path> out;
@@ -296,11 +299,22 @@ namespace vcs::mods
                 else if (it->is_regular_file(ec))
                 {
                     const std::string stem = utf8(it->path().stem()), ext = lower(it->path().extension().string());
-                    if (ext == ".mdl" || ext == ".gxt" || ext == ".scm" || (stem.size() > 1 && stem[0] == '#'))
+                    if (ext == ".mdl" || ext == ".xtx" || ext == ".gxt" || ext == ".scm" || ext == ".dff" || ext == ".txd" ||
+                        (stem.size() > 1 && stem[0] == '#'))
                         out.push_back(it->path());
                 }
             }
             std::sort(out.begin(), out.end());
+            std::vector<std::string> cars; // the .dff names: their .txd go with them
+            for (const fs::path &p : out)
+                if (lower(p.extension().string()) == ".dff")
+                    cars.push_back(lower(utf8(p.stem())));
+            out.erase(std::remove_if(out.begin(), out.end(),
+                                     [&](const fs::path &p) {
+                                         return lower(p.extension().string()) == ".txd" &&
+                                                std::find(cars.begin(), cars.end(), lower(utf8(p.stem()))) == cars.end();
+                                     }),
+                      out.end());
             return out;
         }
 
@@ -359,12 +373,28 @@ namespace vcs::mods
             if (mods && !(filesOff && *filesOff == '0'))
                 for (const Mod &m : g_mods)
                     if (settings::value(m.key))
-                        for (const fs::path &file : gameFilesIn(m.path))
+                    {
+                        const std::vector<fs::path> list = gameFilesIn(m.path);
+                        for (const fs::path &file : list)
                         {
                             const std::string ext = lower(file.extension().string());
                             const bool loose = ext == ".gxt" || ext == ".scm"; // a disc file, by its whole name
-                            files.push_back({utf8(loose ? file.filename() : file.stem()), utf8(file), m.name, m.priority});
+                            const bool txd = ext == ".xtx" && file.stem().string()[0] != '#';
+                            vcs::StreamFile f{utf8(loose ? file.filename() : file.stem()), utf8(file), m.name, m.priority, txd};
+                            if (ext == ".dff" || ext == ".txd")
+                            {
+                                f.format = ext == ".dff" ? vcs::StreamFile::Format::PcDff : vcs::StreamFile::Format::PcTxd;
+                                f.name = vcs::rwconv::vcsName(f.name); // police.dff: VCS's policem
+                                for (const fs::path &other : list) // the car's textures: the .txd of its name in the mod
+                                    if (ext == ".dff" && lower(other.extension().string()) == ".txd" && lower(utf8(other.stem())) == lower(utf8(file.stem())))
+                                    {
+                                        f.companion = utf8(other);
+                                        break;
+                                    }
+                            }
+                            files.push_back(std::move(f));
                         }
+                    }
             vcs::setStreamFiles(files);
             const auto start = std::chrono::steady_clock::now();
             std::shared_ptr<render::TextureReplacements> pack;

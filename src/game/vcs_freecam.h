@@ -28,4 +28,8 @@ namespace vcs::freecam
         float fov = 70;           // degrees
     };
     Pose pose(); // any thread: as of the last camera update
+
+    // Any thread (the rig's `campose`, for pictures from a chosen place): the free camera put at (x, y, z) looking along
+    // yaw / pitch (radians, as Pose) at its next update. The Free camera toggle turns it on.
+    void place(float x, float y, float z, float yaw, float pitch);
 }

@@ -9,6 +9,7 @@
 // Here they are replaced: reads are queued for a host thread that copies from the disc image into EE RAM; a poll
 // says busy until the copy is done. The game never touches a buffer before its poll says done, as with the IOP.
 #include "game/vcs_stream.h"
+#include "mods/rwconv.h"
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -24,7 +25,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <thread>
 
@@ -69,6 +72,9 @@ namespace vcs
         // sectors inside GTA3PS2.IMG, 0xFFFFFFFF = none), the model infos *(0x486518) (+0x8: ~CRC32 of the upper-case name).
         constexpr uint32_t kFileTable = 0x5038A8u, kFileCount = 0x486E8Cu, kStreaming = 0x489FF8u, kModelInfos = 0x486518u;
         constexpr uint32_t kResources = 8482u; // streaming info entries (measured; the array ends there)
+        // The TXD store's pool *(0x489ECC) {items, flags, size, ...}: 0x1C an item {texture list, refs, name[20]}; slot i is
+        // streaming entry *(*(0x489FF8) + 8) + i (7534 + i on this disc; docs/game-internals.md 9d)
+        constexpr uint32_t kTxdPool = 0x489ECCu, kTxdItem = 0x1Cu;
 
         struct Overlay
         {
@@ -120,6 +126,63 @@ namespace vcs
             for (const char ch : name)
                 c = table[(c ^ static_cast<uint8_t>(std::toupper(static_cast<unsigned char>(ch)))) & 0xFFu] ^ (c >> 8);
             return c;
+        }
+
+        std::vector<uint8_t> readWhole(const std::string &path)
+        {
+            std::ifstream in(std::filesystem::u8path(path), std::ios::binary);
+            return in ? std::vector<uint8_t>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()) : std::vector<uint8_t>();
+        }
+
+        // A PC file converted (src/mods/rwconv.h) - kept while the files (and the entry it goes onto) stay the same.
+        struct Converted
+        {
+            std::string stamp;
+            std::vector<uint8_t> data;
+        };
+        std::map<std::string, Converted> g_converted;
+
+        std::string stampOf(const std::string &path)
+        {
+            std::error_code ec;
+            const auto p = std::filesystem::u8path(path);
+            const auto size = std::filesystem::file_size(p, ec);
+            const auto time = std::filesystem::last_write_time(p, ec).time_since_epoch().count();
+            return path + "|" + std::to_string(size) + "|" + std::to_string(static_cast<long long>(time));
+        }
+
+        // The bytes a mod's file gives its entry: the file itself, or a PC file converted (a .dff onto the disc's own
+        // entry, read from `templateLsn`). Empty when it cannot be used.
+        std::vector<uint8_t> entryBytes(const StreamFile &f, uint32_t index, uint32_t templateLsn, uint32_t templateSectors)
+        {
+            if (f.format == StreamFile::Format::Vcs)
+                return readWhole(f.path);
+            const std::string stamp = stampOf(f.path) + "|" + (f.companion.empty() ? "" : stampOf(f.companion)) + "|" + std::to_string(index);
+            const auto cached = g_converted.find(f.path);
+            if (cached != g_converted.end() && cached->second.stamp == stamp)
+                return cached->second.data;
+            const auto start = std::chrono::steady_clock::now();
+            std::vector<uint8_t> out;
+            std::string report;
+            bool ok = false;
+            // the disc's own entry: the model the .dff goes onto, or the dictionary whose other textures the .txd keeps
+            std::vector<uint8_t> templ(size_t(templateSectors) * 2048u);
+            IPS2DiscImage *disc = ps2_disc::image();
+            if (!disc || !disc->readBytes(uint64_t(templateLsn) * 2048u, static_cast<uint32_t>(templ.size()), templ.data()))
+                report = "the disc's entry could not be read";
+            else if (f.format == StreamFile::Format::PcTxd)
+                ok = rwconv::txdToXtx(readWhole(f.path), 128, &templ, out, report);
+            else
+            {
+                const std::vector<uint8_t> txd = f.companion.empty() ? std::vector<uint8_t>() : readWhole(f.companion);
+                ok = rwconv::dffToMdl(readWhole(f.path), templ, f.companion.empty() ? nullptr : &txd, out, report);
+            }
+            std::fprintf(stderr, "[mods] %s: %s converted%s in %.0f ms: %s\n", f.mod.c_str(), f.path.c_str(), ok ? "" : " - FAILED, not used",
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), report.c_str());
+            if (!ok)
+                out.clear();
+            g_converted[f.path] = {stamp, out};
+            return out;
         }
 
         // Stream thread, before a read, when the list changed: each file to its entry's sectors (the game's tables are
@@ -213,6 +276,20 @@ namespace vcs
                 uint32_t index = kResources;
                 if (!f.name.empty() && f.name[0] == '#')
                     index = static_cast<uint32_t>(std::strtoul(f.name.c_str() + 1, nullptr, 10));
+                else if (f.textures || f.format == StreamFile::Format::PcTxd)
+                {
+                    const uint32_t pool = rd32(rdram, kTxdPool), base = rd32(rdram, streamingOwner + 8u);
+                    const uint32_t items = pool ? rd32(rdram, pool) : 0u, size = pool ? rd32(rdram, pool + 8u) : 0u;
+                    for (uint32_t i = 0; items && i < size && i < 4096u && index == kResources; ++i)
+                    {
+                        char text[21] = {};
+                        std::memcpy(text, rdram + ((items + i * kTxdItem + 8u) & 0x01FFFFFFu), 20);
+                        const std::string txd = text;
+                        if (txd.size() == f.name.size() &&
+                            std::equal(txd.begin(), txd.end(), f.name.begin(), [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }))
+                            index = base + i;
+                    }
+                }
                 else
                 {
                     const uint32_t key = keyOf(f.name);
@@ -228,13 +305,20 @@ namespace vcs
                 const uint32_t sectors = index < kResources ? rd32(rdram, at + 0x14u) : 0u;
                 if (offset == 0xFFFFFFFFu || !sectors || offset + sectors > imgSectors)
                 {
-                    std::fprintf(stderr, "[mods] %s: %s is no entry of GTA3PS2.IMG; not used\n", f.mod.c_str(), f.path.c_str());
+                    if (f.format == StreamFile::Format::Vcs)
+                        std::fprintf(stderr, "[mods] %s: %s is no entry of GTA3PS2.IMG; not used\n", f.mod.c_str(), f.path.c_str());
+                    else if (f.name == "wheels") // VC's models/generic/wheels.dff: VCS's wheel models are resident (GAME.DTZ)
+                        std::fprintf(stderr, "[mods] %s: %s - VCS keeps its wheels in memory from the start, not in GTA3PS2.IMG: "
+                                             "not supported yet (FORK.md T10); not used\n", f.mod.c_str(), f.path.c_str());
+                    else
+                        std::fprintf(stderr, "[mods] %s: %s - VCS has no vehicle \"%s\" (rename the files as the one it should "
+                                             "replace); not used\n", f.mod.c_str(), f.path.c_str(), f.name.c_str());
                     continue;
                 }
                 if (std::find(taken.begin(), taken.end(), index) != taken.end())
                     continue; // a mod with a higher priority has it
-                std::ifstream in(f.path, std::ios::binary | std::ios::ate);
-                const auto size = in ? static_cast<uint64_t>(in.tellg()) : 0u;
+                std::vector<uint8_t> bytes = entryBytes(f, index, imgLsn + offset, sectors);
+                const auto size = static_cast<uint64_t>(bytes.size());
                 if (!size)
                     continue;
                 uint32_t first = imgLsn + offset, span = sectors;
@@ -247,9 +331,7 @@ namespace vcs
                     patch(at + 0x14u, span);
                     imgMoved = true;
                 }
-                Overlay o{first, span, std::vector<uint8_t>(static_cast<size_t>(size))};
-                in.seekg(0);
-                in.read(reinterpret_cast<char *>(o.data.data()), static_cast<std::streamsize>(size));
+                Overlay o{first, span, std::move(bytes)};
                 taken.push_back(index);
                 std::fprintf(stderr, "[mods] %s: %s -> GTA3PS2.IMG entry %u (LSN %u, %u sectors%s)\n", f.mod.c_str(), f.path.c_str(),
                              index, o.lsn, o.sectors, o.sectors > sectors ? ", larger than the disc's: moved" : "");

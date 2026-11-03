@@ -75,7 +75,7 @@ def main():
     out = Path(a.out or os.path.join(tc.ROOT, 'build', 'gamefiles_check', time.strftime('%Y%m%d-%H%M%S'))).resolve()
     out.mkdir(parents=True, exist_ok=True)
     table = img.load_table()
-    by_name = {e.get('name'): e for e in table['entries']}
+    by_name = {e.get('name'): e for e in table['entries'] if e.get('kind') != 'txd'}  # models (a TXD has its car's name)
     entries = out / 'entries'
     with open(img.iso_path(None), 'rb') as iso:
         def entry(name):

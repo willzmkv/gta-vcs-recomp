@@ -47,7 +47,8 @@ One task at a time, in this order. T3 is the base for T4-T7.
 | T6 | Simulated HDR: tone mapping, exposure, bloom (replaces the interim Exposure) | T3 | Planned | [#6](https://github.com/willzmkv/gta-vcs-recomp/issues/6) |
 | T7 | Sun rays | T3 | Planned | [#7](https://github.com/willzmkv/gta-vcs-recomp/issues/7) |
 | T8 | Presets and player docs (Authentic / Enhanced), release notes | T1-T7 | Planned | [#8](https://github.com/willzmkv/gta-vcs-recomp/issues/8) |
-| T9 | PC `.dff` / `.txd` in mods: convert RW 3 clumps / TXDs to VCS's formats, or draw them natively (research) | T1c, RSL submission | Research | [#12](https://github.com/willzmkv/gta-vcs-recomp/issues/12) |
+| T9 | PC `.dff` / `.txd` in mods: convert RW 3 clumps / TXDs to VCS's formats, or draw them natively (research) | T1c, RSL submission | Cars, bikes, boats, helicopters work as they come (67 / 67 checked triangle by triangle); wheels need T10 | [#12](https://github.com/willzmkv/gta-vcs-recomp/issues/12) |
+| T10 | More streaming memory: a larger EE RAM for the port, VCS's streaming heap (5.4 MB) moved into it; then resident models (VC's `wheels.dff`) | - | Research done (game-internals.md 9e) | [#15](https://github.com/willzmkv/gta-vcs-recomp/issues/15) |
 
 Backlog (not scheduled): SkyGFX's Xbox rim light / gloss / screen water drops, YCbCr correction, a larger reflection
 map, shadow maps, deferred lights, PBR sky, volumetric clouds, car paint reflections, rain on cars, ragdolls.
@@ -107,7 +108,14 @@ streaming (`src/game/vcs_stream.cpp`) reads an entry and what the game assumes a
 built from the enabled mods (priority as for textures), served by the stream layer; loose files at their open. A
 check: a mod replacing one model / one text, seen in game.
 
-### T9 - PC `.dff` / `.txd` (research)
+### T9 - PC `.dff` / `.txd`
+
+**Status (2026-11-03)**: a VC vehicle mod's `.dff` + `.txd` in `modloader/` replace VCS's vehicle of that name (or of
+its shortened VCS name), converted by the mod loader while the game loads (docs/MODS.md "PC VC cars in VCS"). Cars,
+bikes, boats and helicopters: every part where VC has it, checked triangle by triangle against the `.dff`, intact and
+damaged (`tools/carmod_verify.py`: 67 / 67 of `Fixed_Xbox_Vehs_1.3`). Left: VC's `wheels.dff` (resident in VCS: T10),
+VC's extras where VCS has no extra slot, and the memory VC's larger models need when many are loaded (T10).
+
 
 **Plan for route (a), the converter (2026-11-03)** - the player's test mod is `Mods/Fixed_Xbox_Vehs_1.3` (VC PC cars):
 1. `tools/mdlinfo.py`: read a VCS `ldm` - its 0x20-byte chunk header (ident, shrink, file / data size, relocation
@@ -130,6 +138,17 @@ Whether, and how, PC RenderWare 3 models and texture dictionaries can stand in f
 RSL structures with PS2 geometry (and XTX), or loaded on the host and drawn by the native renderer in place of a
 model the game submits (draws at the RSL level, docs/RSL_SUBMISSION.md). Outcome: a written answer with a prototype or
 the reasons against. (A `.txd`'s textures can already be used today as a texture pack.)
+
+### T10 - More streaming memory (issue #15)
+
+VCS keeps every streamed model and texture dictionary in one 5.4 MB heap (game-internals.md 9e): `FUN_002e5688`
+takes `0x567000` bytes from the 24.57 MB main heap, which is 23 MB full in game. VC car mods are 4-5x VCS's cars, so
+fewer fit; a script forcing loads that cannot fit spins (`LOAD_ALL_MODELS_NOW`). Steps: (1) the runtime's EE RAM to
+64 MB (`PS2_RAM_SIZE`, `[gta-recomp]`), every hard-coded `0x01FFFFFF` audited (src/, DMA / VIF / GIF tags, GS uploads,
+the native renderer's reads), the `0x20000000` / `0x30000000` mirrors kept; (2) a hook on `FUN_002e5688` builds the
+streaming heap at `0x2000000` with a larger size (a setting; authentic: 0x567000 where it was); (3) checks: the rig and
+scenes identical at the authentic setting, 30+ converted VC cars spawned without the hang; (4) then resident models:
+VC's `wheels.dff` over VCS's wheel models 320-329 (in GAME.DTZ memory, not GTA3PS2.IMG).
 
 ### T2 - Draw distance (Project2DFX)
 
@@ -226,6 +245,38 @@ release notes for a fork build.
   entries (75 vehicles named). Loose files (`AMERICAN.GXT`, `MAIN.SCM`) by their disc name the same way. Checked: the
   CHEETAH's entry as `admiral.mdl` draws a Cheetah as "Admiral"; a GXT from a mod changes the game's text; a larger
   entry (the Admiral as `cheetah.mdl`) loads from past the disc - mods are not held to the original's size.
+- **2026-11-03 - T9, research.** `tools/rwinfo.py` reads PC `.dff` / `.txd` (checked on the player's VC car mods).
+  A VCS vehicle `.mdl` (an `ldm` resource) has the very frame names of a VC car `.dff` and named textures: route (a),
+  converting `.dff` -> `ldm` and loading it through T1c's game files, chosen; (c) by-name skins only fit VCS's own
+  models; (b) host drawing kept as the alternative. The MixMods tutorial could not be fetched (Cloudflare check).
+- **2026-11-03 - T9 steps 1-2.** `tools/mdlinfo.py` reads a VCS `ldm` vehicle: the node tree with VC's names and
+  positions, the elements (an intact and a damaged one per part), materials, and the PS2 meshes decoded from their VIF
+  batches (V3-16 positions with the geometry's scale / position, V2-8 UVs, V3-8 normals; strips sharing two vertices
+  between batches) - every geometry of all 75 named vehicles decodes, with exactly the triangle counts the files state;
+  `--png` draws the decoded wireframe (the Admiral's shape).
+- **2026-11-03 - T9 steps 3-5.** `tools/dff2mdl.py convert`: a VC car's `.dff` onto a VCS vehicle `.mdl` (nodes placed
+  from the frames, every part re-encoded as PS2 meshes in greedy tristrips, materials with VC's texture names, paint
+  into the vehicle's two paint lists, the resource's tail - global table, relocations, the strings after them - moved
+  as a whole). `tools/txd2xtx.py`: a VC `.txd` (DXT / palettes / RGB) into a VCS texture dictionary (4 / 8 bit, the
+  disc's format - found by surveying all 823). The mod loader takes `<txd>.xtx` by the TXD store's names (pool at
+  `*(0x489ECC)`, slot i = streaming entry 7534 + i). `tools/carmod_check.py`: the Comet as the ADMIRAL in the street,
+  with its own textures and the game's paint - pass. The rig's `dump` takes paths with spaces (one had written a RAM
+  dump next to the project folder).
+- **2026-11-03 - T9, in the mod loader.** `src/mods/rwconv.cpp`: both converters in C++, kept byte for byte with the
+  Python (`tools/rwconv_check.py`, 236 / 236 files); the stream layer converts a mod's `.dff` onto the disc's model of
+  its name (and its `.txd` into that TXD) at resolve time, cached by file stamp. The whole `Fixed Xbox Vehicles` folder
+  as one mod: 160 files converted in 4.1 s at boot, seven VC cars spawned and drawn as VC's (`carmod_check.py --folder`).
+- **2026-11-03 - T9, the player's review: parts missing, textures wrong, files not replaced.** Found and fixed:
+  57 of 61 cars lost parts (VCS builds the wings into its chassis, so VC's `wing_*` had nowhere to go - now merged into
+  the chassis; bikes' forks / wheels, boats' hulls, helicopters' rotors and extras now go to the element of their
+  name); VCS-only elements (`car_parts`, `part1`, `glass_hi`, `parts`) kept VCS geometry whose textures the new
+  dictionary no longer had - emptied; parts were placed by copying local matrices - now by each frame's place relative
+  to the root; an X_dummy's intact element is the one with object flag 4, not the first (doors drawn dented); vans'
+  doors with a second intact piece; per-mesh and per-geometry bounding boxes were zero / the template's; UVs spanning
+  more than two repeats lost precision (meshes now split per repeat); NaN in a `.dff`; six VC names VCS shortened
+  (`police` -> `policem` ...). Helicopters keep VCS's moving-rotor blur disc and the dictionary keeps the VCS textures
+  it needs. Strips 12-15 % shorter. `tools/carmod_verify.py` checks it all; the game's 5.4 MB streaming heap is the
+  next limit (T10, game-internals.md 9e).
 
 ## How the work is done
 

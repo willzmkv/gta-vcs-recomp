@@ -3,7 +3,8 @@
 
     python tools/img.py table [--save DIR]          the game's directory of the archive, read from a hidden run
     python tools/img.py list [names...]             entries: index, offset / size in sectors, name when known
-    python tools/img.py extract [OUT] [names...]    entries out of your disc image (default OUT: build/img/GTA3PS2)
+    python tools/img.py extract [OUT] [names...]    entries out of your disc image (default OUT: build/img/GTA3PS2):
+                                                    models as <name>.mdl, texture dictionaries as <name>.xtx
 
 The archive has no directory on the disc: the game keeps one in GAME.DTZ - the streaming info, one 0x18-byte record per
 resource (+0x10 offset, +0x14 size, in sectors). `table` reads it from the running game into build/img/streaming.json;
@@ -73,6 +74,17 @@ def table(save):
                     if text and key_of(text) == key:
                         entry["name"] = text.lower()
             entries.append(entry)
+        # texture dictionaries: slot i is entry *(streaming owner + 8) + i, named in the TXD store's pool
+        # (*(0x489ECC) = {items, flags, size}, 0x1C an item {list, refs, name[20]}; game-internals.md 9d)
+        txd_base, pool = g.u32(g.u32(0x489FF8) + 8), g.u32(0x489ECC)
+        items, size = g.u32(pool), g.u32(pool + 8)
+        raw_items = b"".join(g.peek(items + i, 4096) for i in range(0, size * 0x1C, 4096))
+        by_index = {e["index"]: e for e in entries}
+        for slot in range(min(size, RESOURCES)):
+            name = raw_items[slot * 0x1C + 8:slot * 0x1C + 28].split(b"\0")[0].decode("latin1")
+            e = by_index.get(txd_base + slot)
+            if e is not None and name:
+                e["name"], e["kind"] = name.lower(), "txd"
     finally:
         g.quit()
     os.makedirs(os.path.dirname(TABLE), exist_ok=True)
@@ -104,7 +116,9 @@ def pick(entries, names):
 
 
 def file_name(e):
-    return e["name"] + ".mdl" if "name" in e else "#%d.bin" % e["index"]
+    if "name" not in e:
+        return "#%d.bin" % e["index"]
+    return e["name"] + (".xtx" if e.get("kind") == "txd" else ".mdl")
 
 
 def main():
