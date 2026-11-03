@@ -18,7 +18,7 @@ namespace vcs::rsltrace
         // the packet buffer object (game-internals.md 6i): +0x14 the half in use (two of 0xE6670 bytes from +0x20),
         // +0x18 the DMA cursor growing up from the half's start, +0x1C a data pointer growing down from its end
         constexpr uint32_t kBuffer = 0x520F90u, kHalf = 0xE6670u;
-        constexpr uint32_t kRamMask = 0x01FFFFFFu;
+        constexpr uint32_t kRamMask = PS2_RAM_MASK;
 
         // Functions that move the cursor (found by scanning the code for the object at 0x520F90 and its +0x18 field),
         // plus the sector draw and walk (they call emitters; game-internals.md 6b).

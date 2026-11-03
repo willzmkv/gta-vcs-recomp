@@ -1109,3 +1109,15 @@ tighter than ours), and VCS streams everything into a fixed 5.4 MB heap. Shrinki
 or 4-bit textures) would trade away what the player installs them for. The player's call: give VCS more streaming
 memory instead (T10, issue #15: a larger EE RAM, the streaming heap built there). Until then the conversion stays
 lossless (only shorter strips); textures stay 128 px, 4 or 8 bit like the disc's.
+
+## 2026-11-03 - Streaming memory past the PS2's 32 MB, the game's own layout kept (FORK.md T10)
+
+- The host holds 64 MB of EE RAM, but the game is told 32 MB (`GetMemorySize`, the main thread's stack top): its main
+  heap, stacks and every address it derives stay where the PS2 has them, so the authentic setting runs the same code
+  on the same addresses. Only the streaming heap moves, to `0x2000000`, where nothing of the game's was.
+- The heap is built by the game's own `FUN_002bb768` (a tail call from the hook, rule 2 of AGENTS.md): its allocator,
+  defragmenter and out-of-memory path are the game's, unchanged. The 5.4 MB the game no longer takes stay free in the
+  main heap (24.2 -> 18.6 MB in use): slack for the rest of the game.
+- CStreaming's cap of 51 resources is lifted only on the larger settings and only for the request's own check: with
+  more room the cap, not the bytes, would decide what stays. The make-room loop (bytes) is the game's.
+- 30 MB at most: 64 MB minus the guest's 32 minus a 2 MB reserve. Restart to apply (the heap is built once at boot).

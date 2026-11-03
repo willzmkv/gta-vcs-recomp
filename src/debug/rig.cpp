@@ -31,7 +31,7 @@ namespace vcs::rig
 {
     namespace
     {
-        constexpr uint32_t kRamSize = 0x02000000u; // 32 MB EE RAM
+        constexpr uint32_t kRamSize = PS2_RAM_SIZE; // the EE RAM (runtime/ps2_memory.h)
         constexpr uint32_t kRamMask = kRamSize - 1u;
 
         uint8_t *g_rdram = nullptr;
@@ -556,10 +556,24 @@ namespace vcs::rig
                     return reply("error usage: cruise start <file> <speed> [loop] [from <m>] | stop | status");
                 if (w[0] == "start" && w.size() >= 3)
                 {
+                    // the file is every word before the speed (the first number): a path may hold spaces
+                    size_t speedAt = 2;
+                    for (; speedAt < w.size(); ++speedAt)
+                    {
+                        char *end = nullptr;
+                        std::strtof(w[speedAt].c_str(), &end);
+                        if (end && *end == '\0' && end != w[speedAt].c_str())
+                            break;
+                    }
+                    if (speedAt >= w.size())
+                        return reply("error usage: cruise start <file> <speed> [loop] [from <m>] | stop | status");
+                    std::string path = w[1];
+                    for (size_t i = 2; i < speedAt; ++i)
+                        path += " " + w[i];
                     Cruise c;
-                    FILE *f = std::fopen(w[1].c_str(), "r");
+                    FILE *f = std::fopen(path.c_str(), "r");
                     if (!f)
-                        return reply("error cannot read " + w[1]);
+                        return reply("error cannot read " + path);
                     for (float px, py, pz; std::fscanf(f, "%f %f %f", &px, &py, &pz) == 3;)
                     {
                         if (!c.x.empty())
@@ -577,8 +591,8 @@ namespace vcs::rig
                     std::fclose(f);
                     if (c.x.size() < 2)
                         return reply("error the route needs two points or more");
-                    c.speed = std::strtof(w[2].c_str(), nullptr);
-                    for (size_t i = 3; i < w.size(); ++i)
+                    c.speed = std::strtof(w[speedAt].c_str(), nullptr);
+                    for (size_t i = speedAt + 1; i < w.size(); ++i)
                         if (w[i] == "loop")
                             c.loop = true;
                         else if (w[i] == "from" && i + 1 < w.size())

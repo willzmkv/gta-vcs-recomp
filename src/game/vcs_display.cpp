@@ -34,7 +34,7 @@ namespace vcs
     {
         constexpr uint32_t kPrefsPointer = 0x0048F3D0u; // -> the game's preferences / menu object
         constexpr uint32_t kWidescreenField = 0x30u;    // int: 1 = the game's (Vert-) widescreen; FUN_002af658 reads it
-        constexpr uint32_t kRamMask = 0x01FFFFFFu;
+        constexpr uint32_t kRamMask = PS2_RAM_MASK;
 
         constexpr uint32_t kRightPlane = 0xB60u; // CCamera: camera-space frustum normals, x right, y forward, z up
         constexpr uint32_t kLeftPlane = 0xB70u;
@@ -176,7 +176,7 @@ namespace vcs
         if (wanted < 0)
             return;
         const uint32_t prefs = load32(rdram, kPrefsPointer);
-        if (prefs == 0u || (prefs & kRamMask) + kWidescreenField + 4u > 0x02000000u)
+        if (prefs == 0u || (prefs & kRamMask) + kWidescreenField + 4u > PS2_RAM_SIZE)
             return; // the game has not created its preferences yet
         if (static_cast<int>(load32(rdram, prefs + kWidescreenField)) != wanted)
             store32(rdram, prefs + kWidescreenField, static_cast<uint32_t>(wanted)); // FUN_002653f0 picks the aspect up

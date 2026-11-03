@@ -774,6 +774,32 @@ loads including later reloads after changing views, no per-VBlank churn or failu
 protected even when it exceeds the budget. All 160 PNGs decode in the standalone check; pack pixels total 805 MiB
 at RGBA8 before mips, so loading on demand matters.
 
+### 30. The player's mods while driving: larger streaming memory, VC cars, an HD pack (2026-11-03)
+
+The player saw the game lose a lot of speed with their mods (FORK.md T10). `cruise.py run` (144 fps cap, D3D11, the
+quick build, `build/rig/saves/fortbaxter`), each from its own card copy, the mods through test folders of junctions
+(`build/bench_mods` all, `build/bench_cars` the VC cars only, `build/bench_tex` the HD texture pack only):
+
+| Run | fps | p95 ms | p99 ms | hitches | excess ms / min |
+|---|---|---|---|---|---|
+| no mods, PS2 streaming memory | 142.3 | 7.2 | 9.3 | 20 | 160 |
+| no mods, 30 MB streaming memory | 141.7 | 7.3 | 10.8 | 30 | 200 |
+| the VC cars (Fixed Xbox Vehicles) | 132.5 | 11.4 | 16.4 | 160 | 854 |
+| the HD texture pack | 134.5 | 10.7 | 15.7 | 207 | 1100 |
+| the HD texture pack, its images made off the main thread | 140.6 | 7.4 | 13.3 | 31 | 227 |
+| all the player's mods, the same | 131.1 | 12.2 | 16.4 | 163 | 880 |
+
+- **The streaming memory itself costs nothing measurable** (the 30 MB run is within the runs' noise).
+- **The HD pack's hitches**: its DDS images (with their mip levels, 16 with anisotropy) were created on the main
+  thread when the GS stage first met the texture. The pack's ready images now go through the same early-creation path
+  as decoded textures (`gs_hw.cpp` `makeReplacementEarly`, the helper threads; PS2RECOMP_PATCHES.md): 207 -> 31
+  hitches, p95 10.7 -> 7.4 ms.
+- **The VC cars** stay the cost: the main thread's frame phase rises to ~11 ms in traffic, ~7 us per draw against 4.5
+  for VCS's cars - VC's models have many small materials (one draw and one texture bind each; the conversion already
+  merges parts sharing a texture and colour). Next: fewer state changes per car (a texture atlas per converted car),
+  measured the same way.
+- Outputs: `build/cruise/t10_{nomods,30only,cars,cars_noaa,tex,mods}`, `t10b_{tex,mods}` (after the pack change).
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker

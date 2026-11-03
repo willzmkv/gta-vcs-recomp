@@ -101,12 +101,12 @@ namespace vcs
         };
         std::vector<Patched> g_patched;
 
-        void wr32(uint8_t *rdram, uint32_t addr, uint32_t v) { std::memcpy(rdram + (addr & 0x01FFFFFCu), &v, 4); }
+        void wr32(uint8_t *rdram, uint32_t addr, uint32_t v) { std::memcpy(rdram + (addr & (PS2_RAM_MASK & ~3u)), &v, 4); }
 
         uint32_t rd32(const uint8_t *rdram, uint32_t addr)
         {
             uint32_t v;
-            std::memcpy(&v, rdram + (addr & 0x01FFFFFCu), 4);
+            std::memcpy(&v, rdram + (addr & (PS2_RAM_MASK & ~3u)), 4);
             return v;
         }
 
@@ -206,7 +206,7 @@ namespace vcs
             {
                 const uint32_t entry = kFileTable + i * 16u, name = rd32(rdram, entry);
                 char text[48] = {};
-                std::memcpy(text, rdram + (name & 0x01FFFFFFu), sizeof(text) - 1);
+                std::memcpy(text, rdram + (name & PS2_RAM_MASK), sizeof(text) - 1);
                 if (std::strstr(text, "GTA3PS2.IMG"))
                 {
                     imgLsn = rd32(rdram, entry + 8u);
@@ -224,10 +224,36 @@ namespace vcs
             }
             std::stable_sort(files.begin(), files.end(), [](const StreamFile &a, const StreamFile &b) { return a.priority > b.priority; });
             std::vector<Overlay> overlays;
+            // PC files are converted as vehicles only (the model info's type +0x10 = 6): a weapon's or an object's resource
+            // is laid out otherwise - converted as a car it drew nothing, and its dictionary (a weapon's holds its HUD
+            // icon) lost its textures. Those names' .dff and .txd are left out (FORK.md T9).
+            std::vector<std::string> notVehicles;
+            for (const StreamFile &f : files)
+                if (f.format == StreamFile::Format::PcDff)
+                {
+                    const uint32_t key = keyOf(f.name);
+                    for (uint32_t i = 0; i < kResources; ++i)
+                    {
+                        const uint32_t info = rd32(rdram, modelInfos + i * 4u);
+                        if (info >= 0x100000u && info < PS2_RAM_SIZE && rd32(rdram, info + 8u) == key)
+                        {
+                            if (rdram[(info + 0x10u) & PS2_RAM_MASK] != 6u)
+                            {
+                                notVehicles.push_back(f.name);
+                                std::fprintf(stderr, "[mods] %s: %s - \"%s\" is no vehicle in VCS (a weapon or an object): PC "
+                                                     "models of those are not supported yet; its .dff and .txd not used\n",
+                                             f.mod.c_str(), f.path.c_str(), f.name.c_str());
+                            }
+                            break;
+                        }
+                    }
+                }
             std::vector<uint32_t> taken;
             bool imgMoved = false;
             for (const StreamFile &f : files)
             {
+                if (f.format != StreamFile::Format::Vcs && std::find(notVehicles.begin(), notVehicles.end(), f.name) != notVehicles.end())
+                    continue;
                 if (f.name.find('.') != std::string::npos) // a loose file (MAIN.SCM, AMERICAN.GXT): the disc file of that name
                 {
                     uint32_t lsn = 0, bytes = 0, record = 0;
@@ -235,7 +261,7 @@ namespace vcs
                     {
                         const uint32_t entry = kFileTable + i * 16u;
                         char text[64] = {};
-                        std::memcpy(text, rdram + (rd32(rdram, entry) & 0x01FFFFFFu), sizeof(text) - 1);
+                        std::memcpy(text, rdram + (rd32(rdram, entry) & PS2_RAM_MASK), sizeof(text) - 1);
                         std::string disc = text;
                         disc = disc.substr(disc.find_last_of('\\') + 1);
                         disc = disc.substr(0, disc.find(';'));
@@ -283,7 +309,7 @@ namespace vcs
                     for (uint32_t i = 0; items && i < size && i < 4096u && index == kResources; ++i)
                     {
                         char text[21] = {};
-                        std::memcpy(text, rdram + ((items + i * kTxdItem + 8u) & 0x01FFFFFFu), 20);
+                        std::memcpy(text, rdram + ((items + i * kTxdItem + 8u) & PS2_RAM_MASK), 20);
                         const std::string txd = text;
                         if (txd.size() == f.name.size() &&
                             std::equal(txd.begin(), txd.end(), f.name.begin(), [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }))
@@ -296,7 +322,7 @@ namespace vcs
                     for (uint32_t i = 0; i < kResources && index == kResources; ++i)
                     {
                         const uint32_t info = rd32(rdram, modelInfos + i * 4u);
-                        if (info >= 0x100000u && info < 0x02000000u && rd32(rdram, info + 8u) == key)
+                        if (info >= 0x100000u && info < PS2_RAM_SIZE && rd32(rdram, info + 8u) == key)
                             index = i;
                     }
                 }
@@ -383,8 +409,8 @@ namespace vcs
                 }
                 const auto start = std::chrono::steady_clock::now();
                 IPS2DiscImage *disc = ps2_disc::image();
-                const uint32_t dest = request.dest & 0x01FFFFFFu;
-                const uint32_t bytes = std::min<uint32_t>(request.bytes, 0x02000000u - dest);
+                const uint32_t dest = request.dest & PS2_RAM_MASK;
+                const uint32_t bytes = std::min<uint32_t>(request.bytes, PS2_RAM_SIZE - dest);
                 if (request.lsn >= kVirtualLsn) // a mod's larger file: nothing of the disc there
                 {
                     static int logged = 0;

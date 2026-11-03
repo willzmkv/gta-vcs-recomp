@@ -288,6 +288,9 @@ namespace
         uint32_t w = 0, h = 0;
         bool mipChain = false; // anisotropic filtering: buildMipChain there
         std::vector<uint32_t> pixels, mips;
+        // [gta-recomp] a pack DDS made from its stored levels (levels: how many - 1 without anisotropic filtering)
+        std::shared_ptr<const render::ReplacementImage> replacement;
+        uint32_t levels = 1;
         size_t bytes = 0;
         std::unique_ptr<rhi::Texture> made;
         std::atomic<bool> done{false};
@@ -907,7 +910,12 @@ namespace
                     d.name = t.replacement ? "replacement texture" : "gs texture"; // [gta-recomp]
                     d.mipLevels = m_anisotropy ? 0u : 1u; // [gta-recomp] anisotropic filtering samples a mip chain
                     const auto createStart = std::chrono::steady_clock::now(); // [gta-recomp] tex_create_us / tex_kb
-                    if (t.replacement && t.replacement->dds()) // [gta-recomp] a pack DDS: its levels as stored (level 0
+                    if (t.early) // [gta-recomp] made on a helper thread (makeTextureEarly / makeReplacementEarly)
+                    {
+                        t.early->done.wait(false);
+                        m_textures[t.key] = std::move(t.early->made);
+                    }
+                    else if (t.replacement && t.replacement->dds()) // [gta-recomp] a pack DDS: its levels as stored (level 0
                     {                                          // alone without anisotropic filtering, which reads mips)
                         const render::ReplacementImage &r = *t.replacement;
                         const void *levels[16];
@@ -921,11 +929,6 @@ namespace
                     }
                     else if (t.replacement) // [gta-recomp] a pack PNG (decoded on the loader thread); mips by the GPU (d.mipLevels)
                         m_textures[t.key] = m_dev.createTexture(d, t.replacement->pixels.data(), t.w * 4u);
-                    else if (t.early) // [gta-recomp] made on a helper thread (makeTextureEarly): usually done long before
-                    {
-                        t.early->done.wait(false);
-                        m_textures[t.key] = std::move(t.early->made);
-                    }
                     else if (!t.mips.empty()) // [gta-recomp] the chain built on the GS stage: one plain creation (buildMipChain)
                     {
                         const void *levels[16];
@@ -936,7 +939,7 @@ namespace
                     ps2perf::add(ps2perf::Counter::TexCreateUs, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                                                     std::chrono::steady_clock::now() - createStart).count()));
                     ps2perf::add(ps2perf::Counter::TexKBytes,
-                                 ((t.replacement ? t.replacement->gpuBytes(m_anisotropy != 0) : t.early ? t.early->bytes : (t.pixels.size() + t.mips.size()) * 4u) + 1023u) / 1024u);
+                                 ((t.early ? t.early->bytes : t.replacement ? t.replacement->gpuBytes(m_anisotropy != 0) : (t.pixels.size() + t.mips.size()) * 4u) + 1023u) / 1024u);
                     // [gta-recomp] the dump reads RGBA8 texels: a PNG's, or the GS's when they stayed here (not moved to a helper)
                     const std::vector<uint32_t> &texels = t.replacement ? t.replacement->pixels : t.pixels;
                     const uint32_t *pixels = texels.empty() ? nullptr : texels.data();
@@ -4058,6 +4061,11 @@ namespace
                     TexCreate t;
                     t.key = key; t.w = image->width; t.h = image->height;
                     const size_t bytes = image->gpuBytes(m_anisotropy != 0); // [gta-recomp] a DDS's own size (block-compressed)
+                    // [gta-recomp] a DDS is made by the helper threads (makeTextureEarly's): a burst of pack textures - large
+                    // BC7 chains with anisotropic filtering - held the main thread for 4-12 ms (the stutter rig, T10). A PNG
+                    // still gets its chain from the GPU there (GenerateMips: the immediate context).
+                    if (image->dds())
+                        makeReplacementEarly(t, image);
                     t.replacement = std::move(image);
                     m_frame->cmds.push_back({CmdType::TexCreate, uint32_t(m_frame->textures.size())});
                     m_frame->textures.push_back(std::move(t));
@@ -4973,6 +4981,29 @@ namespace
             return true;
         }
 
+        // [gta-recomp] a pack DDS's creation handed to the helpers (makeTextureEarly); false when they do not run
+        bool makeReplacementEarly(TexCreate &tc, const std::shared_ptr<const render::ReplacementImage> &image)
+        {
+            rhi::Device *dev = m_earlyDevice.load(std::memory_order_acquire);
+            if (!dev)
+                return false;
+            auto job = std::make_shared<EarlyTexture>();
+            job->w = tc.w;
+            job->h = tc.h;
+            job->replacement = image;
+            job->levels = m_anisotropy ? 16u : 1u; // level 0 alone without anisotropic filtering, which reads mips
+            tc.early = job;
+            {
+                std::lock_guard<std::mutex> lock(m_makeMutex);
+                if (m_makers.empty())
+                    for (int i = 0; i < 2; ++i)
+                        m_makers.emplace_back([this, dev] { textureMaker(*dev); });
+                m_makeQueue.push_back(std::move(job));
+            }
+            m_makeCv.notify_one();
+            return true;
+        }
+
         void textureMaker(rhi::Device &dev)
         {
             for (;;)
@@ -4991,6 +5022,24 @@ namespace
                 d.height = job->h;
                 d.usage = rhi::UsageSampled;
                 d.name = "gs texture";
+                if (job->replacement) // [gta-recomp] a pack DDS: its stored levels, as the main thread made it before
+                {
+                    const render::ReplacementImage &r = *job->replacement;
+                    const void *levels[16];
+                    const uint32_t n = std::min<uint32_t>(job->levels, std::min<uint32_t>(uint32_t(r.levelOffsets.size()), 16u));
+                    for (uint32_t i = 0; i < n; ++i)
+                        levels[i] = r.levels.data() + r.levelOffsets[i];
+                    d.name = "replacement texture";
+                    d.format = r.format;
+                    job->made = dev.createTextureLevels(d, levels, n);
+                    if (!job->made)
+                        std::fprintf(stderr, "[textures] texture %ux%u (format %u) not made\n", job->w, job->h, unsigned(r.format));
+                    job->bytes = r.gpuBytes(n > 1u);
+                    job->replacement.reset();
+                    job->done.store(true, std::memory_order_release);
+                    job->done.notify_all();
+                    continue;
+                }
                 if (job->mipChain)
                 {
                     buildMipChain(job->pixels, job->w, job->h, job->mips);

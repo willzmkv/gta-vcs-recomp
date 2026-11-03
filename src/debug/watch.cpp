@@ -29,9 +29,9 @@ namespace
         std::string out;
         if (!g_watchRam || !ctx)
             return out;
-        const uint32_t sp = GPR_U32(ctx, 29) & 0x01FFFFFFu;
+        const uint32_t sp = GPR_U32(ctx, 29) & PS2_RAM_MASK;
         int found = 0;
-        for (uint32_t off = 0; off < 0x400u && sp + off + 4u <= 0x02000000u && found < 16; off += 4u)
+        for (uint32_t off = 0; off < 0x400u && sp + off + 4u <= PS2_RAM_SIZE && found < 16; off += 4u)
         {
             uint32_t w;
             std::memcpy(&w, g_watchRam + sp + off, 4);

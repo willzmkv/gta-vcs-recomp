@@ -28,6 +28,8 @@
 #include "game/vcs_input.h"
 #include "game/vcs_volume.h"
 #include "game/vcs_fog.h"
+#include "game/vcs_memory.h"
+#include "game/vcs_world.h"
 #include "mods/modloader.h"
 #include "mods/rwconv.h"
 #include "platform/platform.h"
@@ -675,6 +677,7 @@ namespace
         settings::add(s);
 
         vcs::fog::registerSettings(); // the game's own distance fog: distance / start (game/vcs_fog.h)
+        vcs::memory::registerSettings(); // the streaming heap's size (game/vcs_memory.h)
 
         // The graphics API, when the build has more than one (Windows with VCS_RHI_VULKAN); VCS_RHI=d3d11|vulkan|null
         // chooses for one run (render/presenter.h).
@@ -920,6 +923,8 @@ int main(int argc, char *argv[])
         vcs::input::install(runtime);   // the player's bindings feed the pad (game/vcs_input.h)
         vcs::volume::install(runtime);  // the game's music / effects levels follow the settings (game/vcs_volume.h)
         vcs::fog::install(runtime);     // the fog settings scale the game's fog range (game/vcs_fog.h)
+        vcs::memory::install(runtime);  // the streaming heap in the upper 32 MB when asked (game/vcs_memory.h)
+        vcs::world::install(runtime);   // the world's area streaming (game/vcs_world.h; VCS_TRACE_AREAS=1)
         vcs::gameinfo::install(runtime); // the F3 overlay's game-state panel, the `gameinfo` command (debug/game_info.h)
         // setting <key> [value] -> ok <value>: a setting read or changed (a hidden run never writes vcs.ini)
         ps2control::addCommand("setting", [](const std::string &args, ps2control::Reply reply) {

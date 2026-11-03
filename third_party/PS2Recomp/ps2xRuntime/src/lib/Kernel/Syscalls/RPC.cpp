@@ -392,7 +392,7 @@ namespace ps2_syscalls
         };
         const auto looksLikeSize = [](uint32_t value)
         {
-            return value <= 0x02000000u;
+            return value <= PS2_RAM_SIZE; // [gta-recomp] the RAM's size, not a literal 32 MB
         };
         const auto plausiblePack = [&](uint32_t sendSize,
                                        uint32_t receiveBuffer,

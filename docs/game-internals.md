@@ -1560,6 +1560,46 @@ game's own cars do that after 28); read with headless Ghidra (`tools/eedecomp.py
   76 KB). Larger resources mean fewer at once; when a script forces loads the game cannot meet it spins
   (`LOAD_ALL_MODELS_NOW`). Within the PS2's 32 MB there is no room to grow the streaming heap by much (the main heap
   has 1.5 MB slack): the plan is more EE memory for the port (FORK.md T10).
+- **CStreaming's cap of 51** (read in `FUN_003c7ed8`): before a request it counts the resources on its loaded list
+  (`streaming + 0xD8`); at `0x33` or more it calls `FUN_003c9de8(streaming, 0x83)` (call at `0x3C8030`, return
+  `0x3C8038`), which removes the least used one even when the heap has room. The other caller is `FUN_003c9f10`
+  (return `0x3CA0AC`), the make-room loop: that one is about bytes and stays.
+- **In the port (T10, 2026-11-03).** The host holds 64 MB of EE RAM (`PS2_RAM_SIZE`); the game still sees 32 MB
+  (`GetMemorySize`, the default thread stack top: `PS2_GUEST_RAM_SIZE`), so its own layout is the PS2's. Game >
+  Memory > Streaming memory (`memory.streaming`, `VCS_STREAMING_MB`; src/game/vcs_memory.cpp) replaces `FUN_002e5688`:
+  the streaming heap is built at `0x2000000` (past the PS2's RAM) with 12 / 20 / 30 MB - heap `+0x130` = that base,
+  `+0x12C` = 1 as the original leaves them, then a tail call to `FUN_002bb768` - and the cap of 51 is skipped for the
+  request's caller only (`FUN_003c9de8` with `$ra` = `0x3C8038` returns 0). PS2 (5.4 MB) leaves both alone.
+  Measured with `rig.py memstate` (Vice Point, 30 MB): the main heap's use drops from 24.2 to 18.6 MB (the 5.4 MB it
+  no longer gives), the streaming heap holds ~6 MB (5.5 MB at the PS2's size); the game only keeps what it asks for, so
+  more room shows as more car models in traffic (fewer repeats), not as more world detail - that is the areas (9f).
+
+### 9f. The world's streamed areas (2026-11-03)
+
+Read with `tools/eedecomp.py` (`FUN_0023c820`, `FUN_002415b0`, `FUN_002417d0`, `FUN_0023d740`) and RAM in game, for
+the pop-in while driving (FORK.md T2).
+
+- The level object (`*(0x48F4F8)` = `0x750340`) streams the high-detail geometry of **areas of 3 x 3 hex cells**
+  (cells 125 x 108.25 units) into **four slots** of 0xA0 bytes at `level + 0x2C`, their buffers in
+  `0xCB7A80..0x112A660` (~4.5 MB, inside the main heap: not the streaming heap). `+0x248` is the area being drawn,
+  `+0x250` the next, `+0x258` another (the words after each, `+0x24C` / `+0x254` / `+0x25C`, their pairs).
+- `FUN_0023c820` every frame picks the next area from a predicted point: camera + front x 50 + velocity x 150.
+  `FUN_0023c188` chooses the area for a position.
+- `FUN_002415b0(level, cell x, cell y)` requests an area; `FUN_002417d0(level, piece)` reads one of its pieces
+  asynchronously (`FUN_002213d0`, priority 500), whose callback `FUN_00241440` -> `FUN_00241278` takes the piece and
+  starts the next (`level + 0x270` = 4 while reading). `FUN_00242078` says whether an area is in; `FUN_0023d740`
+  swaps the next area in once the camera is nearer it than the current one.
+- The sectors' draw (`FUN_00240ed8` / `FUN_002409c8`) has no distance LOD: what is in the slots is drawn, the rest of
+  the city is the level's low-detail image. The "70 / FOV" scale in `FUN_003fb610` is the sprites', not a LOD.
+- `VCS_TRACE_AREAS=1` (src/game/vcs_world.cpp) logs every request, piece read / done and swap with its time.
+  Measured on the cruise route (144 km/h over the roofs, the player's mods, 30 MB streaming memory;
+  `build/cruise/t10_areas/game.log`): the request names a new cell every ~2.7 s (one cell per 108 m), and is repeated
+  every frame until the area is in; 107 cell changes, an area in **~20 ms** after its request (p50; p90 200 ms: behind
+  the models' reads), a piece 7 ms (p90 12 ms); the swap comes 1.1 s (p50, p90 2.2 s) after the request - by design,
+  when the camera is nearer the new area. So reading is not what makes the pop-in: the detailed city reaches as far
+  as the areas in the slots cover, the rest is the low-detail image. Further detail needs more slots (their buffers,
+  the chooser) or another source of detail (FORK.md T2). The trace's own logging costs frames (~160 lines a second):
+  not for timing runs.
 
 ## 10. Memory card and saves
 

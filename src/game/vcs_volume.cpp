@@ -145,7 +145,7 @@ namespace vcs::volume
             return;
         uint32_t prefs;
         std::memcpy(&prefs, rdram + kMenuPrefs, 4);
-        prefs &= 0x01FFFFFFu;
+        prefs &= PS2_RAM_MASK;
         if (!prefs)
             return;
         for (Level &l : g_levels)

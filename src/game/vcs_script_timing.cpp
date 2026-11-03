@@ -157,17 +157,17 @@ namespace vcs
         uint32_t read32(const uint8_t *rdram, uint32_t address)
         {
             uint32_t v;
-            std::memcpy(&v, rdram + (address & 0x01FFFFFFu), 4);
+            std::memcpy(&v, rdram + (address & PS2_RAM_MASK), 4);
             return v;
         }
         float readF(const uint8_t *rdram, uint32_t address)
         {
             float v;
-            std::memcpy(&v, rdram + (address & 0x01FFFFFFu), 4);
+            std::memcpy(&v, rdram + (address & PS2_RAM_MASK), 4);
             return v;
         }
-        void write32(uint8_t *rdram, uint32_t address, uint32_t v) { std::memcpy(rdram + (address & 0x01FFFFFFu), &v, 4); }
-        void writeF(uint8_t *rdram, uint32_t address, float v) { std::memcpy(rdram + (address & 0x01FFFFFFu), &v, 4); }
+        void write32(uint8_t *rdram, uint32_t address, uint32_t v) { std::memcpy(rdram + (address & PS2_RAM_MASK), &v, 4); }
+        void writeF(uint8_t *rdram, uint32_t address, float v) { std::memcpy(rdram + (address & PS2_RAM_MASK), &v, 4); }
 
         bool enabled()
         {
@@ -185,7 +185,7 @@ namespace vcs
         Operand decode(const uint8_t *rdram, uint32_t script, uint32_t &ip, uint32_t &address)
         {
             const uint32_t space = read32(rdram, kScriptSpace);
-            const auto byte = [&](uint32_t at) { return rdram[(space + at) & 0x01FFFFFFu]; };
+            const auto byte = [&](uint32_t at) { return rdram[(space + at) & PS2_RAM_MASK]; };
             const auto local = [&](uint32_t n) { return script + kScriptLocals + 4u * (read32(rdram, script + kScriptFrame) + n); };
             Operand o;
             address = 0;
@@ -284,14 +284,14 @@ namespace vcs
             const uint32_t space = read32(rdram, kScriptSpace), start = read32(rdram, kMissionStart);
             uint64_t signature = start;
             for (uint32_t k = 0; k < 64; ++k)
-                signature = signature * 1099511628211ull ^ rdram[(space + start + k) & 0x01FFFFFFu];
+                signature = signature * 1099511628211ull ^ rdram[(space + start + k) & PS2_RAM_MASK];
             if (signature == lastSignature)
                 return;
             lastSignature = signature;
             for (const Site &site : kSites)
             {
                 const uint32_t at = start + site.offset;
-                const uint16_t opcode = static_cast<uint16_t>(rdram[(space + at) & 0x01FFFFFFu] | (rdram[(space + at + 1u) & 0x01FFFFFFu] << 8));
+                const uint16_t opcode = static_cast<uint16_t>(rdram[(space + at) & PS2_RAM_MASK] | (rdram[(space + at + 1u) & PS2_RAM_MASK] << 8));
                 uint32_t ip = at + 2u, dstAt = 0, srcAt = 0;
                 const Operand dst = decode(rdram, script, ip, dstAt);
                 const Operand src = decode(rdram, script, ip, srcAt);
@@ -304,7 +304,7 @@ namespace vcs
         // here with the operand scaled. True when done (the IP is past it, the handler's result set).
         bool scaled(uint8_t *rdram, R5900Context *ctx, Handler handler)
         {
-            if (!rdram[kMissionRunning & 0x01FFFFFFu])
+            if (!rdram[kMissionRunning & PS2_RAM_MASK])
                 return false;
             static const bool check = std::getenv("VCS_SCRIPT_TIMESTEP_CHECK") != nullptr;
             if (check)
@@ -320,7 +320,7 @@ namespace vcs
             if (it == g_byOffset.end())
                 return false;
             const uint32_t space = read32(rdram, kScriptSpace);
-            const uint16_t opcode = static_cast<uint16_t>(rdram[(space + start) & 0x01FFFFFFu] | (rdram[(space + start + 1u) & 0x01FFFFFFu] << 8));
+            const uint16_t opcode = static_cast<uint16_t>(rdram[(space + start) & PS2_RAM_MASK] | (rdram[(space + start + 1u) & PS2_RAM_MASK] << 8));
             uint32_t ip = start + 2u, dstAt = 0, srcAt = 0;
             const Operand dst = decode(rdram, script, ip, dstAt);
             const Operand src = decode(rdram, script, ip, srcAt);

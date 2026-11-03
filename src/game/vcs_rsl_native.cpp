@@ -14,7 +14,7 @@ namespace vcs::rslnative
 {
     namespace
     {
-        constexpr uint32_t kRamMask = 0x01FFFFFFu;
+        constexpr uint32_t kRamMask = PS2_RAM_MASK;
         constexpr uint32_t kFlush = 0x002F8710u;
         constexpr uint32_t kPacketBuffer = 0x520F90u; // +0x14 half, +0x18 cursor, +0x1C down pointer (game-internals.md 6i)
         constexpr uint32_t kHalfBytes = 0xE6670u;

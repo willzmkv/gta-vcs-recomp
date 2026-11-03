@@ -15,7 +15,7 @@
 namespace
 {
     constexpr uint32_t kInflateFast = 0x00184428u;
-    constexpr uint32_t kRamSize = 0x02000000u;
+    constexpr uint32_t kRamSize = PS2_RAM_SIZE;
     constexpr uint32_t kModeType = 11u; // inflate_mode TYPE (BAD = 27, game-internals.md 8)
 
     // z_stream (EE build: 64-bit long) and inflate_state field offsets

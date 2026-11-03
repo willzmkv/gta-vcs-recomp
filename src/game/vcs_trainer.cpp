@@ -25,7 +25,7 @@ namespace vcs::trainer
 {
     namespace
     {
-        constexpr uint32_t kRamMask = 0x01FFFFFFu;
+        constexpr uint32_t kRamMask = PS2_RAM_MASK;
 
         // ---- Game addresses (game-internals.md 11, 12) ------------------------------------------------------------
         constexpr uint32_t kPlayerPed = 0x004E4910u;      // CWorld::Players[0].m_pPed

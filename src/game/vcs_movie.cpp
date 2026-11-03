@@ -357,7 +357,7 @@ namespace vcs
         // replaces CMoviePlayer::Play(path, 0, skipAfterFrames) (0x40D8B8)
         PS2_GUEST_CC void moviePlay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            const std::string path(reinterpret_cast<const char *>(rdram + (GPR_U32(ctx, 4) & 0x01FFFFFFu)));
+            const std::string path(reinterpret_cast<const char *>(rdram + (GPR_U32(ctx, 4) & PS2_RAM_MASK)));
             const uint32_t skipAfter = GPR_U32(ctx, 6);
             if (g_skipIntro.load(std::memory_order_relaxed))
                 std::fprintf(stderr, "[movie] %s skipped (Display > Intro movies)\n", path.c_str());

@@ -906,6 +906,8 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_TEXTURE_REPLACEMENTS=0|1`, `VCS_TEXTURE_PACK=DIR` | optional PCSX2 DDS / PNG pack; path to SLUS-21590 or its replacements directory (`graphics.texture_replacements`, `graphics.texture_pack` in vcs.ini) |
 | `VCS_TEXTURE_CACHE_MB=64..4096`, `VCS_TEXTURE_TRACE=1` | replacement GPU cache budget (512 MiB default; active textures protected for two frames); log computed PCSX2 identities |
 | `VCS_MOD_FILES=0` | the mods' game files (GTA3PS2.IMG entries) not used - the disc's own |
+| `VCS_STREAMING_MB=0|12|20|30` | Game > Memory > Streaming memory for one run: VCS's streaming heap (0: the PS2's 5.4 MB where it was; else that size at 0x2000000, past the PS2's 32 MB, and CStreaming's cap of 51 resources off; game/vcs_memory.cpp, game-internals.md 9e); `rig.py` command `memstate` reports both heaps |
+| `VCS_TRACE_AREAS=1` | the world's area streaming: every area request, piece read / done and swap with its time (game/vcs_world.cpp, game-internals.md 9f) |
 | `VCS_MODLOADER_DIR=DIR`, `VCS_MODS=0|1`, `VCS_TEST_MODS=1` | the mod loader's folder (default `modloader/` beside vcs.exe or in the checkout); Load mods for one run (fixes the switch); a test run with mods and their switches free (test runs load none otherwise) |
 | `VCS_TEXTURE_DUMP=1`, `VCS_TEXTURE_DUMP_DIR=DIR` | every decoded texture once as an uncompressed DDS under its PCSX2 name (default `textures/SLUS-21590/dumps`): what a pack is made from (docs/TEXTURE_PACKS.md) |
 | `PS2X_HW_GATHER=0` / `verify` | bilinear game textures through four loads with the wrap per tap (before 2026-10-30) / both paths, a pixel whose texels differ drawn magenta |

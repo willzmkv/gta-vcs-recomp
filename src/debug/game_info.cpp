@@ -23,7 +23,7 @@ namespace vcs::gameinfo
 {
     namespace
     {
-        constexpr uint32_t kRamMask = 0x01FFFFFFu;
+        constexpr uint32_t kRamMask = PS2_RAM_MASK;
 
         // ---- Game addresses (game-internals.md 4, 11, 12, 12a, 12b) -----------------------------------------------
         constexpr uint32_t kPlayerPed = 0x004E4910u;      // CWorld::Players[0].m_pPed

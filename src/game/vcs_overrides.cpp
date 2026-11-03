@@ -72,7 +72,7 @@ namespace
     // ---- VCS_TRACE_FILES=1: log the game's own file API (CFileMgr-like, 0x220xxx) ----
     const char *guestString(uint8_t *rdram, uint32_t address)
     {
-        return reinterpret_cast<const char *>(rdram + (address & 0x01FFFFFFu));
+        return reinterpret_cast<const char *>(rdram + (address & PS2_RAM_MASK));
     }
 
     PS2_GUEST_CC void traceOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -103,11 +103,11 @@ namespace
     {
         std::fprintf(stderr, "[file] read handle %d buf=0x%08x size=0x%x (ra=0x%08x)\n",
                      static_cast<int32_t>(GPR_U32(ctx, 4)), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 31));
-        const uint32_t buf = GPR_U32(ctx, 5) & 0x01FFFFFFu;
+        const uint32_t buf = GPR_U32(ctx, 5) & PS2_RAM_MASK;
         const uint32_t size = GPR_U32(ctx, 6);
         FUN_00220778_0x220778(rdram, ctx, runtime);
         uint64_t hash = 1469598103934665603ull;
-        for (uint32_t i = 0; i < size && buf + i < 0x02000000u; ++i)
+        for (uint32_t i = 0; i < size && buf + i < PS2_RAM_SIZE; ++i)
             hash = (hash ^ rdram[buf + i]) * 1099511628211ull;
         std::fprintf(stderr, "[file]   -> %d, fnv64=%016llx first=%02x%02x%02x%02x%02x%02x%02x%02x\n",
                      static_cast<int32_t>(GPR_U32(ctx, 2)), static_cast<unsigned long long>(hash),
@@ -118,9 +118,9 @@ namespace
     PS2_GUEST_CC void traceInflate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         // FUN_0021FA38(dst, src, dstCapacity, ?) - zlib inflate of e.g. GAME.DTZ
-        const uint32_t src = GPR_U32(ctx, 5) & 0x01FFFFFFu;
+        const uint32_t src = GPR_U32(ctx, 5) & PS2_RAM_MASK;
         uint64_t hash = 1469598103934665603ull;
-        for (uint32_t i = 0; i < 0x217E70u && src + i < 0x02000000u; ++i)
+        for (uint32_t i = 0; i < 0x217E70u && src + i < PS2_RAM_SIZE; ++i)
             hash = (hash ^ rdram[src + i]) * 1099511628211ull;
         std::fprintf(stderr, "[file] inflate dst=0x%08x src=0x%08x cap=0x%x first=%02x%02x fnv64(0x217e70)=%016llx\n",
                      GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), rdram[src], rdram[src + 1],
@@ -132,9 +132,9 @@ namespace
     PS2_GUEST_CC void traceRelocate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         // FUN_00324A50(header{'GTAG',1,..}, image, flag): relocates a loaded GTAG memory image.
-        const uint32_t image = GPR_U32(ctx, 5) & 0x01FFFFFFu;
+        const uint32_t image = GPR_U32(ctx, 5) & PS2_RAM_MASK;
         uint64_t hash = 1469598103934665603ull;
-        for (uint32_t i = 0; i < 0x6495D0u && image + i < 0x02000000u; ++i)
+        for (uint32_t i = 0; i < 0x6495D0u && image + i < PS2_RAM_SIZE; ++i)
             hash = (hash ^ rdram[image + i]) * 1099511628211ull;
         std::fprintf(stderr, "[file] relocate image=0x%08x fnv64(0x6495d0)=%016llx\n", image,
                      static_cast<unsigned long long>(hash));
@@ -152,19 +152,19 @@ namespace
     PS2_GUEST_CC void traceInflateEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         // inflateEnd(z_stream *strm): strm->next_out (+0x0C) / total_out (+0x14)
-        const uint32_t strm = GPR_U32(ctx, 4) & 0x01FFFFFFu;
+        const uint32_t strm = GPR_U32(ctx, 4) & PS2_RAM_MASK;
         uint32_t totalOut = 0;
         std::memcpy(&totalOut, rdram + strm + 0x14, 4);
-        const uint32_t dst = g_lastInflateDst & 0x01FFFFFFu;
+        const uint32_t dst = g_lastInflateDst & PS2_RAM_MASK;
         uint64_t hash = 1469598103934665603ull;
-        for (uint32_t i = 0; i < totalOut && dst + i < 0x02000000u; ++i)
+        for (uint32_t i = 0; i < totalOut && dst + i < PS2_RAM_SIZE; ++i)
             hash = (hash ^ rdram[dst + i]) * 1099511628211ull;
         std::fprintf(stderr, "[file] inflateEnd total_out=0x%x fnv64=%016llx first=%02x%02x%02x%02x\n", totalOut,
                      static_cast<unsigned long long>(hash), rdram[dst], rdram[dst + 1], rdram[dst + 2], rdram[dst + 3]);
         uint32_t f[8];
         std::memcpy(f, rdram + strm, sizeof(f));
-        const char *msg = f[6] ? reinterpret_cast<const char *>(rdram + (f[6] & 0x01FFFFFFu)) : "(null)";
-        uint32_t state = f[7] & 0x01FFFFFFu, mode = 0;
+        const char *msg = f[6] ? reinterpret_cast<const char *>(rdram + (f[6] & PS2_RAM_MASK)) : "(null)";
+        uint32_t state = f[7] & PS2_RAM_MASK, mode = 0;
         if (state)
             std::memcpy(&mode, rdram + state, 4);
         std::fprintf(stderr, "[file]   next_in=0x%08x avail_in=0x%x total_in=0x%x next_out=0x%08x avail_out=0x%x msg=\"%s\" state.mode=%u\n",
@@ -186,9 +186,9 @@ namespace
     {
         std::fprintf(stderr, "[vcs] abort()/_Exit pc=0x%08x called from ra=0x%08x sp=0x%08x a0=0x%08x\n[vcs] backtrace:",
                      ctx->pc, GPR_U32(ctx, 31), GPR_U32(ctx, 29), GPR_U32(ctx, 4));
-        const uint32_t sp = GPR_U32(ctx, 29) & 0x01FFFFFFu;
+        const uint32_t sp = GPR_U32(ctx, 29) & PS2_RAM_MASK;
         int shown = 0;
-        for (uint32_t a = sp; a < sp + 0x2000u && a + 4u <= 0x02000000u && shown < 24; a += 4u)
+        for (uint32_t a = sp; a < sp + 0x2000u && a + 4u <= PS2_RAM_SIZE && shown < 24; a += 4u)
         {
             uint32_t v = 0;
             std::memcpy(&v, rdram + a, 4);
@@ -367,7 +367,7 @@ namespace
         uint32_t table;
         std::memcpy(&table, rdram + 0x487420u, 4);
         const uint32_t at = table & 0x1FFFFFFFu;
-        if (at >= 0x02000000u || static_cast<uint64_t>(count) * 2u > 0x02000000u - at)
+        if (at >= PS2_RAM_SIZE || static_cast<uint64_t>(count) * 2u > PS2_RAM_SIZE - at)
         {
             g_origModelIndex(rdram, ctx, runtime);
             return;
@@ -414,7 +414,7 @@ namespace
     // the work; false when something is outside main RAM (the original then runs)
     bool collectParams(const uint8_t *ram, uint32_t script, uint32_t ipPtr, int64_t n64, uint32_t outPtr, ParamsResult &r)
     {
-        constexpr uint32_t kRam = 0x02000000u;
+        constexpr uint32_t kRam = PS2_RAM_SIZE;
         uint32_t space;
         std::memcpy(&space, ram + kScriptSpacePtr, 4);
         space &= 0x1FFFFFFFu;
@@ -730,7 +730,7 @@ namespace
     float guestFloat(uint8_t *rdram, uint32_t address)
     {
         float f;
-        std::memcpy(&f, rdram + (address & 0x01FFFFFFu), 4);
+        std::memcpy(&f, rdram + (address & PS2_RAM_MASK), 4);
         return f;
     }
     PS2_GUEST_CC void traceSphereVisible(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -792,8 +792,8 @@ namespace
         static int samples = 0;
         static uint64_t calls = 0, allIn = 0;
         uint32_t r0 = 0, r1 = 0;
-        std::memcpy(&r0, rdram + (out0 & 0x01FFFFFFu), 4);
-        std::memcpy(&r1, rdram + (out1 & 0x01FFFFFFu), 4);
+        std::memcpy(&r0, rdram + (out0 & PS2_RAM_MASK), 4);
+        std::memcpy(&r1, rdram + (out1 & PS2_RAM_MASK), 4);
         ++calls;
         allIn += ((r1 & 0x3Fu) == 0x3Fu || (r0 & 0x3Fu) == 0x3Fu) ? 1u : 0u;
         if (samples < 10 && (calls % 211u) == 0u)
@@ -839,7 +839,7 @@ namespace
         std::snprintf(name, sizeof(name), "ram_%d.bin", at);
         if (FILE *f = std::fopen(name, "wb"))
         {
-            std::fwrite(rdram, 1, 32u * 1024u * 1024u, f);
+            std::fwrite(rdram, 1, PS2_RAM_SIZE, f);
             std::fclose(f);
             std::fprintf(stderr, "[ram] wrote %s\n", name);
         }
@@ -908,13 +908,13 @@ namespace
     PS2_GUEST_CC void traceTeleport(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         float pos[3];
-        std::memcpy(pos, rdram + (GPR_U32(ctx, 5) & 0x01FFFFFFu), sizeof(pos));
+        std::memcpy(pos, rdram + (GPR_U32(ctx, 5) & PS2_RAM_MASK), sizeof(pos));
         char name[9] = {};
         uint32_t ip = 0;
         if (g_currentScript)
         {
-            std::memcpy(name, rdram + ((g_currentScript + 0x20F) & 0x01FFFFFFu), 8);
-            std::memcpy(&ip, rdram + ((g_currentScript + 0x10) & 0x01FFFFFFu), 4);
+            std::memcpy(name, rdram + ((g_currentScript + 0x20F) & PS2_RAM_MASK), 8);
+            std::memcpy(&ip, rdram + ((g_currentScript + 0x10) & PS2_RAM_MASK), 4);
         }
         std::fprintf(stderr, "[teleport] ped %08x -> (%.2f, %.2f, %.2f) ra=%08x last script %s ip %x\n", GPR_U32(ctx, 4), pos[0],
                      pos[1], pos[2], GPR_U32(ctx, 31), name, ip);
@@ -927,7 +927,7 @@ namespace
     // interpreted and the code addresses on the guest stack (the callers).
     void logPedRemoval(uint8_t *rdram, R5900Context *ctx, const char *what)
     {
-        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & 0x01FFFFFFu), 4); return v; };
+        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
         const uint32_t ped = GPR_U32(ctx, 4);
         const uint32_t pool = rd32(0x00487A94u); // CPools ped pool: entries, flags, size
         const uint32_t entries = rd32(pool), flags = rd32(pool + 4u), size = rd32(pool + 8u);
@@ -935,14 +935,14 @@ namespace
             return; // not a ped
         const uint32_t slot = (ped - entries) / 0xD20u;
         float pos[3];
-        std::memcpy(pos, rdram + ((ped + 0x30u) & 0x01FFFFFFu), sizeof(pos));
+        std::memcpy(pos, rdram + ((ped + 0x30u) & PS2_RAM_MASK), sizeof(pos));
         int16_t model = 0;
-        std::memcpy(&model, rdram + ((ped + 0x56u) & 0x01FFFFFFu), 2);
+        std::memcpy(&model, rdram + ((ped + 0x56u) & PS2_RAM_MASK), 2);
         char name[9] = {};
         if (g_currentScript)
-            std::memcpy(name, rdram + ((g_currentScript + 0x20F) & 0x01FFFFFFu), 8);
+            std::memcpy(name, rdram + ((g_currentScript + 0x20F) & PS2_RAM_MASK), 8);
         std::string callers;
-        const uint32_t sp = GPR_U32(ctx, 29) & 0x01FFFFFFu;
+        const uint32_t sp = GPR_U32(ctx, 29) & PS2_RAM_MASK;
         for (uint32_t off = 0, n = 0; off < 0x300u && n < 12u; off += 4u)
         {
             const uint32_t w = rd32(sp + off);
@@ -955,7 +955,7 @@ namespace
             }
         }
         std::fprintf(stderr, "[ped-remove] %s ped %08x handle %04x (%.2f, %.2f, %.2f) model %d created-by %u state %u "
-                     "+1c8 %08x%08x ra=%08x script %s callers%s\n", what, ped, (slot << 8) | rdram[(flags + slot) & 0x01FFFFFFu],
+                     "+1c8 %08x%08x ra=%08x script %s callers%s\n", what, ped, (slot << 8) | rdram[(flags + slot) & PS2_RAM_MASK],
                      pos[0], pos[1], pos[2], model, rd32(ped + 0x8F4u), rd32(ped + 0x8C4u), rd32(ped + 0x1CCu),
                      rd32(ped + 0x1C8u), GPR_U32(ctx, 31), name, callers.c_str());
     }
@@ -977,7 +977,7 @@ namespace
         static uint64_t calls = 0, noSector = 0, noIndex = 0, notLoaded = 0, loaded = 0;
         static auto last = std::chrono::steady_clock::now();
         static std::map<uint32_t, uint32_t> missing; // model index -> count
-        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & 0x01FFFFFFu), 4); return v; };
+        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
         const uint32_t level = GPR_U32(ctx, 4), sector = GPR_U32(ctx, 5);
         ++calls;
         if (!sector)
@@ -985,7 +985,7 @@ namespace
         else
         {
             uint16_t idx = 0;
-            std::memcpy(&idx, rdram + ((sector + 2u) & 0x01FFFFFFu), 2);
+            std::memcpy(&idx, rdram + ((sector + 2u) & PS2_RAM_MASK), 2);
             if (!idx)
                 ++noIndex;
             else if (!rd32(rd32(rd32(level + 0x1Cu)) + idx * 12u))
@@ -1019,7 +1019,7 @@ namespace
     PS2_GUEST_CC void traceCellWalk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         static auto last = std::chrono::steady_clock::now();
-        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & 0x01FFFFFFu), 4); return v; };
+        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
         const uint32_t level = GPR_U32(ctx, 4);
         const auto now = std::chrono::steady_clock::now();
         if (now - last > std::chrono::seconds(2))
@@ -1110,8 +1110,8 @@ namespace
     // with a wheel not in the normal state
     PS2_GUEST_CC void logSkidding(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & 0x01FFFFFFu), 4); return v; };
-        const auto rdf = [&](uint32_t a) { float v = 0; std::memcpy(&v, rdram + (a & 0x01FFFFFFu), 4); return v; };
+        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
+        const auto rdf = [&](uint32_t a) { float v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
         const uint32_t p = GPR_U32(ctx, 5);
         const uint32_t type = rd32(p), veh = rd32(p + 0xC), trans = rd32(p + 0x10);
         const bool two = type == 6 || type == 8;
@@ -1124,9 +1124,9 @@ namespace
         if (veh && veh == mine && (states || calls++ % 60 == 0) && logged++ < 2000)
             std::fprintf(stderr, "[skid] type %u veh %08x dist %.1f trans %08x drive '%c'(0x%02x) vel %.3f ground %u f %.3f states %0*u"
                                  " surface %u maxvel %.3f turnz %.3f this+4c %.1f\n",
-                         type, veh, rdf(p + 8), trans, rdram[(trans + 0x5C) & 0x01FFFFFFu] >= 32 ? rdram[(trans + 0x5C) & 0x01FFFFFFu] : '?',
-                         rdram[(trans + 0x5C) & 0x01FFFFFFu], rdf(p + 0x18), rdram[(veh + base) & 0x01FFFFFFu], rdf(veh + base + 4u),
-                         static_cast<int>(wheels), states, rdram[(veh + 0x137) & 0x01FFFFFFu], rdf(trans + 0x50), rdf(veh + 0x78),
+                         type, veh, rdf(p + 8), trans, rdram[(trans + 0x5C) & PS2_RAM_MASK] >= 32 ? rdram[(trans + 0x5C) & PS2_RAM_MASK] : '?',
+                         rdram[(trans + 0x5C) & PS2_RAM_MASK], rdf(p + 0x18), rdram[(veh + base) & PS2_RAM_MASK], rdf(veh + base + 4u),
+                         static_cast<int>(wheels), states, rdram[(veh + 0x137) & PS2_RAM_MASK], rdf(trans + 0x50), rdf(veh + 0x78),
                          rdf(GPR_U32(ctx, 4) + 0x4C));
         FUN_001ba600_0x1ba600(rdram, ctx, runtime);
     }
@@ -1135,8 +1135,8 @@ namespace
     template <PS2Runtime::RecompiledFunction Original, char Kind>
     PS2_GUEST_CC void logWheelSkid(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & 0x01FFFFFFu), 4); return v; };
-        const auto rdf = [&](uint32_t a) { float v = 0; std::memcpy(&v, rdram + (a & 0x01FFFFFFu), 4); return v; };
+        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
+        const auto rdf = [&](uint32_t a) { float v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
         const uint32_t veh = GPR_U32(ctx, 5);
         static int logged = 0;
         if (veh == rd32(rd32(0x004E4910u) + 0x450u) && logged++ < 400)
@@ -1149,16 +1149,16 @@ namespace
     // player's vehicle
     PS2_GUEST_CC void logCollisionAlt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & 0x01FFFFFFu), 4); return v; };
-        const auto rdf = [&](uint32_t a) { float v = 0; std::memcpy(&v, rdram + (a & 0x01FFFFFFu), 4); return v; };
+        const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
+        const auto rdf = [&](uint32_t a) { float v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
         const uint32_t a = GPR_U32(ctx, 4), b = GPR_U32(ctx, 5), cp = GPR_U32(ctx, 6);
         static int logged = 0;
         if (a == rd32(rd32(0x004E4910u) + 0x450u) && logged++ < 4000)
             std::fprintf(stderr, "[coll] f %u ms %u A %08x B %08x(type %u) p %.3f %.3f %.3f n %.3f %.3f %.3f depth %.3f surf %u/%u"
                                  " v %.4f %.4f %.4f w %.4f %.4f %.4f\n",
                          rd32(0x4CD124u), rd32(0x4CD104u), a, b, rd32(b + 0x48) & 0xEu, rdf(cp), rdf(cp + 4), rdf(cp + 8),
-                         rdf(cp + 0x20), rdf(cp + 0x24), rdf(cp + 0x28), rdf(cp + 0x34), rdram[(cp + 0x30) & 0x01FFFFFFu],
-                         rdram[(cp + 0x32) & 0x01FFFFFFu], rdf(a + 0x140), rdf(a + 0x144), rdf(a + 0x148), rdf(a + 0x70),
+                         rdf(cp + 0x20), rdf(cp + 0x24), rdf(cp + 0x28), rdf(cp + 0x34), rdram[(cp + 0x30) & PS2_RAM_MASK],
+                         rdram[(cp + 0x32) & PS2_RAM_MASK], rdf(a + 0x140), rdf(a + 0x144), rdf(a + 0x148), rdf(a + 0x70),
                          rdf(a + 0x74), rdf(a + 0x78));
         FUN_0034d670_0x34d670(rdram, ctx, runtime);
     }
@@ -1245,8 +1245,8 @@ namespace
                 static PS2_GUEST_CC void function(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
                 {
                     const uint32_t v = 0x3Fu;
-                    std::memcpy(rdram + (GPR_U32(ctx, 6) & 0x01FFFFFFu), &v, 4);
-                    std::memcpy(rdram + (GPR_U32(ctx, 7) & 0x01FFFFFFu), &v, 4);
+                    std::memcpy(rdram + (GPR_U32(ctx, 6) & PS2_RAM_MASK), &v, 4);
+                    std::memcpy(rdram + (GPR_U32(ctx, 7) & PS2_RAM_MASK), &v, 4);
                     ctx->pc = GPR_U32(ctx, 31);
                 }
             };

@@ -17,7 +17,7 @@ namespace vcs::aim
 {
     namespace
     {
-        constexpr uint32_t kRamMask = 0x01FFFFFFu;
+        constexpr uint32_t kRamMask = PS2_RAM_MASK;
         constexpr uint32_t kPlayerPed = 0x004E4910u; // CWorld::Players[0].m_pPed
         // the ped (game-internals.md 12, 12c)
         constexpr uint32_t kPedPos = 0x30u, kPedVehicle = 0x480u, kPedState = 0x8C4u, kPedSlot = 0x789u, kPedWeapons = 0x578u;

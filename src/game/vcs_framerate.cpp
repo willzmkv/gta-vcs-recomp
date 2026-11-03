@@ -118,17 +118,17 @@ namespace vcs
         uint32_t read32(uint8_t *rdram, uint32_t address)
         {
             uint32_t v;
-            std::memcpy(&v, rdram + (address & 0x01FFFFFFu), 4);
+            std::memcpy(&v, rdram + (address & PS2_RAM_MASK), 4);
             return v;
         }
-        void write32(uint8_t *rdram, uint32_t address, uint32_t v) { std::memcpy(rdram + (address & 0x01FFFFFFu), &v, 4); }
+        void write32(uint8_t *rdram, uint32_t address, uint32_t v) { std::memcpy(rdram + (address & PS2_RAM_MASK), &v, 4); }
         float readF(uint8_t *rdram, uint32_t address)
         {
             float f;
-            std::memcpy(&f, rdram + (address & 0x01FFFFFFu), 4);
+            std::memcpy(&f, rdram + (address & PS2_RAM_MASK), 4);
             return f;
         }
-        void writeF(uint8_t *rdram, uint32_t address, float f) { std::memcpy(rdram + (address & 0x01FFFFFFu), &f, 4); }
+        void writeF(uint8_t *rdram, uint32_t address, float f) { std::memcpy(rdram + (address & PS2_RAM_MASK), &f, 4); }
 
         // replaces FUN_00317ac8 (a leaf: lw / addiu / sw / jr)
         PS2_GUEST_CC void countVBlank(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)

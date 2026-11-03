@@ -48,7 +48,8 @@ One task at a time, in this order. T3 is the base for T4-T7.
 | T7 | Sun rays | T3 | Planned | [#7](https://github.com/willzmkv/gta-vcs-recomp/issues/7) |
 | T8 | Presets and player docs (Authentic / Enhanced), release notes | T1-T7 | Planned | [#8](https://github.com/willzmkv/gta-vcs-recomp/issues/8) |
 | T9 | PC `.dff` / `.txd` in mods: convert RW 3 clumps / TXDs to VCS's formats, or draw them natively (research) | T1c, RSL submission | Cars, bikes, boats, helicopters work as they come (67 / 67 checked triangle by triangle); wheels need T10 | [#12](https://github.com/willzmkv/gta-vcs-recomp/issues/12) |
-| T10 | More streaming memory: a larger EE RAM for the port, VCS's streaming heap (5.4 MB) moved into it; then resident models (VC's `wheels.dff`) | - | Research done (game-internals.md 9e) | [#15](https://github.com/willzmkv/gta-vcs-recomp/issues/15) |
+| T10 | More streaming memory: a larger EE RAM for the port, VCS's streaming heap (5.4 MB) moved into it; then resident models (VC's `wheels.dff`) | - | Steps 1-3 done (Game > Memory: up to 30 MB; more car variety); step 4 left | [#15](https://github.com/willzmkv/gta-vcs-recomp/issues/15) |
+| T11 | PC weapon mods (`.dff` / `.txd`): a VC weapon onto VCS's (one element), VCS's HUD icon kept | T9 | Planned | [#16](https://github.com/willzmkv/gta-vcs-recomp/issues/16) |
 
 Backlog (not scheduled): SkyGFX's Xbox rim light / gloss / screen water drops, YCbCr correction, a larger reflection
 map, shadow maps, deferred lights, PBR sky, volumetric clouds, car paint reflections, rain on cars, ragdolls.
@@ -114,7 +115,9 @@ check: a mod replacing one model / one text, seen in game.
 its shortened VCS name), converted by the mod loader while the game loads (docs/MODS.md "PC VC cars in VCS"). Cars,
 bikes, boats and helicopters: every part where VC has it, checked triangle by triangle against the `.dff`, intact and
 damaged (`tools/carmod_verify.py`: 67 / 67 of `Fixed_Xbox_Vehs_1.3`). Left: VC's `wheels.dff` (resident in VCS: T10),
-VC's extras where VCS has no extra slot, and the memory VC's larger models need when many are loaded (T10).
+VC's extras where VCS has no extra slot, and the memory VC's larger models need when many are loaded (T10). Reported by the player (2026-11-03): **seats** - in the converted ADMIRAL the driver sits too far back; VCS's
+seat places are most likely the model info's (GAME.DTZ), not the model's nodes, so they stay the VCS car's: to read
+VC's `ped_frontseat` / `ped_backseat` frames into them, and a side picture of every converted car to find the others.
 
 
 **Plan for route (a), the converter (2026-11-03)** - the player's test mod is `Mods/Fixed_Xbox_Vehs_1.3` (VC PC cars):
@@ -149,6 +152,18 @@ the native renderer's reads), the `0x20000000` / `0x30000000` mirrors kept; (2) 
 streaming heap at `0x2000000` with a larger size (a setting; authentic: 0x567000 where it was); (3) checks: the rig and
 scenes identical at the authentic setting, 30+ converted VC cars spawned without the hang; (4) then resident models:
 VC's `wheels.dff` over VCS's wheel models 320-329 (in GAME.DTZ memory, not GTA3PS2.IMG).
+
+**Status (2026-11-03).** Steps 1-3: the host's EE RAM is 64 MB, the game sees 32 MB (PS2RECOMP_PATCHES.md); every
+`0x01FFFFFF` / `0x02000000` in src/ is `PS2_RAM_MASK` / `PS2_RAM_SIZE`. Game > Memory > Streaming memory (PS2 5.4 MB,
+12, 20, 30 MB; restart) builds the heap at `0x2000000` and lifts CStreaming's cap of 51 resources (game-internals.md
+9e). The player sees more different cars in traffic. The regression rig at the PS2 setting (`build/regress/t10_ps2b`):
+tour, drive, shakedown and controls (64 / 64) pass; the saves check needs the card it was written for (its
+`1 Soldier` save), which the current `build/rig/saves/fortbaxter` copy lacks.
+Costs measured (PERFORMANCE.md 30): the memory itself none; the player's slowdown was the HD pack's images made on the
+main thread (now on the helpers: 207 -> 31 hitches) and the VC cars' many draws (next: an atlas per car). Not what the
+player hoped for: the detailed world does not reach further - that is the level's four area slots (9f), T2's work.
+`VCS_TRACE_AREAS=1` measured it: an area is read in ~20 ms; what it lacks is reach, not speed. Mods that are not vehicles (weapons) are left out until T11: converted as cars they
+drew nothing.
 
 ### T2 - Draw distance (Project2DFX)
 

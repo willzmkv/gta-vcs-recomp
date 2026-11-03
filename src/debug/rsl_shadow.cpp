@@ -20,7 +20,7 @@ namespace vcs::rslshadow
     namespace
     {
         constexpr uint32_t kCursor = 0x520FA8u; // the packet buffer's DMA cursor (game-internals.md 6i)
-        constexpr uint32_t kRamMask = 0x01FFFFFFu;
+        constexpr uint32_t kRamMask = PS2_RAM_MASK;
         constexpr uint32_t kPktLo = 0x520F90u, kPktHi = 0x6EDC70u; // both halves of the packet buffer
         constexpr uint32_t kCellsLo = 0xCB7A80u, kCellsHi = 0x112A660u, kModelsLo = 0x1200000u, kModelsHi = 0x1800000u;
 
@@ -504,7 +504,7 @@ namespace vcs::rslshadow
             {
                 std::fprintf(stderr, "[rsl-shadow] draw %06x a0 %08x dirty %05x: VU %u found at", kFns[r.fn].address, r.a0, s.dirty, q);
                 int hits = 0;
-                for (uint32_t a = 0; a + 16u <= 0x2000000u && hits < 6; a += 16u)
+                for (uint32_t a = 0; a + 16u <= PS2_RAM_SIZE && hits < 6; a += 16u)
                     if (std::memcmp(g_rdram + a, vu + q * 16u, 16) == 0)
                     {
                         std::fprintf(stderr, " %08x", a);
