@@ -92,6 +92,8 @@ namespace vcs::memory
 
     uint32_t extendedUsedEnd() { return g_end.load(std::memory_order_relaxed); }
 
+    int streamingMegabytes() { return g_megabytes.load(std::memory_order_relaxed); }
+
     void registerSettings()
     {
         using settings::Type;

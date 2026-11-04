@@ -1708,6 +1708,19 @@ its lists; `pokef` of the scale below with screenshots).
   `FUN_003a52f8`: the first atomic with `distance < lod[i] * LODDistMultiplier`; GetLargestLodDistance `FUN_003a5380`;
   past it a 20 m fade, the model streamed within +50 m (+30 without fade), beyond 330 m the distance is clamped to
   the largest LOD distance. VC's IDE distances in VCS's data (e.g. model 0x1D1E and 0x18F5 forced to 300).
+- **Rendering the lists, vehicles' classes, the draws' origin** (found 2026-11-04 for DISTANT_LIFE.md A2):
+  `FUN_0035c4b8` walks the four visible lists (entity pointers, 4 bytes each) calling each entry's vtable `+0x40`
+  (PreRender), then the moving list at `0x6F40D0`; the render functions that read the lists are `FUN_0035cd98` /
+  `FUN_0035d308`; `FUN_0035c2c8` empties them. The vtable is at entity `+0x5C`, Render at slot `+0x44`. Vehicle
+  classes by vtable (the pool in a street and a car made by the rig): `0x48F8C0` cars (Sentinel 211, 184, 236, 243,
+  259...; Render `0x14C308`), `0x490F10` (models 191, 212; `0x343F30`), `0x4901C8` the ambient planes (model 280,
+  1-3 km away, no clump; `0x22CF80`), `0x491680` (238, no clump). Every Render ends in **CEntity::Render
+  `FUN_003c3e58`**: entity `+0x50` the RW object (type byte 1 an atomic: its callback `+0x24`; else the clump's
+  render `FUN_0039ec18`). Hooking the class Render (`0x343F30`) saw nothing for the cars - CEntity::Render is where an
+  entity's draws begin. **The draws' world origin**: the renderer keeps positions relative to a cell's centre;
+  `0x6FE980` holds minus that centre (775, 1188.12, 0 with the camera in cell (13, 7)) and the VU1 object matrices are
+  the entity's world matrix plus it (a car at -766, -1208.7 drew with its matrix at 8, -21.1). The VU1 object matrix
+  carries the vertices' dequantisation scale in its rows (2, 4, 1 or 2, 8, 2 seen for car parts).
 - **The multipliers** (CCamera::Process `FUN_00378dd8`, `0x37AF4C..0x37B078`): `LODDistMultiplier` (camera
   `0x6F44D0 + 0x7DC` = **`0x6F4CAC`**) = 70 / FOV first, times `1 + max(0, (z - 55) / 60)` when the camera is above
   55 m (the near plane grows the same way, `FUN_0018f3b0`), at most 2.0; copied to `GenerationDistMultiplier`
@@ -1722,6 +1735,64 @@ its lists; `pokef` of the scale below with screenshots).
   down), **`FUN_002afe80`** (as CPopulation::Update: peds added 35 x .. 60 x gen times `FUN_002b44c8` by
   `FUN_002b17a8`, as AddToPopulation), and `FUN_00219898`, `FUN_002b0200`, `FUN_0036ebf8`, `FUN_003da070`,
   `FUN_003f29d8` (not read yet). It is copied before the scale, so Object distance leaves the population alone.
+- **Pools** (`CPools::Initialise FUN_00288100`): peds 70 (`FUN_00478f28`, 0xD20 bytes each), vehicles 40
+  (`FUN_00478fc0`, 0x8C0), then 0x1DB, 0x14 and 0xC0 for the other pools; each constructor allocates its own entries
+  and flags from the main heap. CPool::New for peds `FUN_004767b0` searches up from the last index (`+0xC`) and wraps,
+  Delete `FUN_00476850` lowers it; GetHandle `FUN_004701b8` = index << 8 | flags, GetAt `FUN_00471788`. Enlarged
+  through the constructors' size (2026-11-04, `VCS_POOLS=peds,vehicles` for a test). **More than 128 peds broke loads**:
+  with a save loaded, 130+ froze within seconds (RpClumpRender `FUN_002c0270` looping on a broken atomic list, the main
+  heap's bytes-in-use negative, an anim block's unload `FUN_00225610` -> `FUN_001cf848` over a garbage count), while a new
+  game ran clean with 280. The cause is the game's own: the world clear before a load / restart (**`FUN_0018f5d0`**)
+  deletes the peds with `for (i = 0; i < pool size; i++) if ((ped = GetAt(pool, i))) delete` - GetAt takes a *handle*, so
+  i is slot 0 with flag byte i. Below 128 that only matches slot 0's 7-bit id in use (the PS2 deletes that ped; the
+  flags are reset after, `FUN_004740b0`); from 128 up it matches slot 0's byte when the slot is **free** (bit 7) and a ped
+  that is not there gets "deleted". Found by elimination: not the heap (7 MB free), not slot use (a host CPool::New that
+  never hands out slots >= 128 still froze), not the size readers (VCS_RWATCH on the pool's size: 23 sites); a new game
+  never clears. The port gives that call (return `0x18F870`) an invalid handle for i >= 128 and builds 280 peds / 200
+  vehicles. No vehicle-size reader calls GetAt with an index. Two checks of the index elsewhere: `FUN_0020c3c8` (< 71)
+  and `FUN_0020c400` (< 70) answer false for higher slots.
+- **Sector entries** (found by an Open Limit Adjuster style audit, `build/analysis/t2_agents/limits.md`): two CPools
+  from the game image (GAME.DTZ, handed out by `FUN_003321f0`), not CPools::Initialise - **EntryInfoNode `*0x487A90`**
+  (5200 x 0x14 {list, ptr node, sector, prev, next}, chained at an entity's +0xE4; New `FUN_00478bf0`, Delete
+  `FUN_00478c88`) and **PtrNode `*0x487A8C`** (40000 x 0xC, New `FUN_004716a8`). The world grid is 50 x 50 cells of 80 m
+  (records of 0x38 at `*0x486464`); CWorld::Add `FUN_00347348`, Move `FUN_00347740`, Remove `FUN_00347660`; nobody checks a
+  full pool. Measured: the city takes ~4810 entries, the crowds at the maximums 5020 (PtrNodes 24.5 k). The port adds an
+  overflow pool of 8000 entries (vcs_distance.cpp).
+- **Peds** (`FUN_002afe80` CPopulation::Update): AddToPopulation **`FUN_002b17a8`(nearest, farthest in view, nearest,
+  farthest out of view)** places a ped (CPopulation::AddPed `FUN_002b2908`, the only creator of random peds; spot finder
+  `FUN_00268048`) - in view 35-60 x GenerationDistMultiplier x a factor (`FUN_002b44c8`), out of view factor x 20 - 10 ..
+  factor x 20 (a fixed 10-20 m). After a camera cut Update counts down `0x4CD3BA` and then `FUN_002b0070` calls it 100
+  times with 10 .. factor x 60 for both. UpdateAnim (`FUN_003c50a8`, CEntity's, vtable +0x48 for every moving entity)
+  always asks peds for the full animation update (`FUN_00154d10(step x 0.02, clump, 1)`); vehicles and objects out of
+  view get the root-only one (`$a1` = 0, `FUN_001552f8`). Vtables (+0x30 ProcessControl / +0x34 ProcessCollision /
+  +0x48 UpdateAnim): random ped `0x490840` (`FUN_002d8788`), player `0x4902a8` (`FUN_00230640`), vehicles `0x4901c8`,
+  `0x490f10`, object `0x48f848`; ProcessCollision `FUN_00348d40` and UpdateAnim shared by all.
+- **CVisibilityPlugins** (VCS's, `FUN_0036ebf8(RwCamera)`, at each render from the frame function): squared
+  distances its render callbacks compare with - `0x4CD5C0` vehicle components culled past 20 m x LODDistMultiplier
+  (1e6 in camera modes 1 / 0x25), `0x4CD5D8` = `0x4CD5CC` peds drawn up to 70 m x LODDistMultiplier (the ped atomic
+  callback `FUN_0036eb70`), vehicles' LOD / fade 60, 70, 90, 100, 150 m x GenerationDistMultiplier (`0x4CD5C8`,
+  `0x4CD5BC`, `0x4CD5D0`, `0x4CD5D4`, `0x4CD5C4`). The camera's position for them: `*(*(camera + 4)) + 0x40` at `0x488E0C`.
+  Peds and vehicles have no other draw distance (SetupEntityVisibility gives them the frustum only).
+- **The frame** (`FUN_0021e950`: CGame::Process `FUN_003ba8d8`, then the render steps `FUN_0021eef0` (render list,
+  pre-render), `FUN_0021efb8` (the entities, the world `FUN_0023e748`, effects), `FUN_0021dad8` (twice)). Timed by
+  call site (`VCS_PHASES=1`, `phases` command) in Downtown with every population slider at 50 (106 peds, 39 vehicles,
+  15.7 ms): CWorld::Process 6.7 ms, `FUN_0021efb8` 3.1, `FUN_0021eef0` 2.2, `FUN_0021dad8` 1.3, the script VM
+  (`FUN_002559c8`) 0.4, CPopulation::Update 0.3, the car generator 0.3; with 42 peds 2.9 / 1.2 / 1.8 / 0.8 ms.
+- **Random traffic** (`FUN_00430148` six tries a frame -> GenerateOneRandomCar **`FUN_00430290`**; measured with entry
+  counters, 2026-11-04). Wanted = the zone's car density x a per-player factor (the product kept at `0x4E4A54`, s16; 18
+  at the Little Haiti street) x the scripts' `0x48A968` x `0x48A680`; then the cap `0x48A9A8` against the sum of the
+  counts `0x48A96C` (random) .. `0x48A984` (`0x48A97C` not in it), main heap >= 0x19000 free, a loaded model
+  (`FUN_00432888`), a node near the spot (`FUN_00268880`), a spot (**`FUN_00267928`**): the point exactly `distance` from
+  the player on a road link crossing that circle, inside the cone along the direction (`cos > c`: 110 x gen ahead, 3
+  frames in 4) or outside it (40 m, the 4th: an offscreen spawn), from a node list it rebuilds every 64 frames
+  (**`FUN_00269228`**: up to 250 nodes in a square of +-310 m around the player, in grid order). Then a road chance:
+  `rand & 15 <= class value` (table **`0x487498`** = 0, 4, 7, 15 by the link's density class) - of ~950 spots found per
+  10 s only ~80 passed; a 10 m clearance (`FUN_00195380`); the car is built; then deleted again unless: out of view
+  (`FUN_003c4318`, the bounding sphere against the frustum: near `0x4CD130` 0.3, far `0x4CD12C` 1000) within **60 m**
+  (90 with extended range) or in view 100-160 x gen from the player and >= 82.5 x gen from the camera, then 20 m of room
+  and moving towards the player. Removal **`FUN_00433378`** (as VC's PossiblyRemoveVehicle): out of view past **60 m**
+  (70 with the camera looking down, x 1.5 extended), in view past 160 x gen. Standing still, 86 % of the new cars went
+  at once; driving about half (the offscreen ones behind).
 
 ## 10. Memory card and saves
 

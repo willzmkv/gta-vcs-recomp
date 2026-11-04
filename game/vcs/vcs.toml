@@ -780,6 +780,15 @@ instructions = [
   { address = "0x003E7958", value = "0x3C010008" },
   { address = "0x003E795C", value = "0xC420FF0C" },
   { address = "0x003E7960", value = "0x00000000" },
+  { address = "0x004301B0", value = "0x2842007F" },
+  { address = "0x00431FC4", value = "0x3C010008" },
+  { address = "0x00431FC8", value = "0xC420FF44" },
+  { address = "0x00431FE8", value = "0x3C010008" },
+  { address = "0x00431FEC", value = "0xC420FF40" },
+  { address = "0x0043351C", value = "0x3C010008" },
+  { address = "0x00433520", value = "0xC422FF40" },
+  { address = "0x00433548", value = "0x3C010008" },
+  { address = "0x0043354C", value = "0xC422FF48" },
 ]
 
 [[jump_tables.table]]

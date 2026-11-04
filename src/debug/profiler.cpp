@@ -45,8 +45,56 @@ namespace vcs
         {
             return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
         }
+        // vcs.exe's function table (.pdata), looked up without RtlLookupFunctionEntry: that one takes the loader's
+        // inverted-function-table lock, which the suspended game thread may hold - the runtime moves control with C++
+        // exceptions, and an unwind in progress holds it - and the sampler then waited for it forever (an LTO build with
+        // VCS_PROFILE_INCLUSIVE froze the game within a minute).
+        struct Pdata
+        {
+            uintptr_t base = 0, end = 0;
+            const RUNTIME_FUNCTION *table = nullptr;
+            size_t count = 0;
+        };
+        const Pdata &mainPdata()
+        {
+            static const Pdata p = [] {
+                Pdata d;
+                const auto *image = reinterpret_cast<const unsigned char *>(GetModuleHandleW(nullptr));
+                const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(image);
+                const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(image + dos->e_lfanew);
+                const IMAGE_DATA_DIRECTORY &dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+                d.base = reinterpret_cast<uintptr_t>(image);
+                d.end = d.base + nt->OptionalHeader.SizeOfImage;
+                d.table = reinterpret_cast<const RUNTIME_FUNCTION *>(image + dir.VirtualAddress);
+                d.count = dir.Size / sizeof(RUNTIME_FUNCTION);
+                return d;
+            }();
+            return p;
+        }
+        PRUNTIME_FUNCTION lookupFunction(DWORD64 pc, DWORD64 *imageBase)
+        {
+            const Pdata &p = mainPdata();
+            *imageBase = p.base;
+            if (pc < p.base || pc >= p.end || !p.count)
+                return nullptr;
+            const DWORD rva = static_cast<DWORD>(pc - p.base);
+            size_t lo = 0, hi = p.count;
+            while (lo < hi)
+            {
+                const size_t mid = (lo + hi) / 2;
+                if (rva < p.table[mid].BeginAddress)
+                    hi = mid;
+                else if (rva >= p.table[mid].EndAddress)
+                    lo = mid + 1;
+                else
+                    return const_cast<PRUNTIME_FUNCTION>(&p.table[mid]);
+            }
+            return nullptr;
+        }
+
         // up to n return addresses of a suspended thread's stack from its context. A fault while unwinding (a thread
-        // caught where its unwind data does not describe the stack yet) ends the walk instead of the process.
+        // caught where its unwind data does not describe the stack yet) ends the walk instead of the process. Only
+        // through vcs.exe's code: a frame in another module (a system DLL) ends the walk.
         int unwindFrames(CONTEXT u, uintptr_t *out, int n)
         {
             int count = 0;
@@ -55,7 +103,9 @@ namespace vcs
                 for (; count < n;)
                 {
                     DWORD64 imageBase = 0;
-                    PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(u.Rip, &imageBase, nullptr);
+                    if (u.Rip < mainPdata().base || u.Rip >= mainPdata().end)
+                        break;
+                    PRUNTIME_FUNCTION fe = lookupFunction(u.Rip, &imageBase);
                     if (!fe)
                     {
                         u.Rip = *reinterpret_cast<const DWORD64 *>(u.Rsp); // a leaf: the return address on top
@@ -230,6 +280,11 @@ namespace vcs
             };
             std::map<std::vector<uintptr_t>, uint64_t> stacks; // frames (innermost first) -> samples
             std::unordered_map<uint32_t, uint64_t> hits;    // guest function -> samples
+            // VCS_PROFILE_INCLUSIVE=1: every guest function on the sampled stack counts once per sample (generated
+            // functions call each other as host functions, so the host stack holds the guest call chain) - the cost of
+            // a subsystem with all it calls
+            static const bool inclusive = std::getenv("VCS_PROFILE_INCLUSIVE") != nullptr;
+            std::unordered_map<uint32_t, uint64_t> inclusiveHits;
             std::unordered_map<uintptr_t, uint64_t> other;  // non-generated host RIP (page) -> samples
             uint64_t total = 0;
             auto lastReport = std::chrono::steady_clock::now();
@@ -273,7 +328,7 @@ namespace vcs
                         continue;
                     uint32_t sampleChain = 0; // (VCS_PROFILE_SPIKES with VCS_PROFILE_CALLERS: its call chain, 1-based)
                     CONTEXT c{};
-                    c.ContextFlags = callersOf.empty() ? CONTEXT_CONTROL : CONTEXT_FULL;
+                    c.ContextFlags = callersOf.empty() && !inclusive ? CONTEXT_CONTROL : CONTEXT_FULL;
                     const bool got = GetThreadContext(h, &c) != 0;
                     const uintptr_t rip = c.Rip;
                     auto it = std::upper_bound(map.begin(), map.end(), rip,
@@ -325,6 +380,26 @@ namespace vcs
                                     found = chainIds.emplace(frames, static_cast<uint32_t>(chainNames.size())).first;
                                 }
                                 sampleChain = found->second;
+                            }
+                        }
+                    }
+                    if (got && inclusive)
+                    {
+                        uintptr_t raw[64];
+                        const int n = unwindFrames(c, raw, 64);
+                        uint32_t seen[65];
+                        int nseen = 0;
+                        for (int i = -1; i < n; ++i)
+                        {
+                            const uintptr_t pc = i < 0 ? rip : raw[i];
+                            auto f = std::upper_bound(map.begin(), map.end(), pc, [](uintptr_t v, const HostFn &fn) { return v < fn.host; });
+                            if (f == map.begin() || f == map.end() || !withinGenerated(std::prev(f)->host, pc))
+                                continue;
+                            const uint32_t guest = std::prev(f)->guest;
+                            if (std::find(seen, seen + nseen, guest) == seen + nseen)
+                            {
+                                seen[nseen++] = guest;
+                                ++inclusiveHits[guest];
                             }
                         }
                     }
@@ -391,6 +466,14 @@ namespace vcs
                              100.0 * guestTotal / total);
                 for (size_t i = 0; i < top.size() && i < 15; ++i)
                     std::fprintf(stderr, "[profile]   %5.1f%%  guest 0x%08x\n", 100.0 * top[i].second / total, top[i].first);
+                if (inclusive && total)
+                {
+                    std::vector<std::pair<uint32_t, uint64_t>> inc(inclusiveHits.begin(), inclusiveHits.end());
+                    std::sort(inc.begin(), inc.end(), [](auto &a, auto &b) { return a.second > b.second; });
+                    for (size_t i = 0; i < inc.size() && i < 60; ++i)
+                        std::fprintf(stderr, "[profile]   %5.1f%%  inclusive guest 0x%08x\n", 100.0 * inc[i].second / total, inc[i].first);
+                    inclusiveHits.clear();
+                }
                 // VCS_PROFILE_GUEST_FILE=<path>: every guest function's samples, appended per report window ("window <s> total
                 // N" then "0xADDR N" lines; s = seconds since the profiler started) - for summing by subsystem offline
                 static const char *guestFile = std::getenv("VCS_PROFILE_GUEST_FILE");

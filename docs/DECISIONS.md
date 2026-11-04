@@ -1149,3 +1149,15 @@ lossless (only shorter strips); textures stay 128 px, 4 or 8 bit like the disc's
   are made and removed as on the PS2. Scaling those distances spreads the same counts over a larger area (emptier
   streets); that step (T2 step 5) raises the counts with it, separately.
 - The city's detail is another mechanism (cells, game-internals.md 9h) and gets its own setting, not this one.
+
+## 2026-11-04 - T2 as a beta; distant traffic drawn, not simulated (FORK.md T2)
+
+- The player's call: the population and distance work goes into the fork as a **beta**, every setting at the game's own
+  value by default and its section marked "(experimental)" - not held back until all of T2 is done. What is left (the
+  extra population's cost, LOD as Project2DFX) goes in follow-up PRs.
+- Dense streets cannot all be simulated at 70 fps (each car / ped runs the PS2's code, ~0.085 ms of the game thread,
+  PERFORMANCE.md 34): beyond the simulated traffic, cars are **drawn, not simulated** (DISTANT_LIFE.md) - proxies on the
+  path network, drawn by repeating a real car's draws in the native renderer (its own models, textures and colours;
+  no converted assets, nothing extra in guest memory).
+- The proxies' cars come from cars the game renders; one car of each model near the camera is added to the vehicles'
+  visible list when it is off screen (its own draws culled natively), so proxies never depend on what is on screen.

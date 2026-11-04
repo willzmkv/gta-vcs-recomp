@@ -40,7 +40,7 @@ One task at a time, in this order. T3 is the base for T4-T7.
 | T1 | Texture replacement: PCSX2-compatible packs, **DDS** first-class, PNG kept | - | **Done** (Vulkan compiled, not run) | [#1](https://github.com/willzmkv/gta-vcs-recomp/issues/1) |
 | T1b | Mod loader (PC Mod Loader's way): `modloader/` folders as mods, `modloader.ini`, F2 > Mods switched live with priority sliders; texture packs as its first content | T1 | **Done** | [#10](https://github.com/willzmkv/gta-vcs-recomp/issues/10) |
 | T1c | Mod loader: VCS's own game files from mods (archive entries `.mdl` / `.xtx` / ..., `MAIN.SCM`, `.GXT`) - the `std.stream` of PC Mod Loader | T1b | **Done** (archive entries and loose files, any size) | [#11](https://github.com/willzmkv/gta-vcs-recomp/issues/11) |
-| T2 | Draw distance (Project2DFX): view distance, object / LOD distance, HD world further, population distance, distant lights | - | Research done (game-internals.md 9h); object distance **done**; HD further, population next | [#2](https://github.com/willzmkv/gta-vcs-recomp/issues/2) |
+| T2 | Draw distance (Project2DFX): view distance, object / LOD distance, HD world further, population distance, distant lights | - | Object distance done (#23); **beta, experimental** (branch task/T2-population): five sliders 0-100 (view, detail, population distance, vehicle / ped density), frame-rate target, distant traffic, pools 280 / 200, crowd fixes - all at the original by default. Left: the extra population's cost (D3D12 backend, instancing, simulation), LOD as Project2DFX (HD world further, distant lights) | [#2](https://github.com/willzmkv/gta-vcs-recomp/issues/2) |
 | T3 | Pre-HUD post-processing pass (colour + depth before the 2D) | - | Planned | [#3](https://github.com/willzmkv/gta-vcs-recomp/issues/3) |
 | T4 | Volumetric height fog (Proper Shaders `[VolumetricFog]`) | T3 | Planned | [#4](https://github.com/willzmkv/gta-vcs-recomp/issues/4) |
 | T5 | SMAA 1x | T3 | Planned | [#5](https://github.com/willzmkv/gta-vcs-recomp/issues/5) |
@@ -50,6 +50,7 @@ One task at a time, in this order. T3 is the base for T4-T7.
 | T9 | PC `.dff` / `.txd` in mods: convert RW 3 clumps / TXDs to VCS's formats, or draw them natively (research) | T1c, RSL submission | Cars, bikes, boats, helicopters work as they come (67 / 67 checked triangle by triangle); wheels need T10 | [#12](https://github.com/willzmkv/gta-vcs-recomp/issues/12) |
 | T10 | More streaming memory: a larger EE RAM for the port, VCS's streaming heap (5.4 MB) moved into it; then resident models (VC's `wheels.dff`) | - | Steps 1-3 done (Game > Memory: up to 30 MB; more car variety); step 4 left | [#15](https://github.com/willzmkv/gta-vcs-recomp/issues/15) |
 | T11 | PC weapon mods (`.dff` / `.txd`): a VC weapon onto VCS's (one element), where VCS holds it, VCS's HUD icon kept | T9 | **Done** (the 10 of `HD Weapons` in Vic's hand where VCS holds its own, VCS's icons) | [#16](https://github.com/willzmkv/gta-vcs-recomp/issues/16) |
+| T12 | One menu: the game's own pause / options menu and the F2 settings menu joined (the final task) | T2, T8 | Planned (the player's request, 2026-11-04) | - |
 
 Backlog (not scheduled): SkyGFX's Xbox rim light / gloss / screen water drops, YCbCr correction, a larger reflection
 map, shadow maps, deferred lights, PBR sky, volumetric clouds, car paint reflections, rain on cars, ragdolls.
@@ -228,6 +229,19 @@ first: the cell chosen ahead of the camera (a recompiler patch of the streaming'
 memory past the PS2's 32 MB, relocated, their lists merged by id as the cross-fade does, matrices moved to the drawn
 cell's origin); then step 5 (the generation multiplier with the car / ped counts raised to keep the density).
 
+**Status (2026-11-04): beta, experimental** - the player's call: what works goes into the build as settings that start
+at the game's own values (Graphics > Distance and population (experimental)), the rest goes on:
+- In: View / Detail / Population distance, Vehicle / Pedestrian density (0 = the original .. 100), the population
+  frame-rate target (densities only), Distant traffic (DISTANT_LIFE.md A1-A2: decorative cars on the path network,
+  drawn on the real cars' models); pools 280 peds / 200 vehicles with Streaming memory above PS2; the >128-ped freeze
+  on load fixed (FUN_0018F5D0's GetAt); an EntryInfoNode overflow pool; peds' off-screen spawn ring scaled with the
+  distance; crowd LOD for far peds (PERFORMANCE.md 34, game-internals.md 9h).
+- Left: (1) the extra population's cost - each car / ped runs the PS2's code (~0.085 ms of the game thread) plus its
+  draws on the main thread (AMD's D3D11 driver is the worst part on the player's PC): a D3D12 backend (the player's
+  choice), then draw instancing, then cheaper simulation (native parallel animation, build/analysis/t2_agents/anim.md);
+  (2) LOD as Project2DFX: the detailed world further than the camera's cell (step 4), distant lights / coronas
+  (step 6, DISTANT_LIFE.md A4), distant traffic's hand-off and fades (A3); (3) a soak at the maximums.
+
 ### T3 - Pre-HUD post-processing pass
 
 **Goal.** A native pass at the point of the frame where the 3D is done and the 2D has not started, with the frame's
@@ -271,6 +285,13 @@ indoors.
 
 Graphics presets (Authentic = every default; Enhanced = the tasks' recommended values), the README's feature list,
 release notes for a fork build.
+
+### T12 - One menu
+
+Asked by the player on 2026-11-04, as the last task: rework the game's own menu (pause menu, its options) and the F2
+settings menu into one, so the port's settings sit where the game's are. Research first: how the frontend menu is built
+(its pages and items in the game's code), whether new pages / items can be added to it or the F2 menu takes its look and
+replaces it, gamepad navigation, and the text (GXT keys) for the new entries.
 
 ## Progress log
 

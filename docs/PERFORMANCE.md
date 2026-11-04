@@ -859,6 +859,23 @@ city's sectors are not entities and cost the same. The cruise (no mods, uncapped
 ~6% at the maximum - more entities through SetupEntityVisibility and drawn (at Vice Point beach the visible list
 grows from 1 to 17-20), and more models streamed (texture uploads the same, 168 a second).
 
+### 34. Dense crowds (T2's population, 2026-11-04)
+
+The player's route (Viceport docks -> Little Havana -> Downtown and back, every population slider at 100, uncapped,
+ThinLTO; `build/analysis/t2_scratch/route_probe.py`) ran Little Havana and Downtown at 33-63 fps: the game thread 15-27 ms,
+the render worker 8-16 ms but ~58 % idle. An inclusive profile (`VCS_PROFILE_INCLUSIVE=1`, new) put CWorld::Process at
+~49 % of the samples: collision ~18 % (CPhysical::ProcessCollision `FUN_00348d40` -> `FUN_0034fd60` ->
+`FUN_002b8ed0`), the random peds' ProcessControl ~16 %, the clump animation update ~8.5 %, the entity render setup ~10 %.
+The simulation is the game's own single-threaded code (ordered collision responses, the allocator, animation callbacks):
+not something to run on several threads as it is.
+- **Crowd LOD** (far random peds every second / third frame, the animation advanced by the frames skipped; the
+  root-only update out of the camera's cone): up to ~10 %, often within the noise - most peds were not far.
+- **The crowd around the player** was the cost: AddToPopulation's ring out of view is a fixed 10-20 m, and with the
+  larger caps it took most of them (92 of 152 within 30 m). Scaled with the population distance: Little Havana
+  124-127 fps (7.2 ms game), Downtown 76 fps (12.2 ms), the rest of the route 124-240 fps.
+- Next, if needed: the clump animation natively and on worker threads (`build/analysis/t2_agents/anim.md`: ~0.8-1.4 ms
+  in the densest frames), PGO for the release.
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker

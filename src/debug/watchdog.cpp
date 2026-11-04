@@ -25,12 +25,13 @@ namespace vcs
             {
                 std::this_thread::sleep_for(period);
                 const EeKernelSnapshot snap = runtime.eeScheduler().snapshot();
-                std::fprintf(stderr, "[watchdog] cycle=%llu (+%llu) running=%d pc=%08x ra=%08x\n",
+                std::fprintf(stderr, "[watchdog] cycle=%llu (+%llu) running=%d pc=%08x ra=%08x sp=%08x\n",
                              static_cast<unsigned long long>(snap.eeCycle),
                              static_cast<unsigned long long>(snap.eeCycle - lastCycle),
                              snap.runningThreadId,
                              runtime.m_debugPc.load(std::memory_order_relaxed),
-                             runtime.m_debugRa.load(std::memory_order_relaxed));
+                             runtime.m_debugRa.load(std::memory_order_relaxed),
+                             runtime.m_debugSp.load(std::memory_order_relaxed));
                 lastCycle = snap.eeCycle;
                 const ps2x::iop::DebugSnapshot iop = runtime.iopDebugSnapshot();
                 std::fprintf(stderr, "[watchdog] iop cycles=%llu instructions=%llu modules=%u threads=%u rpcServers=%u\n",

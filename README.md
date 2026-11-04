@@ -33,10 +33,15 @@ Everything is off or at the game's own values by default; the PS2 picture stays 
 **Graphics**
 - **Fog**: the game's own distance fog range as settings, F2 > Graphics > Fog (fog distance, fog start; 100 % = the
   game's values).
-- **Object distance**: F2 > Graphics > Draw distance > Object distance (100-400 %) draws and streams objects and crowds
-  further, through the game's own LOD scale; traffic and pedestrians stay as on the PS2
-  ([#23](https://github.com/willzmkv/gta-vcs-recomp/pull/23)). The rest of the draw distance work (the detailed world
-  further, population density and distance) is still in progress ([docs/FORK.md](docs/FORK.md), T2).
+- **Distance and population (beta, experimental)**: F2 > Graphics > Distance and population, sliders from 0 (the
+  game's own, the default) to 100: View distance and Detail distance (objects and crowds drawn and detailed up to ten
+  times as far, through the game's own LOD scale), Population distance (cars and people appear and stay up to three
+  times as far), Vehicle density and Pedestrian density (up to four times as many; larger pools with Streaming memory
+  above PS2), a population frame-rate target, and Distant traffic (decorative cars on the road network beyond the
+  simulated traffic, drawn with the real cars' models, as Project2DFX's distant cars)
+  ([#23](https://github.com/willzmkv/gta-vcs-recomp/pull/23), [#25](https://github.com/willzmkv/gta-vcs-recomp/pull/25)).
+  Dense streets still cost frame rate (each car and person runs the PS2's code, and their draws weigh on Direct3D 11);
+  the detailed world further and distant lights are still to come ([docs/FORK.md](docs/FORK.md), T2).
 - **Fire on screen again**: flames from the flame-thrower, molotovs, explosions and burning cars were missing on
   Direct3D 11 while their smoke showed; fixed, and checked by `tools/fire_check.py`
   ([#20](https://github.com/willzmkv/gta-vcs-recomp/pull/20)).

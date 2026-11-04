@@ -1,6 +1,7 @@
 // World and model draws from the RSL draw calls - see game/vcs_rsl_world.h.
 #include "game/vcs_rsl_world.h"
 
+#include "game/vcs_distant.h"
 #include "game/vcs_hle_world.h"
 #include "game/vcs_rsl_native.h"
 #include "ps2_runtime.h"
@@ -94,6 +95,7 @@ namespace vcs::rslworld
             uint32_t refAt = 0, refCount = 0;        // step 5b: its reference ops (the frame's / the table's refs)
             uint32_t prefixRastersAt = 0, prefixRasterCount = 0; // step 5b: raster uploads in its prefix (itemRasters)
             bool continued = false;                  // step 5f: the next item runs right after it (no tag of its own)
+            uint16_t group = 0;                      // DISTANT_LIFE.md A2: the vehicle whose draw it is (vcs_distant)
         };
         // step 5b: a REF the item stands for - its two VIFcodes and the payload in guest RAM, copied at the kick (when the DMA
         // would read it) into the item's VIF bytes at `pos` (the inline bytes before it)
@@ -720,6 +722,7 @@ namespace vcs::rslworld
             for (;; ++index) // step 5f: an item, then the items that continue it
             {
             const Item &it = table->items[index];
+            vcs::distant::workerItem(table->itemFrame, it.group);
             if (it.prefixBytes)
             {
                 t_block = table->arena.data() + it.prefixAt; // step 5b: the uploads in it keep their raster names
@@ -749,6 +752,7 @@ namespace vcs::rslworld
             if (!it.continued || index + 1u >= table->items.size())
                 break;
             }
+            vcs::distant::workerItem(0u, 0u);
             report();
         }
 
@@ -1851,6 +1855,7 @@ namespace vcs::rslworld
             Item &it = merge ? g_itemsCurrent[index] : g_itemsCurrent.emplace_back();
             it.d = {kind == World ? 3u : 5u, addr, kind == World ? (raw1 & 0xFFFFu) : 0u, kind};
             it.hasBlock = true;
+            it.group = vcs::distant::currentGroup();
             if (!merge)
                 it.prefixAt = static_cast<uint32_t>(g_arenaCurrent.size());
             const uint32_t prefixBefore = merge ? it.prefixBytes : 0u;
@@ -2883,6 +2888,7 @@ namespace vcs::rslworld
             checkIm2D(g_rdram);
         }
         g_itemsKicked.swap(g_itemsCurrent); // step 4c (a frame whose chain was not observed loses its items with it)
+        vcs::distant::frameKicked(g_itemFrame);
         g_itemFrameKicked = g_itemFrame++;
         g_caching = false;
         g_materialCaching = false;

@@ -23,6 +23,7 @@
 #include "game/vcs_stream.h"
 #include "game/vcs_aim.h"
 #include "game/vcs_distance.h"
+#include "game/vcs_distant.h"
 #include "game/vcs_freecam.h"
 #include "game/vcs_hud.h"
 #include "game/vcs_rsl_native.h"
@@ -1180,6 +1181,7 @@ namespace
         vcs::freecam::install(runtime);    // the trainer's free camera (game/vcs_freecam.h)
         vcs::aim::install(runtime);        // free aim with the mouse / right stick (game/vcs_aim.h)
         vcs::distance::install(runtime);   // the draw distance settings, around aim's CCamera::Process (game/vcs_distance.h)
+        vcs::distant::install(runtime);    // decorative distant traffic's simulation (game/vcs_distant.h)
         vcs::installFrameRateHooks(runtime); // 30 / 60 fps (game/vcs_framerate.h)
         vcs::installScriptTimingHooks(runtime); // per-frame mission meters on the time step (game/vcs_script_timing.h)
         vcs::installPhysicsTimingHooks(runtime); // per-frame vehicle pushes on the time step (game/vcs_physics_timing.h)

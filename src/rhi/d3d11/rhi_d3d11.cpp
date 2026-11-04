@@ -16,6 +16,7 @@
 #include "imgui_impl_dx11.h"
 
 #include <algorithm>
+#include <iterator>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -598,6 +599,7 @@ namespace rhi
                 // a target may still be bound as a shader input from an earlier pass
                 ID3D11ShaderResourceView *none[8] = {};
                 m_context->PSSetShaderResources(0, 8, none);
+                std::fill(std::begin(m_cache.srv), std::end(m_cache.srv), nullptr);
                 m_context->OMSetRenderTargets(rtv ? 1u : 0u, rtv ? &rtv : nullptr, dsv);
                 if (pass.clearColor && rtv)
                     m_context->ClearRenderTargetView(rtv, pass.clearRgba);
@@ -640,40 +642,89 @@ namespace rhi
             {
                 auto &p = static_cast<D3DPipeline &>(pipeline);
                 m_pipeline = &p;
-                m_context->IASetInputLayout(p.layout.Get());
-                m_context->IASetPrimitiveTopology(p.topology);
-                m_context->VSSetShader(p.vs.Get(), nullptr, 0);
-                m_context->PSSetShader(p.ps.Get(), nullptr, 0);
-                m_context->GSSetShader(nullptr, nullptr, 0);
-                m_context->OMSetBlendState(p.blend.Get(), m_blendConstant, 0xFFFFFFFFu);
-                m_context->OMSetDepthStencilState(p.depth.Get(), 0);
-                m_context->RSSetState(p.raster.Get());
+                if (!stateCacheOn())
+                    m_cache = {};
+                StateCache &c = m_cache;
+                if (c.layout != p.layout.Get())
+                    m_context->IASetInputLayout(c.layout = p.layout.Get());
+                if (c.topology != p.topology)
+                    m_context->IASetPrimitiveTopology(c.topology = p.topology);
+                if (c.vs != p.vs.Get())
+                    m_context->VSSetShader(c.vs = p.vs.Get(), nullptr, 0);
+                if (c.ps != p.ps.Get())
+                    m_context->PSSetShader(c.ps = p.ps.Get(), nullptr, 0);
+                if (!c.gsCleared)
+                {
+                    m_context->GSSetShader(nullptr, nullptr, 0);
+                    c.gsCleared = true;
+                }
+                if (c.blend != p.blend.Get() || std::memcmp(c.blendConstant, m_blendConstant, sizeof(m_blendConstant)) != 0)
+                {
+                    m_context->OMSetBlendState(c.blend = p.blend.Get(), m_blendConstant, 0xFFFFFFFFu);
+                    std::memcpy(c.blendConstant, m_blendConstant, sizeof(m_blendConstant));
+                }
+                if (c.depth != p.depth.Get())
+                    m_context->OMSetDepthStencilState(c.depth = p.depth.Get(), 0);
+                if (c.raster != p.raster.Get())
+                    m_context->RSSetState(c.raster = p.raster.Get());
             }
 
             void setVertexBuffer(Buffer &buffer, uint32_t offset) override
             {
                 ID3D11Buffer *b = static_cast<D3DBuffer &>(buffer).buffer.Get();
                 const UINT stride = m_pipeline ? m_pipeline->stride : 0u;
+                if (!stateCacheOn())
+                    m_cache = {};
+                StateCache &c = m_cache;
+                if (c.vb == b && c.vbStride == stride && c.vbOffset == offset)
+                    return;
+                c.vb = b;
+                c.vbStride = stride;
+                c.vbOffset = offset;
                 m_context->IASetVertexBuffers(0, 1, &b, &stride, &offset);
             }
 
             void setIndexBuffer(Buffer &buffer, bool uint32Indices) override
             {
-                m_context->IASetIndexBuffer(static_cast<D3DBuffer &>(buffer).buffer.Get(),
-                                            uint32Indices ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+                ID3D11Buffer *b = static_cast<D3DBuffer &>(buffer).buffer.Get();
+                const DXGI_FORMAT format = uint32Indices ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
+                if (!stateCacheOn())
+                    m_cache = {};
+                if (m_cache.ib == b && m_cache.ibFormat == format)
+                    return;
+                m_cache.ib = b;
+                m_cache.ibFormat = format;
+                m_context->IASetIndexBuffer(b, format, 0);
             }
 
             void setTexture(uint32_t slot, Texture *texture, Sampler *sampler) override
             {
                 ID3D11ShaderResourceView *srv = texture ? static_cast<D3DTexture *>(texture)->srv.Get() : nullptr;
                 ID3D11SamplerState *s = sampler ? static_cast<D3DSampler *>(sampler)->state.Get() : nullptr;
-                m_context->PSSetShaderResources(slot, 1, &srv);
-                m_context->PSSetSamplers(slot, 1, &s);
+                const bool cached = slot < StateCache::kSlots && stateCacheOn();
+                if (!cached || m_cache.srv[slot] != srv)
+                {
+                    m_context->PSSetShaderResources(slot, 1, &srv);
+                    if (cached)
+                        m_cache.srv[slot] = srv;
+                }
+                if (!cached || m_cache.sampler[slot] != s)
+                {
+                    m_context->PSSetSamplers(slot, 1, &s);
+                    if (cached)
+                        m_cache.sampler[slot] = s;
+                }
             }
 
             void setConstants(uint32_t slot, Buffer &buffer) override
             {
                 ID3D11Buffer *b = static_cast<D3DBuffer &>(buffer).buffer.Get();
+                if (!stateCacheOn())
+                    m_cache = {};
+                if (slot < StateCache::kSlots && m_cache.cb[slot] == b)
+                    return; // a WRITE_DISCARD map keeps the binding (the runtime renames the buffer behind it)
+                if (slot < StateCache::kSlots)
+                    m_cache.cb[slot] = b;
                 m_context->VSSetConstantBuffers(slot, 1, &b);
                 m_context->PSSetConstantBuffers(slot, 1, &b);
             }
@@ -737,6 +788,7 @@ namespace rhi
                                  static_cast<unsigned>(m_device->GetDeviceRemovedReason()));
                 }
                 m_pipeline = nullptr; // flip model unbinds the back buffer; state is set again next frame
+                m_cache = {};
                 if (gpuTiming())
                     m_timer.endFrame(*this);
             }
@@ -760,6 +812,7 @@ namespace rhi
                 if (m_ui && imDrawData)
                     ImGui_ImplDX11_RenderDrawData(static_cast<ImDrawData *>(imDrawData));
                 m_pipeline = nullptr; // the backend changed the state
+                m_cache = {};
             }
 
             void uiShutdown() override
@@ -908,6 +961,47 @@ namespace rhi
             std::string m_adapterName;
             D3DPipeline *m_pipeline = nullptr;
             float m_blendConstant[4] = {0, 0, 0, 0};
+            // The state last given to the context: a draw's pipeline, buffers, textures and constants reach the driver only
+            // when they change (AMD's D3D11 driver costs ~4-5 us a draw on the main thread, ~16 calls each; most of a
+            // frame's draws repeat the previous one's state). Reset where something else sets state: the present (flip
+            // model), Dear ImGui, a pass's start (its shader inputs).
+            struct StateCache
+            {
+                static constexpr uint32_t kSlots = 8;
+                ID3D11InputLayout *layout = nullptr;
+                D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+                ID3D11VertexShader *vs = nullptr;
+                ID3D11PixelShader *ps = nullptr;
+                bool gsCleared = false;
+                ID3D11BlendState *blend = unknown<ID3D11BlendState>();
+                float blendConstant[4] = {-1, -1, -1, -1};
+                ID3D11DepthStencilState *depth = unknown<ID3D11DepthStencilState>();
+                ID3D11RasterizerState *raster = unknown<ID3D11RasterizerState>();
+                ID3D11Buffer *vb = unknown<ID3D11Buffer>();
+                UINT vbStride = 0, vbOffset = 0;
+                ID3D11Buffer *ib = unknown<ID3D11Buffer>();
+                DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
+                ID3D11Buffer *cb[kSlots];
+                ID3D11ShaderResourceView *srv[kSlots];
+                ID3D11SamplerState *sampler[kSlots];
+                template <typename T>
+                static T *unknown() { return reinterpret_cast<T *>(~uintptr_t(0)); } // never a real object: set it the first time
+                StateCache()
+                {
+                    for (uint32_t i = 0; i < kSlots; ++i)
+                    {
+                        cb[i] = unknown<ID3D11Buffer>();
+                        srv[i] = unknown<ID3D11ShaderResourceView>();
+                        sampler[i] = unknown<ID3D11SamplerState>();
+                    }
+                }
+            } m_cache;
+            // VCS_D3D11_STATE_CACHE=0: every call reaches the driver (the cache's reference)
+            static bool stateCacheOn()
+            {
+                static const bool on = !(std::getenv("VCS_D3D11_STATE_CACHE") && std::getenv("VCS_D3D11_STATE_CACHE")[0] == '0');
+                return on;
+            }
             std::unordered_map<const void *, ComPtr<ID3D11VertexShader>> m_vertexShaders; // by bytecode
             std::unordered_map<const void *, ComPtr<ID3D11PixelShader>> m_pixelShaders;
             bool m_passMarker = false;

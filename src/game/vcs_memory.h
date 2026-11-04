@@ -20,4 +20,7 @@ namespace vcs::memory
     // the port beyond it (resident model replacements, T10 step 4). 0 when the game's heap is used.
     constexpr uint32_t kExtendedBase = 0x02000000u;
     uint32_t extendedUsedEnd();
+    // The Streaming memory setting in MB (0: the PS2's heap, inside the main heap). Above 0 the main heap keeps the PS2's
+    // 5.4 MB, which the larger pools use (game/vcs_distance.cpp).
+    int streamingMegabytes();
 }

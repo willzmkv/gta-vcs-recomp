@@ -213,3 +213,44 @@ value = "0xC420FF0C"
 [[patches]]
 address = "0x003E7960"
 value = "0x00000000"
+
+# FUN_00430148 (as VC's CCarCtrl::GenerateRandomCars) tries six new random cars a frame only while NumRandomCars
+# (0x48A96C) is below 30 (`slti $v0, $v0, 0x1E` at 0x4301B0) - a limit the PS2's own caps never reach (MaxNumberOfCarsInUse
+# 0x48A9A8 is 16; GenerateOneRandomCar FUN_00430290 compares with it and the zone's density). The traffic settings raise
+# those caps (src/game/vcs_distance.cpp, game-internals.md 9h); 127 lets them decide. At the game's own caps nothing changes.
+[[patches]]
+address = "0x004301B0"
+value = "0x2842007F"
+
+# Offscreen vehicles near the player (T2, Traffic and pedestrian distance). GenerateOneRandomCar FUN_00430290 deletes a
+# new car out of view farther than 60 m from the player (90 m with an extended range: `lui $at, 0x4270` at 0x431FE8,
+# `0x42B4` at 0x431FC4), and the removal FUN_00433378 (as VC's PossiblyRemoveVehicle) takes away offscreen cars past
+# 60 m (`lui $at, 0x4270` at 0x43351C; 70 with the camera looking down, `0x428C` at 0x433548) - in view the limits are
+# 100-160 x GenerationDistMultiplier, which the setting scales. Each `lui $at, hi; mtc1 $at, $fN` becomes `lui $at, 0x8;
+# lwc1 $fN, -0x100 + off($at)`: read from guest RAM 0x7FF40 (60), 0x7FF44 (90), 0x7FF48 (70), which
+# src/game/vcs_distance.cpp writes before every call of the two (the game's value times the population distance; the
+# game's own at 100 %). $at is set again before any read after each pair.
+[[patches]]
+address = "0x00431FC4"
+value = "0x3C010008"
+[[patches]]
+address = "0x00431FC8"
+value = "0xC420FF44"
+[[patches]]
+address = "0x00431FE8"
+value = "0x3C010008"
+[[patches]]
+address = "0x00431FEC"
+value = "0xC420FF40"
+[[patches]]
+address = "0x0043351C"
+value = "0x3C010008"
+[[patches]]
+address = "0x00433520"
+value = "0xC422FF40"
+[[patches]]
+address = "0x00433548"
+value = "0x3C010008"
+[[patches]]
+address = "0x0043354C"
+value = "0xC422FF48"

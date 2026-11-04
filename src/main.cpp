@@ -29,6 +29,7 @@
 #include "game/vcs_volume.h"
 #include "game/vcs_fog.h"
 #include "game/vcs_distance.h"
+#include "game/vcs_distant.h"
 #include "game/vcs_memory.h"
 #include "game/vcs_world.h"
 #include "mods/modloader.h"
@@ -679,6 +680,7 @@ namespace
 
         vcs::fog::registerSettings(); // the game's own distance fog: distance / start (game/vcs_fog.h)
         vcs::distance::registerSettings(); // the objects' draw distance (game/vcs_distance.h)
+        vcs::distant::registerSettings();  // decorative distant traffic (game/vcs_distant.h)
         vcs::memory::registerSettings(); // the streaming heap's size (game/vcs_memory.h)
 
         // The graphics API, when the build has more than one (Windows with VCS_RHI_VULKAN); VCS_RHI=d3d11|vulkan|null

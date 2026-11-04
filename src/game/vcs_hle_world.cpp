@@ -15,9 +15,11 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_draw_source.h"
 #include "debug/rsl_shadow.h"
+#include "game/vcs_distant.h"
 #include "game/vcs_hle_world.h"
 
 #include <algorithm>
+#include <atomic>
 #include <immintrin.h>
 #include <chrono>
 #include <cfenv>
@@ -2144,7 +2146,138 @@ namespace
 
     NativeStats g_nativeLit, g_nativeRigid;
 
-    bool drawNativeRigid(const ps2hle::MscalContext &c)
+    // DISTANT_LIFE.md A2: a template's draw (a far vehicle's, vcs_distant) once more for each distant proxy given to it - the
+    // object matrix a' = a x inv(car) x proxy (a part keeps its place on the car), the rest of the setup made as 0x04d8
+    // makes it (24-27, 28-31), the lights turned as 0x2bf0's setup turns them into the object's space; the same mesh (cached
+    // by its key), GS state and colours. Culled by the mesh's box. Not the VU's numbers (nothing compares them).
+    uint64_t g_proxyDraws = 0, g_proxyCulled = 0, g_proxyNotOnCar = 0;
+
+    void drawProxies(const uint8_t *vu, uint64_t prim, const GSNativeDraw &d, uint32_t posBase, uint32_t count,
+                     const vcs::distant::Proxies &px)
+    {
+        Vec4 a[4];
+        for (uint32_t i = 0; i < 4; ++i)
+            a[i] = loadF(vu, i);
+        // the part on the car: a x inv(car)
+        float local[4][3];
+        for (int i = 0; i < 4; ++i)
+        {
+            const float w = i == 3 ? 1.0f : 0.0f;
+            for (int k = 0; k < 3; ++k)
+                local[i][k] = a[i].v[0] * px.inverse[k] + a[i].v[1] * px.inverse[4 + k] + a[i].v[2] * px.inverse[8 + k] +
+                              w * px.inverse[12 + k];
+        }
+        if (local[3][0] * local[3][0] + local[3][1] * local[3][1] + local[3][2] * local[3][2] > 12.0f * 12.0f)
+        {
+            ++g_proxyNotOnCar; // a draw made after the car's (an effect, another entity's alpha pass): not the car's
+            vcs::distant::noteProxy(2);
+            return;
+        }
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const Vec4 v = itof(loadI(vu, posBase + i));
+            for (int k = 0; k < 3; ++k)
+            {
+                lo[k] = std::min(lo[k], v.v[k]);
+                hi[k] = std::max(hi[k], v.v[k]);
+            }
+        }
+        const auto unit = [](const Vec4 &r, float o[3]) {
+            const float l = std::sqrt(r.v[0] * r.v[0] + r.v[1] * r.v[1] + r.v[2] * r.v[2]);
+            const float inv = l > 0.0f ? 1.0f / l : 0.0f;
+            for (int k = 0; k < 3; ++k)
+                o[k] = r.v[k] * inv;
+        };
+        float ra[3][3];
+        for (int i = 0; i < 3; ++i)
+            unit(a[i], ra[i]);
+        // the part's size in metres (the box's diagonal; a's rows carry the vertices' scale): a part smaller than ~6
+        // pixels of a 1080-line picture is not drawn (wheels, lights, trim of cars hundreds of metres away)
+        float size2 = 0.0f;
+        for (int k = 0; k < 3; ++k)
+        {
+            const float l = std::sqrt(a[k].v[0] * a[k].v[0] + a[k].v[1] * a[k].v[1] + a[k].v[2] * a[k].v[2]) * (hi[k] - lo[k]);
+            size2 += l * l;
+        }
+        const float size = std::sqrt(size2);
+        Vec4 centre;
+        for (int k = 0; k < 3; ++k)
+            centre.v[k] = 0.5f * (lo[k] + hi[k]);
+        centre.v[3] = 1.0f;
+        static thread_local uint8_t tmp[64 * 16];
+        std::memcpy(tmp, vu, sizeof(tmp));
+        GSNativeDraw e = d;
+        float *k = e.constants;
+        for (uint32_t n = 0; n < px.count; ++n)
+        {
+            const float *P = px.matrices + size_t(n) * 16u;
+            Vec4 b[4];
+            for (int i = 0; i < 4; ++i)
+            {
+                b[i] = a[i]; // (w as the game wrote it)
+                for (int c = 0; c < 3; ++c)
+                    b[i].v[c] = local[i][0] * P[c] + local[i][1] * P[4 + c] + local[i][2] * P[8 + c] + (i == 3 ? P[12 + c] : 0.0f);
+                storeF(tmp, i, b[i]);
+            }
+            setupMatrices(tmp, 0, 16, 12, 24);
+            Vec4 cm[4], m[4];
+            foldMatrix(tmp, 24, cm);
+            if (size < 0.008f * transform(cm, centre).v[3])
+            {
+                vcs::distant::noteProxy(1);
+                continue;
+            }
+            uint32_t all = 0x3Fu;
+            for (int corner = 0; corner < 8 && all; ++corner)
+            {
+                Vec4 v;
+                v.v[0] = corner & 1 ? hi[0] : lo[0];
+                v.v[1] = corner & 2 ? hi[1] : lo[1];
+                v.v[2] = corner & 4 ? hi[2] : lo[2];
+                v.v[3] = 1.0f;
+                const Vec4 q = transform(cm, v);
+                all &= clipFlags(q, q.v[3]);
+            }
+            if (all)
+            {
+                ++g_proxyCulled;
+                vcs::distant::noteProxy(1);
+                continue;
+            }
+            foldMatrix(tmp, 28, m);
+            for (int r = 0; r < 4; ++r)
+            {
+                putRow(k + r * 4, m[r]);
+                putRow(k + 32 + r * 4, cm[r]);
+            }
+            // the lights in the object's space: R' x R^T x dir (rows x / y / z of the four lights)
+            float rb[3][3];
+            for (int i = 0; i < 3; ++i)
+                unit(b[i], rb[i]);
+            float q[3][3];
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    q[i][j] = rb[i][0] * ra[j][0] + rb[i][1] * ra[j][1] + rb[i][2] * ra[j][2];
+            for (int i = 0; i < 3; ++i)
+                for (int lane = 0; lane < 4; ++lane)
+                    k[48 + i * 4 + lane] = q[i][0] * d.constants[48 + lane] + q[i][1] * d.constants[52 + lane] + q[i][2] * d.constants[56 + lane];
+            static const bool tint = std::getenv("VCS_DISTANT_TINT") != nullptr; // debug: proxies lit red alone
+            if (tint)
+            {
+                std::fill(k + 60, k + 76, 0.0f);
+                k[76] = 1.0f;
+                k[77] = k[78] = 0.0f;
+            }
+            if (!ps2hle::gs()->submitNative(prim, e))
+                return;
+            ++g_proxyDraws;
+            vcs::distant::noteProxy(0);
+        }
+    }
+
+    // proxiesOnly: the draw is culled or drawn by another path (the env pipeline's clipper) - only its proxies
+    bool drawNativeRigid(const ps2hle::MscalContext &c, bool proxiesOnly = false)
     {
         uint8_t *vu = c.vuData;
         const IVec4 i47 = loadI(vu, 47), i48 = loadI(vu, 48);
@@ -2155,11 +2288,18 @@ namespace
         const uint32_t count = static_cast<uint32_t>(header.v[2]);
         if (count == 0u || count > 256u)
             return false;
-        ++g_nativeRigid.packets;
+        vcs::distant::Proxies px;
+        const bool proxies = vcs::distant::workerProxies(px);
+        if (proxiesOnly && !proxies)
+            return true;
+        if (!proxiesOnly)
+            ++g_nativeRigid.packets;
         Vec4 cm[4];
         foldMatrix(vu, 24, cm);
         uint32_t any = 0, all = 0;
-        if ((loadI(vu, 52).v[0] & 0xFFFF) == 0xE9)
+        if (proxiesOnly)
+            all = 1u;
+        else if ((loadI(vu, 52).v[0] & 0xFFFF) == 0xE9)
         {
             const Vec4 guard = loadF(vu, 65);
             all = 0xFFFu;
@@ -2174,7 +2314,7 @@ namespace
                 all &= f;
             }
         }
-        if (all != 0u)
+        if (all != 0u && !proxies)
         {
             ++g_nativeRigid.culled;
             return true;
@@ -2231,6 +2371,14 @@ namespace
         d.constantCount = 88;
         const IVec4 tag = loadI(vu, 49);
         const uint64_t tagLo = uint64_t(uint32_t(tag.v[0])) | (uint64_t(uint32_t(tag.v[1])) << 32);
+        if (proxies)
+            drawProxies(vu, (tagLo >> 47) & 0x7FFu, d, posBase, count, px);
+        if (all != 0u)
+        {
+            if (!proxiesOnly)
+                ++g_nativeRigid.culled;
+            return true;
+        }
         if (!ps2hle::gs()->submitNative((tagLo >> 47) & 0x7FFu, d))
         {
             ++g_nativeRigid.fallback;
@@ -2344,12 +2492,14 @@ namespace
         clipTest(vu, posBase, count, any, all);
         if (all != 0u)
         {
+            drawNativeRigid(c, true); // DISTANT_LIFE.md A2: a template's proxies still drawn
             ++g_nativeEnv.culled;
             return true;
         }
         static thread_local std::vector<std::vector<uint8_t>> kicks;
         if ((any & 0xFC0u) != 0u)
         {
+            drawNativeRigid(c, true);
             // through the clipper: both passes as the VU's kicks (envClipKicks), VU memory written as the VU writes it
             static thread_local std::vector<uint8_t> saved;
             saved.assign(vu, vu + kQwords * 16u);
