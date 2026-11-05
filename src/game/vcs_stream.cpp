@@ -440,15 +440,22 @@ namespace vcs
         void overlay(uint32_t lsn, uint32_t bytes, uint8_t *dest)
         {
             std::lock_guard<std::mutex> lock(g_filesMutex);
+            if (g_overlays.empty())
+                return;
             const uint64_t start = uint64_t(lsn) * 2048u, end = start + bytes;
             for (const Overlay &o : g_overlays)
             {
                 const uint64_t from = std::max<uint64_t>(start, uint64_t(o.lsn) * 2048u);
                 const uint64_t to = std::min<uint64_t>(end, (uint64_t(o.lsn) + o.sectors) * 2048u);
-                for (uint64_t at = from; at < to; ++at)
+                if (from < to)
                 {
-                    const uint64_t inEntry = at - uint64_t(o.lsn) * 2048u;
-                    dest[at - start] = inEntry < o.data.size() ? o.data[static_cast<size_t>(inEntry)] : 0u;
+                    const uint64_t inEntry = from - uint64_t(o.lsn) * 2048u;
+                    const uint64_t span = to - from;
+                    const uint64_t copyBytes = inEntry < o.data.size() ? std::min(span, o.data.size() - inEntry) : 0u;
+                    if (copyBytes > 0)
+                        std::memcpy(dest + (from - start), o.data.data() + inEntry, static_cast<size_t>(copyBytes));
+                    if (span > copyBytes)
+                        std::memset(dest + (from - start) + copyBytes, 0, static_cast<size_t>(span - copyBytes));
                 }
             }
         }

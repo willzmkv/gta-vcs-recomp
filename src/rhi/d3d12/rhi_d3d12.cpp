@@ -1592,13 +1592,17 @@ namespace rhi
                     ++t_spans.textures;
                     ID3D12Device *dev = m_core->device.Get();
                     // placed when it is a plain sampled texture whose contents come by a copy (placed memory starts
-                    // undefined): 4 KB alignment for the small ones, else 64 KB
+                    // undefined): 4 KB alignment for the small ones (<= 64 KB top mip per D3D12 spec), else 64 KB
                     if (copied && !(rd.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) &&
                         t->samples == 1u)
                     {
-                        rd.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+                        const UINT64 topMipBytes = static_cast<UINT64>(rowBytes(desc.format, w)) * rowCount(desc.format, h);
+                        if (topMipBytes <= 65536ull)
+                            rd.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+                        else
+                            rd.Alignment = 0;
                         D3D12_RESOURCE_ALLOCATION_INFO info = dev->GetResourceAllocationInfo(0, 1, &rd);
-                        if (info.Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT)
+                        if (rd.Alignment != 0 && info.Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT)
                         {
                             rd.Alignment = 0;
                             info = dev->GetResourceAllocationInfo(0, 1, &rd);

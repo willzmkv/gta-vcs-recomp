@@ -197,3 +197,35 @@ All three steps above are implemented and verified in `src/game/vcs_distance.h`,
   SET_GPR_U32(ctx, 8, static_cast<uint32_t>(origAlpha * fade));
   ```
   The near-camera perspective singularity (`1 / dot` approaching infinity) is algebraically cancelled out, preventing coronas from blowing up across the screen when passing streetlamps or cars.
+
+
+### Anti-Pattern 4: Testing Model-View Matrix (.v[3]) instead of MVP Matrix (.v[3]) for Proxy Distance & Frustum Culling
+- **Failure Mode**: In drawProxies and drawLitProxies (src/game/vcs_hle_world.cpp), size culling tested size < 0.008f * transform(cm, centre).v[3] and frustum culling tested clipFlags(q, q.v[3]) using cm (VU row 24).
+- **Root Cause**: setupMatrices(tmp, 0, 16, 12, 24) outputs Model-View to rows 24-27 and MVP (Model-View-Projection) to rows 28-31. In an affine Model-View matrix, v[3] is always 1.0f. Testing transform(cm, centre).v[3] resulted in size < 0.008f * 1.0f = 8 mm, meaning no part of any car or pedestrian was ever culled, causing all 240 distant cars to submit ~20 individual draw calls (wheels, doors, headlights, wipers) even at 800 meters, flooding the worker thread with 7,906 draws per frame and collapsing framerates to 30 FPS. Furthermore, clipFlags against q.v[3] == 1.0f on eye-space coordinates completely broke bounding-box frustum culling.
+- **Solution**: Fold MVP row 28 (m) first. In row 28, pc.v[3] is true camera depth z_cam. Sub-meshes smaller than threshold are culled before matrix setup, and transform(m, v) produces true clip-space coordinates for exact frustum culling. Row 24 (cm) is folded only for visible surviving meshes. This reduced drive draw calls from 7,906 down to 2,494 (-68.5%) and restored 57-60 FPS driving performance.
+
+### Anti-Pattern 5: Streaming Queue Flooding and Premature streamPoll Timeouts Triggering Input Lag
+- **Failure Mode**: After attempting to prefetch distant props by clearing `ms_bStreamingLocked = 0u` in `ScanSectorList` and lowering `streamPoll` wait timeout to 250 us, driving experienced severe stuttering and perceptible input lag.
+- **Root Cause**:
+  1. `ScanSectorList` (`0x0035FAE8`) runs for hundreds of visible sectors with high view distance. Clearing `ms_bStreamingLocked = 0u` unconditionally caused every visible sector to call `CStreaming::RequestModel(...)` for thousands of distant props, saturating the streaming queue and raising game thread time (`game_ms`) to 15.7 ms.
+  2. The game engine polls `streamPoll` (`0x002218F0`) immediately after issuing reads. SSD/OS file reads take ~0.5 - 1.5 ms. A 250 us timeout returned `kBusy` (0xFA), forcing the engine to forfeit the current frame and defer each read by a full 16.7 ms frame.
+  3. When frame time exceeded 16.67 ms, the presenter queue accumulated a backlog (`g_framesPosted - g_framesTaken > 1`). The host-paced frame gatekeeper in `ps2HostTick` withheld ticks to prevent drift, starving `ps2WaitHostTick` on the game thread and buffering input by 1-2 frames.
+- **Solution**: Removed the `ScanSectorList` hook to let `CStreaming` naturally throttle requests, and restored `streamPoll`'s 20 ms conditional wait (which wakes immediately when reads complete without losing frames).
+
+### Anti-Pattern 6: Running Heavy setupMatrices (128 VU Ops) on Culled Distant Proxies
+- **Failure Mode**: Even with MVP frustum and size culling, `worker_ms` remained high (16.95 ms) during driving, leaving zero margin for a consistent 60 FPS.
+- **Root Cause**: In `drawProxies` and `drawLitProxies`, `setupMatrices(tmp, 0, 16, 12, 24)` and `foldMatrix` were executed inside the proxy loop before testing whether the proxy was behind the camera or too small. With 240 proxies and ~20 parts per template car, 4,800 iterations per frame each executed 128 VU floating-point operations (~600k ops/frame) just to compute `m` for culling tests that 90% of proxies failed anyway.
+- **Solution**: Loaded the camera View matrix `br` (VU row 16) once outside the loop. For each proxy `n`, transformed the part's world center `W` into camera view space using `br` in 12 basic floating-point operations. If `z_cam <= 0.0f` or `size < threshold * z_cam` or outside view bounds, the proxy is immediately skipped without touching `tmp` or executing `setupMatrices`.
+- **Result**: `worker_ms` dropped from 16.95 ms down to **11.7 ms** (-31.0%), `game_ms` dropped from 15.73 ms to **12.2 ms**, and driving FPS jumped from 57.02 to **73.5 FPS** (+28.9%), eliminating all slowdown and input lag.
+
+
+### Anti-Pattern 7: Quadratic Population Multipliers Spawning ~1000 Unrealistic Entities vs OLA Calibration
+- **Failure Mode**: Setting all sliders to 100% resulted in ~1,000 entities in the scene simultaneously (175 real cars, 250 real peds, 240 distant cars, 300 distant walkers), causing surreal Miami traffic gridlocks, NPC swarms, and high physics collision load on the single-threaded EE guest thread.
+- **Root Cause**: Area scales with radius squared ($r^2$), so a 3x population distance multiplied by 4x density yielded $36x$ spawn demand, saturating the expanded memory pools to their absolute ceilings.
+- **Solution**: Calibrated the 100% targets to authentic Open Limit Adjuster (OLA) and SkyGFX / Project2DFX standards for 1986 Vice City:
+  - Real active cars: capped at 42 cars (PS2 base was 16).
+  - Real active pedestrians: capped at 70 peds (PS2 base was 30).
+  - Distant traffic proxies: capped at 60 cars on bridges and highways.
+  - Distant crowd proxies: capped at 60 walkers on distant beaches and promenades.
+  - Pools adjusted to PC OLA baseline: 160 peds, 100 cars.
+- **Result**: Scene entity count at 100% normalized from ~965 down to **~232 entities** (~5x the PS2 original, maintaining vibrant, full avenues without absurd congestion). Drive benchmark jumped from 73.5 FPS to **92.6 FPS**, frame time dropped to **10.8 ms**, and game thread time dropped to **9.7 ms**, guaranteeing zero slowdown at 60 FPS with huge safety margins.
