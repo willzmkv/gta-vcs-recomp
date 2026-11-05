@@ -43,7 +43,7 @@ namespace vcs::memory
         PS2Runtime::RecompiledFunction g_original = nullptr;
         PS2Runtime::RecompiledFunction g_originalRemove = nullptr;
         std::atomic<uint64_t> g_capSkips{0};
-        std::atomic<int> g_megabytes{0}; // 0: the game's own heap
+        std::atomic<int> g_megabytes{30}; // Default to 30 MB streaming heap on PC
         std::atomic<uint32_t> g_end{0};
         uint8_t *g_rdram = nullptr;
 
@@ -58,7 +58,9 @@ namespace vcs::memory
         PS2_GUEST_CC void buildStreamingHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_rdram = rdram;
-            const int megabytes = g_megabytes.load(std::memory_order_relaxed);
+            int megabytes = g_megabytes.load(std::memory_order_relaxed);
+            if (megabytes <= 0 && !std::getenv("VCS_STREAMING_MB"))
+                megabytes = 30; // Default to 30 MB streaming heap on PC
             if (megabytes <= 0)
                 return g_original(rdram, ctx, runtime);
             const uint32_t heap = GPR_U32(ctx, 4);
@@ -79,7 +81,7 @@ namespace vcs::memory
         // result is not read there); every other call runs the original
         PS2_GUEST_CC void removeLeastUsed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            if (g_megabytes.load(std::memory_order_relaxed) > 0 && GPR_U32(ctx, 31) == kCapCallReturn)
+            if (GPR_U32(ctx, 31) == kCapCallReturn)
             {
                 g_capSkips.fetch_add(1, std::memory_order_relaxed);
                 SET_GPR_U32(ctx, 2, 0u);
@@ -106,8 +108,8 @@ namespace vcs::memory
                  "has 5.4 MB; more keeps more of them loaded (more different cars in traffic) and leaves room for large mods "
                  "(PC car mods). The city's buildings stream on their own. From the next start.";
         s.type = Type::Choice;
-        s.choices = {{"PS2 (5.4 MB)", 0}, {"12 MB", 12}, {"20 MB", 20}, {"30 MB", 30}};
-        s.defaultValue = 0;
+        s.choices = {{"PS2 (5.4 MB)", 0}, {"12 MB", 12}, {"20 MB", 20}, {"30 MB (Recommended)", 30}};
+        s.defaultValue = 30;
         s.apply = settings::Apply::Restart;
         s.env = "VCS_STREAMING_MB";
         s.onChange = [](int v) { g_megabytes.store(std::max(0, v), std::memory_order_relaxed); };
