@@ -473,12 +473,10 @@ namespace vcs::distance
         // 0 past the last. With a detail distance other than the view's, the distances before the last are scaled by
         // detail / view (at most the last); the original otherwise.
         // For extended view distance, small attached props (dishes, antennas, signs) have tiny .IDE ranges (25m-40m).
-        // We enforce a propFloor (260m-360m) so they stay visible matching the parent building's LOD.
+        // We enforce a propFloor (500m-900m) so they stay visible matching the parent building's LOD.
         PS2_GUEST_CC void atomicFromDistance(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const float view = percent(g_view), detail = percent(g_detail);
-            if (detail == view && view <= 1.0f)
-                return g_atomicFromDistance(rdram, ctx, runtime);
             g_rdram = rdram;
             const uint32_t mi = GPR_U32(ctx, 4);
             const float distance = ctx->f[12];
@@ -490,7 +488,8 @@ namespace vcs::distance
                 std::memcpy(&flags, rdram + ((mi + 0x3Au) & PS2_RAM_MASK), 2);
                 const int count = rdram[(mi + 0x38u) & PS2_RAM_MASK];
                 const float mult = rdf(kLodMultiplier);
-                const float propFloor = (view > 1.0f) ? std::clamp(300.0f * view, 500.0f, 900.0f) : 0.0f;
+                const float viewFactor = std::max(1.0f, view);
+                const float propFloor = std::clamp(300.0f * viewFactor, 500.0f, 900.0f);
                 const float last = count > 0 ? std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(count - 1)) * mult, propFloor) : 0.0f;
                 for (int i = (flags & 8u) ? (flags & 3u) : 0; i < count; ++i)
                 {
@@ -516,8 +515,6 @@ namespace vcs::distance
         PS2_GUEST_CC void func3A53E0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const float view = percent(g_view);
-            if (view <= 1.0f)
-                return g_func3A53E0(rdram, ctx, runtime);
             g_rdram = rdram;
             const uint32_t mi = GPR_U32(ctx, 4);
             const float distance = ctx->f[12];
@@ -534,7 +531,8 @@ namespace vcs::distance
                     if (!(flags & 8u) && (flags & 3u))
                         idx = static_cast<int>(flags & 3u) - 1;
                     const float mult = rdf(kLodMultiplier);
-                    const float propFloor = std::clamp(300.0f * view, 500.0f, 900.0f);
+                    const float viewFactor = std::max(1.0f, view);
+                    const float propFloor = std::clamp(300.0f * viewFactor, 500.0f, 900.0f);
                     const float limit = std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(idx)) * mult, propFloor);
                     if (distance < limit)
                         result = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(idx)));
@@ -566,11 +564,8 @@ namespace vcs::distance
 
             if (ra == kSetupEntityVisibility330ClampReturn)
             {
-                if (viewFactor > 1.0f)
-                {
-                    ctx->f[0] = 0.0f;
-                    g_statClamp330Bypasses.fetch_add(1, std::memory_order_relaxed);
-                }
+                ctx->f[0] = 0.0f;
+                g_statClamp330Bypasses.fetch_add(1, std::memory_order_relaxed);
             }
             else if (ra == kSetupEntityVisibilityPrefetchNoFadeReturn ||
                      ra == kSetupEntityVisibilityPrefetchWithFadeReturn ||
@@ -583,7 +578,7 @@ namespace vcs::distance
                 // Base 350m ensures roadside signs, poles, and shopfronts (like near Pay 'n' Spray)
                 // are queued and alpha-faded well before arriving, eliminating late popping.
                 const float prefetchBonus = std::max(350.0f, 200.0f + speed * 8.0f) * scale;
-                const float streamFloor = (viewFactor > 1.0f) ? std::clamp(350.0f * viewFactor, 550.0f, 950.0f) : 0.0f;
+                const float streamFloor = std::clamp(350.0f * scale, 550.0f, 950.0f);
                 ctx->f[0] = std::max(ctx->f[0] + prefetchBonus, streamFloor);
                 g_statPrefetchLookahead.fetch_add(1, std::memory_order_relaxed);
             }
@@ -687,7 +682,7 @@ namespace vcs::distance
         {
             g_rdram = rdram;
             const uint8_t activeCam = rd8(0x006F4520u);
-            const uint32_t modeAddr = 0x006F4540u + static_cast<uint32_t>(activeCam & 3u) * 0x270u + 0x70u;
+            const uint32_t modeAddr = 0x006F4540u + static_cast<uint32_t>(activeCam & 3u) * 0x270u;
             const uint16_t origMode = rd16(modeAddr);
             wr16(modeAddr, 1u);
             g_func35E620(rdram, ctx, runtime);
@@ -700,7 +695,7 @@ namespace vcs::distance
         {
             g_rdram = rdram;
             const uint8_t activeCam = rd8(0x006F4520u);
-            const uint32_t modeAddr = 0x006F4540u + static_cast<uint32_t>(activeCam & 3u) * 0x270u + 0x70u;
+            const uint32_t modeAddr = 0x006F4540u + static_cast<uint32_t>(activeCam & 3u) * 0x270u;
             const uint16_t origMode = rd16(modeAddr);
             wr16(modeAddr, 1u);
             g_func3606C8(rdram, ctx, runtime);
