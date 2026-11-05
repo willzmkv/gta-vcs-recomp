@@ -24,8 +24,10 @@ namespace vcs::distant
     };
     // The latest frame's proxies (any thread): copies them out, returns the frame number they belong to (0: none).
     uint32_t snapshot(std::vector<Proxy> &out);
-    // Whether the setting is on (any thread).
+    // Whether distant traffic or distant crowds are on (any thread).
     bool enabled();
+    // Distant crowds on: the real peds keep the game's own distance (vcs_distance.cpp).
+    bool crowdsOn();
 
     // Step A2, templates. The game thread, while the RSL world makes its draw items: the group of the vehicle being
     // rendered now (0: none) - each item that draws keeps it.

@@ -122,7 +122,7 @@ namespace render
                 {{kGsDrawPS6NoZ, sizeof(kGsDrawPS6NoZ)}, {kGsDrawPS6DualNoZ, sizeof(kGsDrawPS6DualNoZ)}},
             },
         };
-        if (backend == rhi::Backend::D3D11)
+        if (backend == rhi::Backend::D3D11 || backend == rhi::Backend::D3D12) // (DXBC runs on D3D12 as it is)
             return dxbc;
 #endif
 #if defined(VCS_HAVE_VULKAN)

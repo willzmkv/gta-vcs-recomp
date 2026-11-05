@@ -1721,6 +1721,16 @@ its lists; `pokef` of the scale below with screenshots).
   `0x6FE980` holds minus that centre (775, 1188.12, 0 with the camera in cell (13, 7)) and the VU1 object matrices are
   the entity's world matrix plus it (a car at -766, -1208.7 drew with its matrix at 8, -21.1). The VU1 object matrix
   carries the vertices' dequantisation scale in its rows (2, 4, 1 or 2, 8, 2 seen for car parts).
+- **Vehicle status, ped paths, skinned draws** (2026-11-05, DISTANT_LIFE.md "Distant crowds"): a vehicle's status is
+  entity `+0x48` bits 4-8 (CAutomobile's ProcessControl `FUN_0013a0a0` switches on it: 2 on rails - `FUN_00428c48` /
+  `FUN_00433918` and back -, 3 physics, 4 parked / abandoned, 5 wrecked); with every slider at the most the traffic is
+  almost all 2 or 4, 1-5 cars in physics. Car classes' vtable slots: +0x30 ProcessControl (cars 0x13A0A0, 0x490F10's
+  0x337208), +0x34 ProcessCollision (0x348D40, CPhysical's, peds too), +0x44 Render, +0x48 UpdateAnim (0x3C50A8). The path
+  object `*(0x487490)`: +0x0C all nodes (8387), +0x10 car nodes (3079), +0x14 ped nodes (5308, after the car nodes in
+  the same array and links table). A skinned ped's draw: the VU1 object matrix (0-3) is the identity, the bone matrices
+  (0xA9..) and so the skinned positions are in the draws' space (world + `0x6FE980`). CWorld::Process `FUN_001933c0`:
+  pass 1 UpdateAnim (+0x48) for the moving list `*0x4E4AA0`, pass 2 ProcessControl (+0x30, after +0x58 / +0x18 checks),
+  pass 3 ProcessCollision (+0x34) between `FUN_00193248` (before) and `FUN_003c3208` (after), then the shift passes.
 - **The multipliers** (CCamera::Process `FUN_00378dd8`, `0x37AF4C..0x37B078`): `LODDistMultiplier` (camera
   `0x6F44D0 + 0x7DC` = **`0x6F4CAC`**) = 70 / FOV first, times `1 + max(0, (z - 55) / 60)` when the camera is above
   55 m (the near plane grows the same way, `FUN_0018f3b0`), at most 2.0; copied to `GenerationDistMultiplier`

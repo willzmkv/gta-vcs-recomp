@@ -1161,3 +1161,15 @@ lossless (only shorter strips); textures stay 128 px, 4 or 8 bit like the disc's
   no converted assets, nothing extra in guest memory).
 - The proxies' cars come from cars the game renders; one car of each model near the camera is added to the vehicles'
   visible list when it is off screen (its own draws culled natively), so proxies never depend on what is on screen.
+
+## 2026-11-04 - A D3D12 backend for the main thread's draws (the player's choice)
+
+- **Direct3D 12** (the player's choice over the existing Vulkan backend on Windows) for the main thread's per-draw cost:
+  AMD's D3D11 driver costs microseconds a draw on the calling thread; D3D12 records a few root arguments a draw. It is a
+  backend of the same RHI (`src/rhi/d3d12`), modelled on the Vulkan one, with D3D11's DXBC shaders; D3D11 stays the
+  reference and the default until D3D12 is measured on the player's PC (Graphics > Graphics API, `VCS_RHI=d3d12`). Its
+  own code: PCSX2's GS D3D12 renderer is GPL and another design, nothing of it is used.
+- 2026-11-05: **D3D12 is the default on Windows.** The player played it: "slowdown do D3D11 sumiram" (some stutters,
+  then fixed: cruise.py p99 16.9 ms against D3D11's 33.1, NATIVE_RENDERER.md). With no D3D12 device the presenter makes
+  a D3D11 one for the run; Graphics > Graphics API keeps D3D11 (the reference) and Vulkan. A vcs.ini that names a
+  renderer keeps it.

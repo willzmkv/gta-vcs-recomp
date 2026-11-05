@@ -1,5 +1,13 @@
 # Progress
 
+## 2026-11-05 - T2 population distance bands (0-325/400 m real, 310/340 m+ decorative) and night coronas
+
+- Documented the mandatory two-band architecture and agent rules in `docs/T2_POPULATION_AND_DISTANT_LIFE_PLAN.md` (linked from `AGENTS.md` and `docs/DISTANT_LIFE.md`).
+- Fixed `vcs_distance.cpp::pedDistance()` so enabling `Distant crowds` (`world.distant_crowds`) never shrinks real pedestrians back to PS2's 35-65 m (`1.0x`), raised `kMaxPedDistance = 5.0f` (~325 m survival / ~350 m visibility) with `kMaxPedDensityDistance = 2.2f` pool-cap balancing, and extended `nodeList` (`0x269228`, `ra == 0x26812C`) and `pedSpotFinder` (`0x268048`) with alternating `+40 m` / `+145 m` forward-shifted node caches and 4-band stratification across `35..300 m`.
+- Updated `vcs_distant.cpp` (`band()`, `crowdBand()`, `move()`) so decorative traffic (`>= max(340 m, realCarOuterRadius() + 15 m)`, `495..1045 m` at slider 100) and decorative crowds (`>= max(310 m, realPedOuterRadius() + 15 m)`, `340..640 m` at slider 100) only spawn and live strictly beyond the real population band, with `ctx->pc` entry guards on `worldProcess`, `entityRender`, and `preRenderLists`, and raised `kTemplateRange = 450 m` / `kPedTemplateRange = 360 m`.
+- Hooked `CCoronas::RegisterCorona` (`0x0027DD80`) in `vcs_distant.cpp`: suppresses corona registrations from off-screen template cars added by `addTemplates(false)`, culls behind-camera coronas (`dot < -5 m`) from the 56-slot `CCoronas::aCoronas` table (`0x00512560`), scales vehicle corona `farClip` up to `250 m` and building/streetlamp 2DFX `farClip` up to `300 m`, and evicts the farthest/behind-camera slot when all 56 slots are full.
+- Verified (`tools/distance_check.py` PASS + `t2_verify` hidden rig on Washington Beach / Ocean Drive, `population_distance=100`, `distant_traffic=100`, `distant_crowds=100`): `peddist=5.00`, `maxcard=350..371 m`, `maxpedd=351..371 m`, `carband=495..1045 m` (`mincar=496..500 m`), `pedband=340..640 m` (`minped=341..343 m`), `coronas: active=56 veh=27 maxdist=249..262 m tmplskip=397..488 behindskip=296k+ evicted=644..732`.
+
 ## 2026-11-02 - This fork (willzmkv/gta-vcs-recomp)
 
 The game's fog as a setting; texture packs in DDS (BC7) or PNG and a texture dump; a mod loader in PC Mod Loader's
@@ -872,7 +880,8 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_CROWD_LOD=0` | no crowd LOD (far random peds processed every frame; A / B measures) |
 | `VCS_DISTANT_TRAFFIC=0..100` | Graphics > Distant traffic for one run (DISTANT_LIFE.md: decorative cars beyond the simulated traffic) |
 | `VCS_DISTANT_BAND=lo,hi` | debug: the distant traffic's band in metres (`40,200` brings the proxies near, to look at them) |
-| `VCS_DISTANT_TINT=1` | debug: the proxies lit red alone (told apart from the real cars in pictures) |
+| `VCS_DISTANT_TINT=1` | debug: the proxies (cars and walkers) lit red alone (told apart from the real ones in pictures) |
+| `VCS_DISTANT_CROWDS=0..100` | Graphics > Distant crowds for one run (walkers on the pavements beyond the real peds, DISTANT_LIFE.md) |
 | `VCS_NODE_OVERFLOW_TEST=1` | every new sector entry from the overflow pool (its path checked without a crowd) |
 | `VCS_WATCH=lo,hi[,val[,mask]]` | guest write watchpoint (rig `watch lo,hi[,val[,mask]]` arms it mid-run) |
 | `VCS_WATCH_STACK=1`, `VCS_WATCH_STRIDE=stride,offset` | watch hits also list s2-s7 and the code addresses on the guest stack (callers); only writes to one field of every pool entry (e.g. `d20,1c8`: the peds' flags) |
@@ -1004,9 +1013,9 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `python tools/scenes.py capture OUT` / `compare REF NEW` | reference scenes (screenshots + perf) from an empty card; diff two captures |
 | `VCS_DATA_DIR=dir` | save / cache folder instead of %LOCALAPPDATA%/VCSRecomp (Linux: $XDG_DATA_HOME/VCSRecomp) |
 | `PS2X_D3D_DEBUG=1` | D3D11 debug layer (needs Windows' Graphics Tools feature) |
-| `VCS_RHI=d3d11\|vulkan\|null` | the renderer for one run (Graphics > Graphics API when the build has two; docs/LINUX.md) |
-| `PS2X_RHI_DEBUG=1` | the API's validation layer: D3D11 debug layer / Vulkan's Khronos validation |
-| `PS2X_RHI_STATS=1` | Vulkan: draws, descriptor writes, passes, suspended passes, barriers, uploads, CPU waits per frame, and input to GPU done (avg / p50 / p95) every 5 s; gs_hw: the input delay by stage |
+| `VCS_RHI=d3d11\|d3d12\|vulkan\|null` | the renderer for one run (Graphics > Graphics API; D3D12 on Windows: NATIVE_RENDERER.md; Vulkan: docs/LINUX.md) |
+| `PS2X_RHI_DEBUG=1` | the API's validation layer: D3D11 / D3D12 debug layer (D3D12's messages into the log) / Vulkan's Khronos validation |
+| `PS2X_RHI_STATS=1` | D3D12: draws, passes, barriers, texture uploads, textures / buffers / pipelines made, tables, fence waits per frame every 5 s; Vulkan: draws, descriptor writes, passes, suspended passes, barriers, uploads, CPU waits per frame, and input to GPU done (avg / p50 / p95) every 5 s; gs_hw: the input delay by stage |
 | `PS2X_RHI_GPU_TIME=1` | Vulkan: GPU time of the passes and the whole frame (`PS2X_GPU_TIMING=1`: per draw, breaking passes) |
 | `PS2X_HOST_SPIKES=<ms>` | main-loop frames whose work went over it, by phase (events, begin, frames, ui, window, present) with the main thread's CPU time; Vulkan: the frame's waits, draws with their CPU time in `prepareDraw` / `vkCmdDraw`, pipeline binds, descriptor pushes, passes, uploads, and the fence wait after it (PERFORMANCE.md 26) |
 | `PS2X_RHI_LOG_MEMORY=1` | Vulkan: every device memory allocation / free VMA makes, with its size and time |

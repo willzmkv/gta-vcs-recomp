@@ -125,6 +125,13 @@ namespace present
         desc.debug = debug && *debug && *debug != '0';
         std::string error;
         g_device = rhi::createDevice(desc, error);
+        if (!g_device && desc.backend == rhi::Backend::D3D12 && rhi::backendBuilt(rhi::Backend::D3D11))
+        {
+            // no D3D12 device (an old driver, a GPU without it): D3D11, the reference, for this run
+            std::fprintf(stderr, "[present] D3D12: %s - D3D11 instead\n", error.c_str());
+            desc.backend = rhi::Backend::D3D11;
+            g_device = rhi::createDevice(desc, error);
+        }
         if (!g_device)
         {
             std::fprintf(stderr, "[present] %s: %s\n", rhi::backendName(desc.backend), error.c_str());

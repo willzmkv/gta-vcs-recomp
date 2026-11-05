@@ -683,16 +683,17 @@ namespace
         vcs::distant::registerSettings();  // decorative distant traffic (game/vcs_distant.h)
         vcs::memory::registerSettings(); // the streaming heap's size (game/vcs_memory.h)
 
-        // The graphics API, when the build has more than one (Windows with VCS_RHI_VULKAN); VCS_RHI=d3d11|vulkan|null
-        // chooses for one run (render/presenter.h).
+        // The graphics API, when the build has more than one (Windows: D3D11, D3D12, Vulkan with VCS_RHI_VULKAN);
+        // VCS_RHI=d3d11|d3d12|vulkan|null chooses for one run (render/presenter.h).
         s = {};
         s.key = "display.renderer";
         s.page = "Graphics";
         s.section = "Renderer";
         s.label = "Graphics API";
-        s.help = "The graphics API the game draws with. D3D11 is the reference on Windows; Vulkan is the one on Linux.";
+        s.help = "The graphics API the game draws with. D3D12 (the default on Windows) costs the CPU least per draw - dense "
+                 "streets, many cars; D3D11 is the reference it is checked against; Vulkan is the one on Linux.";
         s.type = Type::Choice;
-        for (rhi::Backend b : {rhi::Backend::D3D11, rhi::Backend::Vulkan})
+        for (rhi::Backend b : {rhi::Backend::D3D11, rhi::Backend::D3D12, rhi::Backend::Vulkan})
             if (rhi::backendBuilt(b))
                 s.choices.push_back({rhi::backendName(b), static_cast<int>(b)});
         s.defaultValue = static_cast<int>(rhi::defaultBackend());

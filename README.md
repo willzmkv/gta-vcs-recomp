@@ -51,6 +51,10 @@ Everything is off or at the game's own values by default; the PS2 picture stays 
   ([#20](https://github.com/willzmkv/gta-vcs-recomp/pull/20)).
 
 **Memory and performance**
+- **Direct3D 12** (the default on Windows; F2 > Graphics > Graphics API keeps Direct3D 11 and Vulkan): the native
+  renderer on D3D12, far less CPU per draw call than AMD's D3D11 driver - dense streets lost their slowdown - and fewer
+  stutters while driving (p99 frame time 16.9 ms against 33.1 at 144 km/h through the city). Falls back to D3D11 when
+  the system has no D3D12 device.
 - **Streaming memory past the PS2's 32 MB**: F2 > Game > Memory > Streaming memory (PS2 5.4 MB, 12, 20 or 30 MB;
   restart) gives the game's streaming more room for large mod models, and more different cars in traffic. Texture
   pack images are now created off the main thread (far fewer hitches with an HD pack)

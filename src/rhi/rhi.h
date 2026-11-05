@@ -1,6 +1,6 @@
 // Render hardware interface (docs/NATIVE_RENDERER.md): the small set of GPU operations the renderer needs, so the
-// renderer never sees a graphics API. One backend per API: D3D11 (rhi/d3d11, Windows), Vulkan (rhi/vulkan, Linux, and
-// Windows to compare) and null (rhi/null, no GPU work). Immutable pipelines, explicit passes, copies and readbacks as
+// renderer never sees a graphics API. One backend per API: D3D11 (rhi/d3d11, Windows), D3D12 (rhi/d3d12, Windows: the
+// lower per-draw cost), Vulkan (rhi/vulkan, Linux, and Windows to compare) and null (rhi/null, no GPU work). Immutable pipelines, explicit passes, copies and readbacks as
 // plain operations.
 //
 // Threading: one device, used from one thread (the main thread). No API types appear in this header.
@@ -199,7 +199,7 @@ namespace rhi
         uint32_t offset = 0;
     };
 
-    // Compiled shader for this device (D3D11: DXBC from fxc; Vulkan: SPIR-V from tools/hlsl_spirv.py).
+    // Compiled shader for this device (D3D11 / D3D12: DXBC from fxc; Vulkan: SPIR-V from tools/hlsl_spirv.py).
     struct ShaderCode
     {
         const void *data = nullptr;
@@ -244,12 +244,13 @@ namespace rhi
     {
         D3D11,
         Vulkan,
-        Null, // no GPU work: textures read back as zeros (bring-up and tests of the CPU side)
+        Null,  // no GPU work: textures read back as zeros (bring-up and tests of the CPU side)
+        D3D12, // (after Null: vcs.ini keeps the numbers of the others)
     };
-    const char *backendName(Backend backend);         // "D3D11", "Vulkan", "null"
-    bool backendFromName(const char *name, Backend &out); // d3d11 | vulkan | null, any case
+    const char *backendName(Backend backend);         // "D3D11", "D3D12", "Vulkan", "null"
+    bool backendFromName(const char *name, Backend &out); // d3d11 | d3d12 | vulkan | null, any case
     bool backendBuilt(Backend backend);               // compiled into this build
-    Backend defaultBackend();                         // D3D11 on Windows, Vulkan elsewhere
+    Backend defaultBackend();                         // D3D12 on Windows (D3D11 without it), Vulkan elsewhere
 
     // What the Vulkan backend needs from the window (the platform layer's SDL): opaque to the RHI.
     struct VulkanWindow
@@ -261,7 +262,7 @@ namespace rhi
     struct DeviceDesc
     {
         Backend backend = defaultBackend();
-        void *nativeWindow = nullptr; // D3D11: the HWND
+        void *nativeWindow = nullptr; // D3D11 / D3D12: the HWND
         VulkanWindow vulkan;          // Vulkan
         uint32_t width = 0;
         uint32_t height = 0;
@@ -357,6 +358,7 @@ namespace rhi
 
     // The backends (rhi.cpp calls them; each exists only when built).
     std::unique_ptr<Device> createD3D11Device(const DeviceDesc &desc, std::string &error);
+    std::unique_ptr<Device> createD3D12Device(const DeviceDesc &desc, std::string &error);
     std::unique_ptr<Device> createVulkanDevice(const DeviceDesc &desc, std::string &error);
     std::unique_ptr<Device> createNullDevice(const DeviceDesc &desc, std::string &error);
 }

@@ -2390,6 +2390,138 @@ namespace
         return true;
     }
 
+    // DISTANT_LIFE.md, distant crowds: a template ped's skinned draw once more for each walker given to it - its pose as
+    // the template has it now (the skinned positions are in the ped's own space), the object matrix a' = a x inv(ped) x
+    // walker, 24-31 made again as 0x04d8 makes them (the lit pipeline's constants are those rows as they are), the lights
+    // turned with it. Culled by the posed mesh's box; parts under ~6 pixels of a 1080-line picture skipped. For a skinned
+    // ped a is the identity and the positions are in the draws' space (found 2026-11-05: a = I, the first bone and vertex
+    // at the ped's place), so a' = inv(ped) x walker moves the posed mesh from the ped onto the walker.
+    void drawLitProxies(const uint8_t *vu, uint64_t prim, const GSNativeDraw &d, const LitPacket &lp, const vcs::distant::Proxies &px)
+    {
+        Vec4 a[4];
+        for (uint32_t i = 0; i < 4; ++i)
+            a[i] = loadF(vu, i);
+        float local[4][3];
+        for (int i = 0; i < 4; ++i)
+        {
+            const float w = i == 3 ? 1.0f : 0.0f;
+            for (int k = 0; k < 3; ++k)
+                local[i][k] = a[i].v[0] * px.inverse[k] + a[i].v[1] * px.inverse[4 + k] + a[i].v[2] * px.inverse[8 + k] +
+                              w * px.inverse[12 + k];
+        }
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        for (uint32_t i = 0; i < lp.count; ++i)
+            for (int k = 0; k < 3; ++k)
+            {
+                lo[k] = std::min(lo[k], lp.pos[i][k]);
+                hi[k] = std::max(hi[k], lp.pos[i][k]);
+            }
+        // the posed mesh on its ped: the skinned positions come in the draws' space (a is the identity: the bones carry
+        // the ped's place), so its centre in the ped's own frame lies within a few metres (else a draw made after it)
+        {
+            float c[3];
+            for (int k = 0; k < 3; ++k)
+                c[k] = 0.5f * (lo[k] + hi[k]);
+            float o2 = 0.0f;
+            for (int k = 0; k < 3; ++k)
+            {
+                const float v = c[0] * local[0][k] + c[1] * local[1][k] + c[2] * local[2][k] + local[3][k];
+                o2 += v * v;
+            }
+            if (o2 > 12.0f * 12.0f)
+            {
+                vcs::distant::noteProxy(2);
+                return;
+            }
+        }
+        const auto unit = [](const Vec4 &r, float o[3]) {
+            const float l = std::sqrt(r.v[0] * r.v[0] + r.v[1] * r.v[1] + r.v[2] * r.v[2]);
+            const float inv = l > 0.0f ? 1.0f / l : 0.0f;
+            for (int k = 0; k < 3; ++k)
+                o[k] = r.v[k] * inv;
+        };
+        float ra[3][3];
+        for (int i = 0; i < 3; ++i)
+            unit(a[i], ra[i]);
+        float size2 = 0.0f;
+        for (int k = 0; k < 3; ++k)
+        {
+            const float l = std::sqrt(a[k].v[0] * a[k].v[0] + a[k].v[1] * a[k].v[1] + a[k].v[2] * a[k].v[2]) * (hi[k] - lo[k]);
+            size2 += l * l;
+        }
+        const float size = std::sqrt(size2);
+        Vec4 centre;
+        for (int k = 0; k < 3; ++k)
+            centre.v[k] = 0.5f * (lo[k] + hi[k]);
+        centre.v[3] = 1.0f;
+        static thread_local uint8_t tmp[64 * 16];
+        std::memcpy(tmp, vu, sizeof(tmp));
+        GSNativeDraw e = d;
+        float *k = e.constants;
+        for (uint32_t n = 0; n < px.count; ++n)
+        {
+            const float *P = px.matrices + size_t(n) * 16u;
+            Vec4 b[4];
+            for (int i = 0; i < 4; ++i)
+            {
+                b[i] = a[i];
+                for (int c = 0; c < 3; ++c)
+                    b[i].v[c] = local[i][0] * P[c] + local[i][1] * P[4 + c] + local[i][2] * P[8 + c] + (i == 3 ? P[12 + c] : 0.0f);
+                storeF(tmp, i, b[i]);
+            }
+            setupMatrices(tmp, 0, 16, 12, 24);
+            Vec4 cm[4];
+            for (int r = 0; r < 4; ++r)
+                cm[r] = loadF(tmp, 24 + r);
+            if (size < 0.008f * transform(cm, centre).v[3])
+            {
+                vcs::distant::noteProxy(1);
+                continue;
+            }
+            uint32_t all = 0x3Fu;
+            for (int corner = 0; corner < 8 && all; ++corner)
+            {
+                Vec4 v;
+                v.v[0] = corner & 1 ? hi[0] : lo[0];
+                v.v[1] = corner & 2 ? hi[1] : lo[1];
+                v.v[2] = corner & 4 ? hi[2] : lo[2];
+                v.v[3] = 1.0f;
+                const Vec4 q = transform(cm, v);
+                all &= clipFlags(q, q.v[3]);
+            }
+            if (all)
+            {
+                vcs::distant::noteProxy(1);
+                continue;
+            }
+            for (int r = 0; r < 4; ++r)
+            {
+                putRow(k + r * 4, loadF(tmp, 28 + r));
+                putRow(k + 32 + r * 4, cm[r]);
+            }
+            float rb[3][3];
+            for (int i = 0; i < 3; ++i)
+                unit(b[i], rb[i]);
+            float q[3][3];
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    q[i][j] = rb[i][0] * ra[j][0] + rb[i][1] * ra[j][1] + rb[i][2] * ra[j][2];
+            for (int i = 0; i < 3; ++i)
+                for (int lane = 0; lane < 4; ++lane)
+                    k[48 + i * 4 + lane] = q[i][0] * d.constants[48 + lane] + q[i][1] * d.constants[52 + lane] + q[i][2] * d.constants[56 + lane];
+            static const bool tint = std::getenv("VCS_DISTANT_TINT") != nullptr; // debug: walkers lit red alone
+            if (tint)
+            {
+                std::fill(k + 60, k + 76, 0.0f);
+                k[76] = 1.0f;
+                k[77] = k[78] = 0.0f;
+            }
+            if (!ps2hle::gs()->submitNative(prim, e))
+                return;
+            vcs::distant::noteProxy(0);
+        }
+    }
+
     bool drawNativeLit(const ps2hle::MscalContext &c)
     {
         static LitPacket lp;
@@ -2408,7 +2540,9 @@ namespace
         uint32_t any = 0, all = 0;
         if ((loadI(vu, 52).v[0] & 0xFFFF) == 0xE9)
             litClip(vu, lp, any, all);
-        if (all != 0u)
+        vcs::distant::Proxies px;
+        const bool proxies = vcs::distant::workerProxies(px); // DISTANT_LIFE.md: a template ped's walkers
+        if (all != 0u && !proxies)
         {
             ++g_nativeLit.culled;
             return true;
@@ -2461,6 +2595,13 @@ namespace
         d.constantCount = 88;
         const IVec4 tag = loadI(vu, 49);
         const uint64_t tagLo = uint64_t(uint32_t(tag.v[0])) | (uint64_t(uint32_t(tag.v[1])) << 32);
+        if (proxies)
+            drawLitProxies(vu, (tagLo >> 47) & 0x7FFu, d, lp, px);
+        if (all != 0u)
+        {
+            ++g_nativeLit.culled;
+            return true;
+        }
         if (!ps2hle::gs()->submitNative((tagLo >> 47) & 0x7FFu, d))
         {
             ++g_nativeLit.fallback;

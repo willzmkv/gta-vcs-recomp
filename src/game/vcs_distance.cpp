@@ -40,6 +40,7 @@
 // (patched constants read from 0x7FF40..), the spot finder's node list moves ahead along its direction, and the road
 // classes' spawn chances scale with the number of cars wanted.
 #include "game/vcs_distance.h"
+#include "game/vcs_distant.h"
 
 #include "game/vcs_memory.h"
 #include "ps2_runtime.h"
@@ -74,7 +75,8 @@ namespace vcs::distance
         constexpr uint32_t kGenReaders[] = {0x002AFE80u, 0x002B0200u, 0x0036EBF8u, 0x003DA070u, 0x003F29D8u, 0x00430290u, 0x00433378u};
         constexpr size_t kReaderCount = sizeof(kGenReaders) / sizeof(kGenReaders[0]);
         constexpr size_t kPedReaders = 2;
-        constexpr float kMaxPedDistance = 2.0f; // the peds' population distance factor at most
+        constexpr float kMaxPedDistance = 5.0f;        // real peds reach up to ~300-325 m at population slider 100
+        constexpr float kMaxPedDensityDistance = 2.2f; // pool cap scaling factor so ped slots stay balanced with car drivers
 
         constexpr uint32_t kCarNumber = 0x0048A680u; // float, 0.7
         constexpr uint32_t kPedNumber = 0x0048A67Cu; // float, 0.4
@@ -137,7 +139,14 @@ namespace vcs::distance
 
         float percent(const std::atomic<int> &v) { return static_cast<float>(v.load(std::memory_order_relaxed)) / 100.0f; }
         float carDistance() { return percent(g_population); }
-        float pedDistance() { return std::min(percent(g_population), kMaxPedDistance); }
+        // Real pedestrians scale with the population distance slider up to kMaxPedDistance (~300-325 m at slider 100),
+        // independent of decorative distant crowds (which only appear beyond realPedOuterRadius()).
+        float pedDistance()
+        {
+            const float p = percent(g_population);
+            return p <= 1.0f ? p : std::min(1.0f + (p - 1.0f) * 2.0f, kMaxPedDistance);
+        }
+        float pedDensityDistance() { return std::min(pedDistance(), kMaxPedDensityDistance); }
         // the densities as they apply now (updateBudget): the sliders' at a budget of 1; at 0 the game's own numbers of
         // cars and peds, spread over the population distance's area (the distances never change: spawns stay far)
         float g_budget = 1.0f;
@@ -147,7 +156,7 @@ namespace vcs::distance
             return least + (density - least) * g_budget;
         }
         float trafficDensity() { return governed(percent(g_traffic), carDistance()); }
-        float pedestrianDensity() { return governed(percent(g_pedestrians), pedDistance()); }
+        float pedestrianDensity() { return governed(percent(g_pedestrians), pedDensityDistance()); }
 
         // GenerateOneRandomCar gives up on a found spot unless rand() & 15 <= the road's density class value (the lower
         // of the link's two nodes): 1, 5, 8 and 16 chances in 16. More cars over a larger area need more spots taken -
@@ -262,7 +271,7 @@ namespace vcs::distance
                 g_haveDefaults = true;
             }
             const float cars = trafficDensity() * carDistance() * carDistance();
-            const float peds = pedestrianDensity() * pedDistance() * pedDistance();
+            const float peds = pedestrianDensity() * pedDensityDistance() * pedDensityDistance();
             if (cars == 1.0f && peds == 1.0f)
             {
                 wrf(kCarNumber, g_carNumber); // the game's own (a setting back at 0)
@@ -432,26 +441,88 @@ namespace vcs::distance
         // The list's centre moves ahead instead, distance x (1 - 1 / factor) along the finder's direction: the same square,
         // so no more nodes than the game's, over the ring. The game's own at 0.
         constexpr uint32_t kSpotFinder = 0x00267928u, kSpotFinderEnd = 0x00267E98u, kNodeList = 0x00269228u;
-        PS2Runtime::RecompiledFunction g_spotFinder = nullptr, g_nodeList = nullptr;
+        constexpr uint32_t kPedSpotFinder = 0x00268048u, kPedNodeListReturn = 0x0026812Cu;
+        PS2Runtime::RecompiledFunction g_spotFinder = nullptr, g_pedSpotFinder = nullptr, g_nodeList = nullptr;
         float g_spotDir[2] = {0.0f, 0.0f}, g_spotDistance = 0.0f;
+        float g_pedNodeShift = 0.0f;
+        bool g_pedFarWindow = false;
+        uint32_t g_pedSpotPass = 0;
         PS2_GUEST_CC void spotFinder(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            g_spotDir[0] = ctx->f[14];
-            g_spotDir[1] = ctx->f[15];
-            g_spotDistance = ctx->f[16];
+            if (ctx->pc == kSpotFinder)
+            {
+                g_spotDir[0] = ctx->f[14];
+                g_spotDir[1] = ctx->f[15];
+                g_spotDistance = ctx->f[16];
+            }
             g_spotFinder(rdram, ctx, runtime);
+        }
+        // FUN_00268048(CPathFind, pos, ..., nearestInView $f12, farthestInView $f13, nearestOut $f14, farthestOut $f15):
+        // Stratifies the in-view real pedestrian spawn ring across close, medium, and far sub-bands within the currently
+        // cached pavement node window (35 m out to ~300 m) so raising Population distance populates the full visible range
+        // without leaving a hollow gap near the player.
+        PS2_GUEST_CC void pedSpotFinder(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (ctx->pc == kPedSpotFinder)
+            {
+                const float k = pedDistance();
+                if (k > 1.0f)
+                {
+                    const float base = g_genBase > 0.0f ? g_genBase : 1.0f;
+                    const float minLo = std::clamp(ctx->f[12], 10.0f, 35.0f * base);
+                    const float cacheReach = 155.0f + g_pedNodeShift;
+                    const float maxHi = std::min(60.0f * base * k, std::max(minLo + 35.0f, cacheReach));
+                    const uint32_t pass = g_pedSpotPass++ & 3u;
+                    if (maxHi > minLo + 40.0f)
+                    {
+                        const float span = maxHi - minLo;
+                        const float band = std::max(55.0f, span * 0.42f);
+                        const float t = static_cast<float>(pass) / 3.0f;
+                        ctx->f[12] = minLo + (span - band) * t;
+                        ctx->f[13] = ctx->f[12] + band;
+                    }
+                    else
+                    {
+                        ctx->f[12] = minLo;
+                        ctx->f[13] = maxHi;
+                    }
+                }
+            }
+            g_pedSpotFinder(rdram, ctx, runtime);
         }
         PS2_GUEST_CC void nodeList(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            const float k = carDistance();
-            const uint32_t ra = GPR_U32(ctx, 31);
-            if (k > 1.0f && ra >= kSpotFinder && ra < kSpotFinderEnd)
+            if (ctx->pc == kNodeList)
             {
-                g_rdram = rdram;
-                const uint32_t pos = GPR_U32(ctx, 5); // the centre (x, y) on the finder's stack
-                const float shift = g_spotDistance * (1.0f - 1.0f / k);
-                wrf(pos, rdf(pos) + g_spotDir[0] * shift);
-                wrf(pos + 4u, rdf(pos + 4u) + g_spotDir[1] * shift);
+                const float k = carDistance(), kp = pedDistance();
+                const uint32_t ra = GPR_U32(ctx, 31);
+                if (k > 1.0f && ra >= kSpotFinder && ra < kSpotFinderEnd)
+                {
+                    g_rdram = rdram;
+                    const uint32_t pos = GPR_U32(ctx, 5); // the centre (x, y) on the finder's stack
+                    const float shift = g_spotDistance * (1.0f - 1.0f / k);
+                    wrf(pos, rdf(pos) + g_spotDir[0] * shift);
+                    wrf(pos + 4u, rdf(pos + 4u) + g_spotDir[1] * shift);
+                }
+                else if (ra == kPedNodeListReturn)
+                {
+                    if (kp > 1.0f)
+                    {
+                        g_rdram = rdram;
+                        g_pedFarWindow = !g_pedFarWindow;
+                        const float shift = g_pedFarWindow
+                                                ? (145.0f * std::min(1.0f, (kp - 1.0f) / 3.5f))
+                                                : (40.0f * std::min(1.0f, (kp - 1.0f) / 3.0f));
+                        g_pedNodeShift = shift;
+                        const uint32_t pos = GPR_U32(ctx, 5);
+                        wrf(pos, rdf(pos) + rdf(kCameraFront) * shift);
+                        wrf(pos + 4u, rdf(pos + 4u) + rdf(kCameraFront + 4u) * shift);
+                    }
+                    else
+                    {
+                        g_pedNodeShift = 0.0f;
+                    }
+                }
             }
             g_nodeList(rdram, ctx, runtime);
         }
@@ -710,15 +781,18 @@ namespace vcs::distance
         PS2Runtime::RecompiledFunction g_addToPopulation = nullptr;
         PS2_GUEST_CC void addToPopulation(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            const uint32_t ra = GPR_U32(ctx, 31);
-            const float k = pedDistance();
-            if (ra >= kFill && ra < kFillEnd)
+            if (ctx->pc == kAddToPopulation)
             {
-                ctx->f[12] *= k; // nearest in view
-                ctx->f[13] *= k; // farthest in view
+                const uint32_t ra = GPR_U32(ctx, 31);
+                const float k = pedDistance(), kd = pedDensityDistance();
+                if (ra >= kFill && ra < kFillEnd)
+                {
+                    ctx->f[12] *= kd; // nearest in view
+                    ctx->f[13] *= k;  // farthest in view
+                }
+                ctx->f[14] *= kd; // nearest out of view
+                ctx->f[15] *= kd; // farthest out of view
             }
-            ctx->f[14] *= k; // nearest out of view
-            ctx->f[15] *= k; // farthest out of view
             g_addToPopulation(rdram, ctx, runtime);
         }
 
@@ -850,7 +924,7 @@ namespace vcs::distance
                   "VCS_DETAIL_DISTANCE", 1000, g_detail);
         addSlider("world.population_distance", "Population distance",
                   "How far away cars and people appear and stay: 0 is the original, 100 three times as far for cars "
-                  "(twice for people). Their numbers grow with the area, so the streets stay as busy.",
+                  "(up to five times as far for people, ~325 m). Their numbers grow with the area, so the streets stay as busy.",
                   "VCS_POPULATION_DISTANCE", 300, g_population);
         {
             settings::Spec s;
@@ -877,6 +951,18 @@ namespace vcs::distance
                   "VCS_PEDESTRIAN_DENSITY", 400, g_pedestrians);
     }
 
+    float realCarOuterRadius()
+    {
+        const float base = g_genBase > 0.0f ? g_genBase : 1.0f;
+        return 160.0f * base * carDistance();
+    }
+
+    float realPedOuterRadius()
+    {
+        const float base = g_genBase > 0.0f ? g_genBase : 1.0f;
+        return 65.0f * base * pedDistance();
+    }
+
     void install(PS2Runtime &runtime)
     {
         g_original = runtime.lookupFunction(kCameraProcess);
@@ -897,6 +983,8 @@ namespace vcs::distance
             runtime.replaceFunction(kPedGetAt, &pedGetAt);
         if ((g_spotFinder = runtime.lookupFunction(kSpotFinder)))
             runtime.replaceFunction(kSpotFinder, &spotFinder);
+        if ((g_pedSpotFinder = runtime.lookupFunction(kPedSpotFinder)))
+            runtime.replaceFunction(kPedSpotFinder, &pedSpotFinder);
         if ((g_nodeList = runtime.lookupFunction(kNodeList)))
             runtime.replaceFunction(kNodeList, &nodeList);
         if ((g_addToPopulation = runtime.lookupFunction(kAddToPopulation)))
@@ -927,13 +1015,40 @@ namespace vcs::distance
         ps2control::addCommand("distancestate", [](const std::string &, ps2control::Reply reply) {
             if (!g_rdram)
                 return reply("error the camera has not run yet");
-            char text[320];
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            auto maxPoolDist = [&](uint32_t global, uint32_t entrySize, bool isVehiclePool) {
+                const uint32_t pool = static_cast<uint32_t>(rd32(global));
+                if (!pool)
+                    return 0.0f;
+                const uint32_t entries = static_cast<uint32_t>(rd32(pool));
+                const uint32_t flags = static_cast<uint32_t>(rd32(pool + 4u));
+                const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), 1024u);
+                float maxD = 0.0f;
+                for (uint32_t i = 0; i < size; ++i)
+                {
+                    if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
+                        continue;
+                    const uint32_t e = entries + i * entrySize;
+                    if (isVehiclePool && static_cast<uint32_t>(rd32(e + 0x5Cu)) == 0x004901C8u)
+                        continue;
+                    if (!isVehiclePool && (rd32(e + 0x538u) != 0 || rd32(e + 0x8C4u) == 0x39))
+                        continue;
+                    const float d = std::hypot(rdf(e + 0x30u) - cx, rdf(e + 0x34u) - cy);
+                    if (d < 2000.0f)
+                        maxD = std::max(maxD, d);
+                }
+                return maxD;
+            };
+            const float maxCarD = maxPoolDist(kCarPool, 0x8C0u, true);
+            const float maxPedD = maxPoolDist(kPedPool, 0xD20u, false);
+            char text[400];
             std::snprintf(text, sizeof(text),
                           "ok view=%d detail=%d scale=%.3f lod=%.3f gen=%.3f population=%d traffic=%d pedestrians=%d "
-                          "cars=%d/%d peds=%d/%d pools=%u,%u numbers=%.3f,%.3f budget=%.2f",
+                          "cars=%d/%d peds=%d/%d pools=%u,%u numbers=%.3f,%.3f budget=%.2f peddist=%.2f maxcard=%.0f maxpedd=%.0f",
                           g_view.load(), g_detail.load(), rdf(kLodDistScale), rdf(kLodMultiplier), rdf(kGenMultiplier),
                           g_population.load(), g_traffic.load(), g_pedestrians.load(), rd32(kRandomCars), rd32(kMaxCars),
-                          rd32(kPeds), rd32(kMaxPeds), poolSize(kPedPool), poolSize(kCarPool), rdf(kCarNumber), rdf(kPedNumber), g_budget);
+                          rd32(kPeds), rd32(kMaxPeds), poolSize(kPedPool), poolSize(kCarPool), rdf(kCarNumber), rdf(kPedNumber),
+                          g_budget, pedDistance(), maxCarD, maxPedD);
             reply(text);
         });
     }

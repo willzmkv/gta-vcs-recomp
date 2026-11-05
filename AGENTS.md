@@ -96,6 +96,8 @@ python tools/rig.py start --save build/rig/saves/fortbaxter   # straight into ga
 python tools/rig.py player|scripts|peekf 0x4e4910 1|scm <hex>  # inspect / drive the running game
                                                               # (control channel: `campose x y z yaw pitch|off` = free camera there)
 python tools/tour.py OUT [--every 9 --limit 18]               # world tour (quick subset with --every/--limit)
+import spots; spots.put(g, "police"|"havana")                  # (tools/spots.py) the reference spots for pictures and measurements
+                                                              # of the city: pavement facing the street, camera behind the player
 python tools/saves.py [OUT]                                   # save / Load Game / Delete Game through the menus
 python tools/soak.py [OUT] --hours 3                          # hours of autodrive: crash / hang / leak / falling
 python tools/shakedown.py [OUT]                               # mission 50: cutscene + shop entry (the "Loading..." hang)
@@ -214,6 +216,11 @@ card copies to start from (never the user's live card).
   zipped into `<data>/backups/auto-*.zip` before every change (`[MC] card backup` in the log).
 - No fire (flame-thrower, molotovs, explosions, burning cars) while their smoke shows: GS sprites lost in the D3D11
   renderer - the pixel shader's depth output was the cause once (game-internals.md 6m); `tools/fire_check.py`.
+- Decorative crowds or traffic appearing close to the player or replacing real peds/cars, or distant lights missing:
+  read `docs/T2_POPULATION_AND_DISTANT_LIFE_PLAN.md` before touching `vcs_distance.*`, `vcs_distant.*`, or proxy draws
+  in `vcs_hle_world.cpp`. Never clamp `pedDistance()` or `carDistance()` when `Distant crowds` / `Distant traffic` are
+  enabled, never read `0x006F4CA0` directly inside `CWorld::Process`, and keep all decorative proxies strictly beyond
+  the real population band (`>= 320-350 m`).
 - First things to grep in a log: `[ee] thread N -> dormant`, `[guest-branch:unlisted-resume]`.
 
 ## Working style for long autonomous runs

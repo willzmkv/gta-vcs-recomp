@@ -242,6 +242,11 @@ at the game's own values (Graphics > Distance and population (experimental)), th
   (2) LOD as Project2DFX: the detailed world further than the camera's cell (step 4), distant lights / coronas
   (step 6, DISTANT_LIFE.md A4), distant traffic's hand-off and fades (A3); (3) a soak at the maximums.
 
+**Status (2026-11-05): T2 distance-band hand-off, real 300–400 m population, and distant coronas fixed** (`docs/T2_POPULATION_AND_DISTANT_LIFE_PLAN.md`):
+- Fixed `vcs_distance.cpp::pedDistance()` so enabling `Distant crowds` no longer shrinks real pedestrians back to PS2's 35–65 m (`1.0x`); raised `kMaxPedDistance = 5.0f` (~325 m survival / ~350 m render visibility) with alternating `+40 m` / `+145 m` forward-shifted ped node cache (`nodeList`, `ra == 0x26812C`) and 4-band stratified `pedSpotFinder` (`0x268048`) so real pedestrians cover `35..325 m` alongside real vehicles (`35..400+ m`).
+- Enforced strict band hand-off in `vcs_distant.cpp`: decorative traffic (`band()`) starts strictly at `max(340 m, realCarOuterRadius() + 15 m)` (`495..1045 m` at slider 100) and decorative crowds (`crowdBand()`) start strictly at `max(310 m, realPedOuterRadius() + 15 m)` (`340..640 m` at slider 100), with strict `d < lo` recycling and `ctx->pc` entry guards on `worldProcess`, `entityRender`, and `preRenderLists`.
+- Hooked `CCoronas::RegisterCorona` (`0x0027DD80`): suppresses corona registrations from off-screen template cars added by `addTemplates(false)`, culls behind-camera coronas (`dot < -5 m`) so high `View distance` does not starve the 56-slot `CCoronas::aCoronas` table (`0x00512560`), scales vehicle corona `farClip` up to `250 m` and building/streetlamp 2DFX `farClip` up to `300 m`, and evicts the farthest/behind-camera slot when full (`veh=27/56` active at night with `view_distance=50`).
+
 ### T3 - Pre-HUD post-processing pass
 
 **Goal.** A native pass at the point of the frame where the 3D is done and the 2D has not started, with the frame's

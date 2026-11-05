@@ -670,6 +670,44 @@ volk + VMA). It keeps the D3D11 backend's behaviour, which the renderer was writ
 - Hidden windows get no swapchain (an off-screen back buffer).
 Checks still to do: picture against D3D11 on the same PC (scenes), validation clean, the in-pass suspension count.
 
+### D3D12 backend (Windows, 2026-11-04)
+
+`src/rhi/d3d12/rhi_d3d12.cpp` implements rhi.h on Direct3D 12 (feature level 11_0), for the main thread's per-draw
+cost on AMD's D3D11 driver (DECISIONS.md 2026-11-04; the default on Windows since 2026-11-05, D3D11 when no D3D12
+device can be made; Graphics > Graphics API, `VCS_RHI=d3d12`). Built as the Vulkan
+backend, with D3D11's DXBC shaders unchanged:
+- One root signature: b0..b3 root constant buffer views (vertex + pixel), t0..t7 and s0..s7 descriptor tables (pixel).
+  The texture tables are copied into a shader-visible heap per frame (cached by contents, skipped when the draw's
+  textures are the last draw's); sampler tables live while the sampler heap lasts. Unbound slots read a null view.
+- Dynamic buffers as Vulkan's: the CPU copy, a slice of the frame's upload ring at the first use after an update.
+  Static buffers (the native meshes) are ranges of 32 MB GPU pages, filled by the set-up commands (submitted before
+  the frame's own): a committed resource per mesh was a driver allocation each - up to 125 a frame while driving, the
+  main thread at 9-160 ms a frame; with the pages 1-2 ms (hidden rig, Starfish Island / Viceport).
+- Textures carry their resource state; a pass's targets go to RENDER_TARGET / DEPTH_WRITE for it and back to their
+  resting state after (PIXEL_SHADER_RESOURCE when sampled). No render-pass API: copies inside a pass are plain.
+- Pipelines per (colour format, depth format, samples) at the first draw; generateMips draws each level from the one
+  above (D3D12 has no GenerateMips); new committed resources start as zeros.
+- Textures made on helper threads (freeThreadedCreation; the GS textures' helpers are on with D3D12, as with D3D11) stage
+  their data in ranges of 64 MB upload chunks, copied by the owner's set-up commands at its next submit. Sampled textures
+  with data are placed in 128 MB heaps; targets stay committed. Dear ImGui through the RHI (render/ui_renderer.cpp).
+- Frees (after the frame's fence) run on a thread of their own (`RhiReaper`): releasing a resource costs ~0.25 ms in
+  the driver and the texture cache lets 750-3800 go at once - 160-200 ms of the main thread in one frame before.
+- Stutter rig (`cruise.py`, 144 km/h through the city, 2026-11-04): D3D11 p95 20.6 / p99 33.1 ms, 297 frames over
+  25 ms, 45 hitches; D3D12 p95 16.7 / p99 16.9 ms, 37 frames over 25 ms, 16 hitches (texture bursts of 200-350 new
+  textures left, in both). `PS2X_HOST_SPIKES=<ms>` prints a long frame's D3D12 time: pipelines, textures, buffers,
+  memory, GPU waits, present, frees.
+Checked against Microsoft's "Porting from Direct3D 11 to Direct3D 12" (the player's reference): device / swapchain made
+apart through DXGI, committed resources, uploads through mappable memory with GetCopyableFootprints, one PSO for the
+state, the DIRECT list as the immediate context, fences and a ring for WRITE_DISCARD, descriptor tables renamed by the
+app, explicit ResourceBarrier transitions, FLIP_DISCARD with one RTV per back buffer, GenerateMips by shaders. Not yet:
+shaders built as SM 5.1 / 6 (the guide's advice; D3D11's SM 5.0 DXBC runs), GPU timing through a query heap
+(`PS2X_GPU_TIMING` is D3D11 only).
+Checked (2026-11-04, hidden rig): pictures as D3D11's at the same spots; the debug layer clean (`PS2X_RHI_DEBUG=1`
+prints its messages into the log); `PS2X_RHI_STATS=1` per-frame counts (draws, passes, barriers, textures / buffers /
+pipelines made, tables, fence waits). To do: main-thread ms on the player's PC in the dense streets (a hidden window
+does not show AMD's D3D11 cost), scenes compare, the readback of the rig's brightness probe (a wait every frame, as
+on D3D11).
+
 ## Verification
 
 - Every stage: the stage 0 capture diff over the reference scenes; perf CSV
