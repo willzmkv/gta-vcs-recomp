@@ -4390,6 +4390,32 @@ namespace
 
         GSHwPresenter &presenter() override { return *this; }
 
+        // [gta-recomp] Helper thread count for early texture decoding & mip creation:
+        // 1) PS2X_HW_TEXTURE_HELPERS=N (exact number: 0 = disabled, >0 = N threads)
+        // 2) PS2X_HW_EARLY_TEXTURES: 0 off, 1 on; unset: auto based on backend (on for D3D11 & D3D12, off for Vulkan)
+        // 3) Auto-scaling: according to machine cores (hardware_concurrency), leaving cores for game & render threads.
+        static uint32_t computeTextureHelpers(rhi::Backend backend)
+        {
+            if (const char *th = std::getenv("PS2X_HW_TEXTURE_HELPERS"))
+            {
+                int n = std::atoi(th);
+                return n > 0 ? static_cast<uint32_t>(std::clamp(n, 1, 32)) : 0u;
+            }
+            static const int early = [] {
+                const char *e = std::getenv("PS2X_HW_EARLY_TEXTURES");
+                return e && *e ? (*e == '0' ? 0 : 1) : -1;
+            }();
+            const bool earlyOn = early == 1 || (early < 0 && (backend == rhi::Backend::D3D11 || backend == rhi::Backend::D3D12));
+            if (!earlyOn)
+                return 0u;
+            unsigned int hw = std::thread::hardware_concurrency();
+            if (hw <= 2)
+                return 1u;
+            if (hw <= 4)
+                return 2u;
+            return std::clamp<uint32_t>(hw / 2, 2u, 8u);
+        }
+
         // ---- GSHwPresenter (main thread) ---------------------------------------------------------------------
         bool executeAndGetDisplay(rhi::Device &device, rhi::Texture *&texture, uint32_t &width, uint32_t &height) override
         {
@@ -4403,17 +4429,21 @@ namespace
                 return false;
             m_blockCompression = device.blockCompression(); // [gta-recomp] texture packs' block-compressed DDS
             m_replacements->setBlockCompression(m_blockCompression);
-            // [gta-recomp] PS2X_HW_EARLY_TEXTURES: 0 off, 1 on; unset: on with D3D11 and D3D12, off with Vulkan - its main
-            // thread only records a copy per new texture (~8 ms a 350-texture burst, D3D11's creation was 52), and on a
-            // 2-core CPU the helpers slowed the GS stage's decode more than they saved there (PERFORMANCE.md 25). D3D12
-            // makes a committed resource per texture: ~0.7 ms each on the main thread (193 ms for a 267-texture burst)
-            static const int early = [] {
-                const char *e = std::getenv("PS2X_HW_EARLY_TEXTURES");
-                return e && *e ? (*e == '0' ? 0 : 1) : -1;
-            }();
-            const bool earlyOn = early == 1 || (early < 0 && (device.backend() == rhi::Backend::D3D11 || device.backend() == rhi::Backend::D3D12));
-            if (earlyOn && !m_earlyDevice.load(std::memory_order_relaxed) && device.freeThreadedCreation())
+            // [gta-recomp] Texture helper threads: PS2X_HW_TEXTURE_HELPERS=N or PS2X_HW_EARLY_TEXTURES
+            // Unset: auto-scaled to machine hardware concurrency (half of CPU cores, clamped to 2..8 on D3D11/D3D12)
+            static const uint32_t helperCount = computeTextureHelpers(device.backend());
+            m_helperThreads = helperCount;
+            if (helperCount > 0 && !m_earlyDevice.load(std::memory_order_relaxed) && device.freeThreadedCreation())
+            {
                 m_earlyDevice.store(&device, std::memory_order_release);
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    std::fprintf(stderr, "[gs-hw] early texture helpers: %u threads (hardware concurrency: %u)\n",
+                                 helperCount, std::thread::hardware_concurrency());
+                }
+            }
             if (m_nativeFrame) // [gta-recomp] the picture's targets follow the window (gsHwSetFrameSize)
             {
                 // PS2X_HW_FRAME=WxH (testing): a full-screen window's frame size whatever the window
@@ -5054,13 +5084,20 @@ namespace
             return true;
         }
 
+        void ensureMakersLocked(rhi::Device &dev)
+        {
+            if (m_makers.empty() && m_helperThreads > 0)
+                for (uint32_t i = 0; i < m_helperThreads; ++i)
+                    m_makers.emplace_back([this, &dev] { textureMaker(dev); });
+        }
+
         // [gta-recomp] With a free-threaded device (D3D11, Vulkan) a new texture is made by helper threads, right after its decode:
         // the driver's creation and first upload ran on the main thread between its draws, and a burst of new textures
         // (driving into a new area: 100-600 in a frame) held the picture back there (PERFORMANCE.md 21, issue #29); made
-        // on the GS stage itself, the burst held back the frame being built. The helpers (two) make it - with its mip
+        // on the GS stage itself, the burst held back the frame being built. The helpers make it - with its mip
         // chain for anisotropic filtering - while the GS stage goes on; the main thread takes it when it executes the
         // TexCreate (waiting only if it is not done yet). True when handed off (tc.pixels moved there).
-        // PS2X_HW_EARLY_TEXTURES=0: made on the main thread, as before (the default with Vulkan; =1 turns it on there).
+        // Configurable via PS2X_HW_TEXTURE_HELPERS=N or PS2X_HW_EARLY_TEXTURES.
         bool makeTextureEarly(TexCreate &tc, bool mipChain)
         {
             rhi::Device *dev = m_earlyDevice.load(std::memory_order_acquire);
@@ -5080,9 +5117,7 @@ namespace
             tc.early = job;
             {
                 std::lock_guard<std::mutex> lock(m_makeMutex);
-                if (m_makers.empty())
-                    for (int i = 0; i < 2; ++i)
-                        m_makers.emplace_back([this, dev] { textureMaker(*dev); });
+                ensureMakersLocked(*dev);
                 m_makeQueue.push_back(std::move(job));
             }
             m_makeCv.notify_one();
@@ -5103,9 +5138,7 @@ namespace
             tc.early = job;
             {
                 std::lock_guard<std::mutex> lock(m_makeMutex);
-                if (m_makers.empty())
-                    for (int i = 0; i < 2; ++i)
-                        m_makers.emplace_back([this, dev] { textureMaker(*dev); });
+                ensureMakersLocked(*dev);
                 m_makeQueue.push_back(std::move(job));
             }
             m_makeCv.notify_one();
@@ -5473,6 +5506,7 @@ namespace
         uint32_t m_scale;
         bool m_nativeFrame = false; // [gta-recomp] GSHwOptions::nativeFrame
         uint32_t m_msaa = 1, m_anisotropy = 0; // [gta-recomp] GSHwOptions
+        uint32_t m_helperThreads = 0; // [gta-recomp] PS2X_HW_TEXTURE_HELPERS / PS2X_HW_EARLY_TEXTURES
         std::atomic<rhi::Device *> m_earlyDevice{nullptr}; // [gta-recomp] makeTextureEarly: set by the main thread
         std::mutex m_makeMutex;                             // [gta-recomp] makeTextureEarly's helper threads
         std::condition_variable m_makeCv;
