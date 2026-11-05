@@ -104,17 +104,33 @@ namespace vcs::distance
         constexpr uint32_t kPedPoolReturn = 0x00288144u, kCarPoolReturn = 0x00288168u; // their calls in FUN_00288100
         constexpr uint32_t kPedPool = 0x00487A94u, kCarPool = 0x00487A98u;           // CPool *: +8 size
         // Realistic Open Limit Adjuster (OLA) pools for Vice City:
-        // 200 peds (PC GTA VC was 140) and 120 vehicles (PC GTA VC was 110)
-        constexpr uint32_t kLargePeds = 200u, kLargeCars = 120u;
+        // 240 peds (PC GTA VC was 140) and 140 vehicles (PC GTA VC was 110)
+        constexpr uint32_t kLargePeds = 240u, kLargeCars = 140u;
         constexpr uint32_t kCarsKept = 25u; // vehicle slots left for missions, parked cars, the player's
         constexpr uint32_t kPedsKept = 35u; // ped slots left for missions and the player, besides a driver a car
 
         PS2Runtime::RecompiledFunction g_original = nullptr, g_pedPoolCtor = nullptr, g_carPoolCtor = nullptr;
         PS2Runtime::RecompiledFunction g_atomicFromDistance = nullptr, g_func3A53E0 = nullptr, g_largestLodDistance = nullptr;
+        PS2Runtime::RecompiledFunction g_func35E590 = nullptr;
         constexpr uint32_t kFunc3A53E0 = 0x003A53E0u;
+        constexpr uint32_t kFunc35E590 = 0x0035E590u;
+
+        // Call-site return addresses of func_35E590 (frustum ray-plane intersection):
+        // 1. FUN_0035e620 (standard entities):
+        constexpr uint32_t kFrustumRayReturn1_Standard = 0x0035EC90u;
+        constexpr uint32_t kFrustumRayReturn2_Standard = 0x0035ED08u;
+        constexpr uint32_t kFrustumRayReturn3_Standard = 0x0035ED80u;
+        constexpr uint32_t kFrustumRayReturn4_Standard = 0x0035EDF8u;
+        // 2. FUN_003606c8 (fading entities / big buildings):
+        constexpr uint32_t kFrustumRayReturn1_Fading = 0x00360B24u;
+        constexpr uint32_t kFrustumRayReturn2_Fading = 0x00360B9Cu;
+        constexpr uint32_t kFrustumRayReturn3_Fading = 0x00360C14u;
+        constexpr uint32_t kFrustumRayReturn4_Fading = 0x00360C8Cu;
+
         PS2Runtime::RecompiledFunction g_readers[kReaderCount] = {};
         std::atomic<uint32_t> g_statClamp330Bypasses{0};
         std::atomic<uint32_t> g_statPrefetchLookahead{0};
+        std::atomic<uint32_t> g_statSectorLookaheads{0};
         std::atomic<float> g_cameraSpeed{0.0f};
         float g_lastCamX = 0.0f, g_lastCamY = 0.0f;
         bool g_lastCamInit = false;
@@ -316,11 +332,11 @@ namespace vcs::distance
             // that shares the room left, in proportion.
             // Realistic Open Limit Adjuster (OLA) caps for 1986 Vice City:
             // Base PS2: 16 cars, 30 peds.
-            // Realistic OLA target: up to 52 active cars and 86 active pedestrians (~20-25% above baseline OLA).
+            // Realistic OLA target: up to 64 active cars and 104 active pedestrians (~20-25% boost over initial calibration).
             // This provides rich, continuous traffic and bustling sidewalks without
             // unrealistic 1000-NPC gridlocks or single-threaded MIPS CPU starvation.
-            constexpr int32_t kOlaMaxCars = 52;
-            constexpr int32_t kOlaMaxPeds = 86;
+            constexpr int32_t kOlaMaxCars = 64;
+            constexpr int32_t kOlaMaxPeds = 104;
             const int32_t carPool = static_cast<int32_t>(poolSize(kCarPool)), pedPool = static_cast<int32_t>(poolSize(kPedPool));
             const int32_t carRoom = std::clamp<int32_t>(carPool - static_cast<int32_t>(kCarsKept), g_maxCars, kOlaMaxCars);
             int32_t maxCars = std::clamp(static_cast<int32_t>(std::lround(g_maxCars * cars)), 0, carRoom);
@@ -567,6 +583,93 @@ namespace vcs::distance
                 const float prefetchBonus = std::max(220.0f, 140.0f + speed * 6.0f) * scale;
                 ctx->f[0] += prefetchBonus;
                 g_statPrefetchLookahead.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        // CRenderer frustum ray-plane intersection (FUN_0035E590):
+        // FUN_0035e620 (standard entities) and FUN_003606c8 (fading entities / big buildings) project the 4 corners of
+        // the view frustum onto a hardcoded ground plane $f12 = -100.0f at return addresses 0x35EC90..0x35EDF8 and
+        // 0x360B24..0x360C8C. This restricted the 50x50 world sector scanning bounding box to merely 1-2 sectors ahead
+        // (~100m-160m), starving CStreaming of advance notice for props, roadside signage, street poles, antennas, and
+        // parked vehicles when driving at high speed or turning corners.
+        // We expand lookahead plane distance to 600m-1000m based on viewFactor and camera speed, clamp rays forward, and on
+        // the 4th ray inject an omnidirectional 350m corner-turning radius plus lookahead cone into the caller's stack bounding box.
+        PS2_GUEST_CC void func35E590(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ra = GPR_U32(ctx, 31);
+            const bool isStandard = (ra == kFrustumRayReturn1_Standard || ra == kFrustumRayReturn2_Standard ||
+                                     ra == kFrustumRayReturn3_Standard || ra == kFrustumRayReturn4_Standard);
+            const bool isFading = (ra == kFrustumRayReturn1_Fading || ra == kFrustumRayReturn2_Fading ||
+                                   ra == kFrustumRayReturn3_Fading || ra == kFrustumRayReturn4_Fading);
+
+            if (!isStandard && !isFading)
+                return g_func35E590(rdram, ctx, runtime);
+
+            g_rdram = rdram;
+            const float viewFactor = percent(g_view);
+            const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
+            // 600m to 1000m lookahead based on viewFactor and camera speed (e.g. Banshee at 45 m/s):
+            const float lookahead = std::clamp(600.0f * std::max(1.0f, viewFactor) + speed * 8.0f, 600.0f, 1000.0f);
+
+            ctx->f[12] = -lookahead;
+
+            const uint32_t callerSp = GPR_U32(ctx, 29);
+            const uint32_t outAddr = GPR_U32(ctx, 4);
+
+            g_func35E590(rdram, ctx, runtime);
+
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            const float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u);
+
+            // Ensure projected ray intersection never points backwards if camera pitch tilts upward:
+            const float rx = rdf(outAddr), ry = rdf(outAddr + 4u);
+            const float dot = (rx - cx) * fx + (ry - cy) * fy;
+            if (dot < 0.0f)
+            {
+                wrf(outAddr, cx + fx * lookahead);
+                wrf(outAddr + 4u, cy + fy * lookahead);
+            }
+
+            // On the 4th ray return, expand the caller's stack bounding box before the sector loop executes:
+            if (ra == kFrustumRayReturn4_Standard || ra == kFrustumRayReturn4_Fading)
+            {
+                const uint32_t minX_addr = callerSp + (isStandard ? 0xB0u : 0x90u);
+                const uint32_t minY_addr = callerSp + (isStandard ? 0xB4u : 0x94u);
+                const uint32_t maxX_addr = callerSp + (isStandard ? 0xB8u : 0x98u);
+                const uint32_t maxY_addr = callerSp + (isStandard ? 0xBCu : 0x9Cu);
+
+                float minX = rdf(minX_addr);
+                float maxX = rdf(maxX_addr);
+                float minY = rdf(minY_addr);
+                float maxY = rdf(maxY_addr);
+
+                // 1. Omnidirectional corner-turning radius around camera (350m covers ~4.5 sectors in every direction):
+                constexpr float kCornerRadius = 350.0f;
+                minX = std::min(minX, cx - kCornerRadius);
+                maxX = std::max(maxX, cx + kCornerRadius);
+                minY = std::min(minY, cy - kCornerRadius);
+                maxY = std::max(maxY, cy + kCornerRadius);
+
+                // 2. Forward lookahead cone (600m - 1000m along camera view direction):
+                const float halfWidth = lookahead * 0.7f;
+                const float p1x = cx + fx * lookahead - fy * halfWidth;
+                const float p1y = cy + fy * lookahead + fx * halfWidth;
+                const float p2x = cx + fx * lookahead + fy * halfWidth;
+                const float p2y = cy + fy * lookahead - fx * halfWidth;
+                const float p3x = cx + fx * lookahead;
+                const float p3y = cy + fy * lookahead;
+
+                minX = std::min({minX, p1x, p2x, p3x});
+                maxX = std::max({maxX, p1x, p2x, p3x});
+                minY = std::min({minY, p1y, p2y, p3y});
+                maxY = std::max({maxY, p1y, p2y, p3y});
+
+                wrf(minX_addr, minX);
+                wrf(maxX_addr, maxX);
+                wrf(minY_addr, minY);
+                wrf(maxY_addr, maxY);
+
+                g_statSectorLookaheads.fetch_add(1, std::memory_order_relaxed);
             }
         }
 
@@ -1299,6 +1402,8 @@ namespace vcs::distance
             runtime.replaceFunction(kFunc3A53E0, &func3A53E0);
         if ((g_largestLodDistance = runtime.lookupFunction(kLargestLodDistance)))
             runtime.replaceFunction(kLargestLodDistance, &largestLodDistance);
+        if ((g_func35E590 = runtime.lookupFunction(kFunc35E590)))
+            runtime.replaceFunction(kFunc35E590, &func35E590);
         if ((g_pedPoolCtor = runtime.lookupFunction(kPedPoolCtor)))
             runtime.replaceFunction(kPedPoolCtor, &pedPoolCtor);
         if ((g_carPoolCtor = runtime.lookupFunction(kCarPoolCtor)))
@@ -1342,13 +1447,14 @@ namespace vcs::distance
                   " cheap=" + std::to_string(g_lodCheap) +
                   " overflow=" + std::to_string(g_overflowUsed) + " peak=" + std::to_string(g_overflowPeak));
         });
-        // lodstats -> ok clamp330_skips=<skips> prefetch_expanded=<lookaheads> cargen_checks=<checks> cargen_active=<active> camspeed=<speed m/s>
+        // lodstats -> ok clamp330_skips=<skips> prefetch_expanded=<lookaheads> sectors_expanded=<lookaheads> cargen_checks=<checks> cargen_active=<active> camspeed=<speed m/s>
         ps2control::addCommand("lodstats", [](const std::string &, ps2control::Reply reply) {
             char text[256];
             std::snprintf(text, sizeof(text),
-                          "ok clamp330_skips=%u prefetch_expanded=%u cargen_checks=%u cargen_active=%u camspeed=%.1f",
+                          "ok clamp330_skips=%u prefetch_expanded=%u sectors_expanded=%u cargen_checks=%u cargen_active=%u camspeed=%.1f",
                           g_statClamp330Bypasses.load(std::memory_order_relaxed),
                           g_statPrefetchLookahead.load(std::memory_order_relaxed),
+                          g_statSectorLookaheads.load(std::memory_order_relaxed),
                           g_statCarGenChecks.load(std::memory_order_relaxed),
                           g_statCarGenActive.load(std::memory_order_relaxed),
                           g_cameraSpeed.load(std::memory_order_relaxed));
