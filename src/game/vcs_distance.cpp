@@ -111,9 +111,11 @@ namespace vcs::distance
 
         PS2Runtime::RecompiledFunction g_original = nullptr, g_pedPoolCtor = nullptr, g_carPoolCtor = nullptr;
         PS2Runtime::RecompiledFunction g_atomicFromDistance = nullptr, g_func3A53E0 = nullptr, g_largestLodDistance = nullptr;
-        PS2Runtime::RecompiledFunction g_func35E590 = nullptr;
+        PS2Runtime::RecompiledFunction g_func35E590 = nullptr, g_func35E620 = nullptr, g_func3606C8 = nullptr;
         constexpr uint32_t kFunc3A53E0 = 0x003A53E0u;
         constexpr uint32_t kFunc35E590 = 0x0035E590u;
+        constexpr uint32_t kFunc35E620 = 0x0035E620u;
+        constexpr uint32_t kFunc3606C8 = 0x003606C8u;
 
         // Call-site return addresses of func_35E590 (frustum ray-plane intersection):
         // 1. FUN_0035e620 (standard entities):
@@ -488,7 +490,7 @@ namespace vcs::distance
                 std::memcpy(&flags, rdram + ((mi + 0x3Au) & PS2_RAM_MASK), 2);
                 const int count = rdram[(mi + 0x38u) & PS2_RAM_MASK];
                 const float mult = rdf(kLodMultiplier);
-                const float propFloor = (view > 1.0f) ? std::min(260.0f * view, 360.0f) : 0.0f;
+                const float propFloor = (view > 1.0f) ? std::clamp(300.0f * view, 500.0f, 900.0f) : 0.0f;
                 const float last = count > 0 ? std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(count - 1)) * mult, propFloor) : 0.0f;
                 for (int i = (flags & 8u) ? (flags & 3u) : 0; i < count; ++i)
                 {
@@ -532,7 +534,7 @@ namespace vcs::distance
                     if (!(flags & 8u) && (flags & 3u))
                         idx = static_cast<int>(flags & 3u) - 1;
                     const float mult = rdf(kLodMultiplier);
-                    const float propFloor = std::min(260.0f * view, 360.0f);
+                    const float propFloor = std::clamp(300.0f * view, 500.0f, 900.0f);
                     const float limit = std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(idx)) * mult, propFloor);
                     if (distance < limit)
                         result = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(idx)));
@@ -577,11 +579,12 @@ namespace vcs::distance
             {
                 const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
                 const float scale = std::max(1.0f, viewFactor);
-                // Expand prefetch lookahead significantly during high-speed driving:
-                // Base 220m ensures roadside signs, poles, and shopfronts (like near Pay 'n' Spray)
+                // Expand prefetch lookahead significantly during high-speed driving or on foot:
+                // Base 350m ensures roadside signs, poles, and shopfronts (like near Pay 'n' Spray)
                 // are queued and alpha-faded well before arriving, eliminating late popping.
-                const float prefetchBonus = std::max(220.0f, 140.0f + speed * 6.0f) * scale;
-                ctx->f[0] += prefetchBonus;
+                const float prefetchBonus = std::max(350.0f, 200.0f + speed * 8.0f) * scale;
+                const float streamFloor = (viewFactor > 1.0f) ? std::clamp(350.0f * viewFactor, 550.0f, 950.0f) : 0.0f;
+                ctx->f[0] = std::max(ctx->f[0] + prefetchBonus, streamFloor);
                 g_statPrefetchLookahead.fetch_add(1, std::memory_order_relaxed);
             }
         }
@@ -671,6 +674,37 @@ namespace vcs::distance
 
                 g_statSectorLookaheads.fetch_add(1, std::memory_order_relaxed);
             }
+        }
+
+        // CRenderer::ConstructRenderList (FUN_0035E620):
+        // Rockstar implemented a camera mode switch at 0x35EA38: on-foot modes branch to FUN_0035DEA8
+        // which rasterizes only a narrow 300m triangle frustum, starving CStreaming and skipping the
+        // extended sector bounding box. Vehicle modes (1 and 37) take label_35ec70 which calls func35E590
+        // to compute a full bounding box. By temporarily presenting vehicle mode (1) to this check,
+        // ALL camera modes (on foot, sprint, aim, vehicle, helicopter) get the complete 600m-1000m
+        // forward sector scan and 350m omnidirectional corner-turning radius.
+        PS2_GUEST_CC void func35E620(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_rdram = rdram;
+            const uint8_t activeCam = rd8(0x006F4520u);
+            const uint32_t modeAddr = 0x006F4540u + static_cast<uint32_t>(activeCam & 3u) * 0x270u + 0x70u;
+            const uint16_t origMode = rd16(modeAddr);
+            wr16(modeAddr, 1u);
+            g_func35E620(rdram, ctx, runtime);
+            wr16(modeAddr, origMode);
+        }
+
+        // CRenderer::ConstructRenderList_FadingEntities (FUN_003606C8):
+        // Same camera mode switch at 0x360A5C for fading entities and large LOD buildings.
+        PS2_GUEST_CC void func3606C8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_rdram = rdram;
+            const uint8_t activeCam = rd8(0x006F4520u);
+            const uint32_t modeAddr = 0x006F4540u + static_cast<uint32_t>(activeCam & 3u) * 0x270u + 0x70u;
+            const uint16_t origMode = rd16(modeAddr);
+            wr16(modeAddr, 1u);
+            g_func3606C8(rdram, ctx, runtime);
+            wr16(modeAddr, origMode);
         }
 
         // The spot finder FUN_00267928(x, y, dirx, diry, distance, cos, nodes, ...) looks for a road node `distance` (110 x
@@ -1404,6 +1438,10 @@ namespace vcs::distance
             runtime.replaceFunction(kLargestLodDistance, &largestLodDistance);
         if ((g_func35E590 = runtime.lookupFunction(kFunc35E590)))
             runtime.replaceFunction(kFunc35E590, &func35E590);
+        if ((g_func35E620 = runtime.lookupFunction(kFunc35E620)))
+            runtime.replaceFunction(kFunc35E620, &func35E620);
+        if ((g_func3606C8 = runtime.lookupFunction(kFunc3606C8)))
+            runtime.replaceFunction(kFunc3606C8, &func3606C8);
         if ((g_pedPoolCtor = runtime.lookupFunction(kPedPoolCtor)))
             runtime.replaceFunction(kPedPoolCtor, &pedPoolCtor);
         if ((g_carPoolCtor = runtime.lookupFunction(kCarPoolCtor)))
