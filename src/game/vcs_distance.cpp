@@ -144,8 +144,20 @@ namespace vcs::distance
             std::memcpy(&v, g_rdram + (addr & PS2_RAM_MASK), 4);
             return v;
         }
+        uint16_t rd16(uint32_t addr)
+        {
+            uint16_t v;
+            std::memcpy(&v, g_rdram + (addr & PS2_RAM_MASK), 2);
+            return v;
+        }
+        uint8_t rd8(uint32_t addr)
+        {
+            return g_rdram[addr & PS2_RAM_MASK];
+        }
         void wrf(uint32_t addr, float f) { std::memcpy(g_rdram + (addr & PS2_RAM_MASK), &f, 4); }
         void wr32(uint32_t addr, int32_t v) { std::memcpy(g_rdram + (addr & PS2_RAM_MASK), &v, 4); }
+        void wr16(uint32_t addr, uint16_t v) { std::memcpy(g_rdram + (addr & PS2_RAM_MASK), &v, 2); }
+        void wr8(uint32_t addr, uint8_t v) { g_rdram[addr & PS2_RAM_MASK] = v; }
 
         uint32_t poolSize(uint32_t global)
         {
@@ -492,13 +504,13 @@ namespace vcs::distance
 
             g_largestLodDistance(rdram, ctx, runtime);
 
-            if (viewFactor <= 1.0f)
-                return;
-
             if (ra == kSetupEntityVisibility330ClampReturn)
             {
-                ctx->f[0] = 0.0f;
-                g_statClamp330Bypasses.fetch_add(1, std::memory_order_relaxed);
+                if (viewFactor > 1.0f)
+                {
+                    ctx->f[0] = 0.0f;
+                    g_statClamp330Bypasses.fetch_add(1, std::memory_order_relaxed);
+                }
             }
             else if (ra == kSetupEntityVisibilityPrefetchNoFadeReturn ||
                      ra == kSetupEntityVisibilityPrefetchWithFadeReturn ||
@@ -506,7 +518,11 @@ namespace vcs::distance
                      ra == kSetupBigBuildingPrefetchWithFadeReturn)
             {
                 const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
-                const float prefetchBonus = std::max(120.0f, 60.0f + speed * 4.0f) * viewFactor;
+                const float scale = std::max(1.0f, viewFactor);
+                // Expand prefetch lookahead significantly during high-speed driving:
+                // Base 220m ensures roadside signs, poles, and shopfronts (like near Pay 'n' Spray)
+                // are queued and alpha-faded well before arriving, eliminating late popping.
+                const float prefetchBonus = std::max(220.0f, 140.0f + speed * 6.0f) * scale;
                 ctx->f[0] += prefetchBonus;
                 g_statPrefetchLookahead.fetch_add(1, std::memory_order_relaxed);
             }
@@ -547,9 +563,13 @@ namespace vcs::distance
                 if (k > 1.0f)
                 {
                     const float base = g_genBase > 0.0f ? g_genBase : 1.0f;
-                    const float minLo = std::clamp(ctx->f[12], 10.0f, 35.0f * base);
+                    const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
+                    // Safe forward distance so pedestrians never pop in immediately in front of the vehicle/player bumper:
+                    // stationary: 55m; at 30 m/s (108 km/h): 85m; at 50 m/s (180 km/h): 115m.
+                    const float safeInViewMin = std::max(55.0f, 40.0f + speed * 1.5f);
+                    const float minLo = std::max(safeInViewMin, ctx->f[12]);
                     const float cacheReach = 155.0f + g_pedNodeShift;
-                    const float maxHi = std::min(60.0f * base * k, std::max(minLo + 35.0f, cacheReach));
+                    const float maxHi = std::max(minLo + 45.0f, std::min(70.0f * base * k, cacheReach));
                     const uint32_t pass = g_pedSpotPass++ & 3u;
                     if (maxHi > minLo + 40.0f)
                     {
@@ -646,6 +666,186 @@ namespace vcs::distance
             if (GPR_U32(ctx, 31) == kCarPoolReturn)
                 SET_GPR_U32(ctx, 5, poolSizeFor(GPR_U32(ctx, 5), 1, kLargeCars));
             g_carPoolCtor(rdram, ctx, runtime);
+        }
+
+        // CCarGenerators::Process (FUN_0040a9e0) evaluates parked/static car generators in 16 time slices
+        // across frames. In the original game, generators used hardcoded squared distance limits of
+        // 25600.0f (160m) for CheckForSpawning and 28900.0f (170m) for CCarGenerator::Process.
+        // At high driving speeds (e.g. Banshee at 45-55 m/s), 160m only provides ~3 seconds lookahead,
+        // which across 16 frame slices is insufficient for CStreaming to queue, load, and instantiate the
+        // vehicle (e.g. Firetruck at the Downtown fire station, parked cars near Pay 'n' Spray).
+        // We replace CCarGenerators::Process with a speed-scaled lookahead of 450m-625m so parked vehicles
+        // are streamed and placed well before arrival.
+        constexpr uint32_t kCarGeneratorsProcess = 0x0040A9E0u;
+        constexpr uint32_t kFindPlayerCoors = 0x0024A150u;
+        constexpr uint32_t kFindPlayerPed = 0x0024A2D0u;
+        constexpr uint32_t kFunc408058 = 0x00408058u;
+        constexpr uint32_t kCheckForSpawning = 0x0040A418u;
+        constexpr uint32_t kCarGeneratorProcess = 0x0040B348u;
+
+        PS2Runtime::RecompiledFunction g_carGeneratorsProcess = nullptr;
+        PS2Runtime::RecompiledFunction g_findPlayerCoors = nullptr;
+        PS2Runtime::RecompiledFunction g_findPlayerPed = nullptr;
+        PS2Runtime::RecompiledFunction g_func408058 = nullptr;
+        PS2Runtime::RecompiledFunction g_checkForSpawning = nullptr;
+        PS2Runtime::RecompiledFunction g_carGenProcess = nullptr;
+
+        std::atomic<uint32_t> g_statCarGenChecks{0};
+        std::atomic<uint32_t> g_statCarGenActive{0};
+
+        PS2_GUEST_CC void carGeneratorsProcess(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_rdram = rdram;
+
+            const uint32_t returnAddress = GPR_U32(ctx, 31);
+            const uint32_t originalSp = GPR_U32(ctx, 29);
+            const uint32_t sp = originalSp - 0x190u;
+            SET_GPR_U32(ctx, 29, sp);
+
+            uint64_t saved_s[8];
+            for (int i = 0; i < 8; ++i)
+                saved_s[i] = GPR_U64(ctx, 16 + i);
+            const float saved_f20 = ctx->f[20];
+
+            wr32(sp + 0x40u, 0);
+            wr32(sp + 0x48u, 0);
+            wr32(sp + 0x90u, 0);
+            wr32(sp + 0x98u, 0);
+
+            const uint32_t frameCounter = static_cast<uint32_t>(rd32(0x4CD124u));
+            const uint32_t slice = frameCounter & 0x0Fu;
+
+            SET_GPR_U32(ctx, 4, sp + 0xF0u);
+            SET_GPR_U32(ctx, 31, 0x40AA44u);
+            ctx->pc = kFindPlayerCoors;
+            g_findPlayerCoors(rdram, ctx, runtime);
+
+            const float playerX = rdf(sp + 0xF0u);
+            const float playerY = rdf(sp + 0xF4u);
+
+            SET_GPR_U32(ctx, 31, 0x40AA68u);
+            ctx->pc = kFindPlayerPed;
+            g_findPlayerPed(rdram, ctx, runtime);
+            const uint32_t playerPed = GPR_U32(ctx, 2);
+
+            const int16_t numGenerators = static_cast<int16_t>(rd16(0x4CD674u));
+            int32_t startIdx = static_cast<int32_t>((slice * 300) >> 4);
+            int32_t endIdx = static_cast<int32_t>(((slice + 1) * 300) >> 4);
+            if (endIdx > numGenerators)
+                endIdx = numGenerators;
+
+            const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
+            const float viewFactor = percent(g_view);
+            const float mult = std::max(1.0f, std::min(viewFactor, 1.25f));
+            const float baseDist = std::max(450.0f, 350.0f + speed * 3.5f) * mult;
+            const float thresh1Sq = baseDist * baseDist;
+            const float dist2 = baseDist + 25.0f;
+            const float thresh2Sq = dist2 * dist2;
+
+            const uint32_t pathsPtr = static_cast<uint32_t>(rd32(0x487490u));
+            const uint32_t coordsTable = pathsPtr ? static_cast<uint32_t>(rd32(pathsPtr)) : 0u;
+
+            if (coordsTable && startIdx < endIdx)
+            {
+                for (int32_t i = startIdx; i < endIdx; ++i)
+                {
+                    g_statCarGenChecks.fetch_add(1, std::memory_order_relaxed);
+                    const int16_t genIndex = static_cast<int16_t>(rd16(0x74D0E8u + static_cast<uint32_t>(i) * 2u));
+                    const uint32_t entryPtr = coordsTable + static_cast<uint32_t>(genIndex) * 10u;
+                    const int16_t rawX = static_cast<int16_t>(rd16(entryPtr));
+                    const int16_t rawY = static_cast<int16_t>(rd16(entryPtr + 2u));
+                    const float genX = static_cast<float>(rawX) * 0.125f;
+                    const float genY = static_cast<float>(rawY) * 0.125f;
+
+                    const float dx = genX - playerX;
+                    const float dy = genY - playerY;
+                    const float distSq = dx * dx + dy * dy;
+
+                    const uint32_t activeAddr = 0x74D340u + static_cast<uint32_t>(i);
+                    if (distSq < thresh1Sq)
+                    {
+                        const uint8_t bActive = rd8(activeAddr);
+                        if (bActive == 0)
+                        {
+                            wr8(activeAddr, 1);
+                            g_statCarGenActive.fetch_add(1, std::memory_order_relaxed);
+                            if (playerPed != 0)
+                            {
+                                SET_GPR_U32(ctx, 31, 0x40AB9Cu);
+                                ctx->pc = kFunc408058;
+                                g_func408058(rdram, ctx, runtime);
+                                const uint32_t randVal = GPR_U32(ctx, 2) & 100u;
+
+                                const uint8_t playerIdx = rd8(0x4CD128u);
+                                const uint32_t multPtr = static_cast<uint32_t>(rd32(0x4E4910u + static_cast<uint32_t>(playerIdx) * 400u));
+                                const uint16_t thresh = multPtr ? rd16(multPtr + 0x91Cu) : 0u;
+
+                                if (randVal < thresh)
+                                {
+                                    SET_GPR_U32(ctx, 4, static_cast<uint32_t>(genIndex));
+                                    SET_GPR_U32(ctx, 31, 0x40ABD0u);
+                                    ctx->pc = kCheckForSpawning;
+                                    g_checkForSpawning(rdram, ctx, runtime);
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        wr8(activeAddr, 0);
+                    }
+                }
+            }
+
+            const uint32_t sliceEntry = 0x7166F0u + slice * 48u;
+            const uint32_t state = static_cast<uint32_t>(rd32(sliceEntry + 32u));
+            if (state != 0)
+            {
+                const float p1x = rdf(sliceEntry + 0u);
+                const float p1y = rdf(sliceEntry + 4u);
+                const float p1z = rdf(sliceEntry + 8u);
+                const float p2x = rdf(sliceEntry + 16u);
+                const float p2y = rdf(sliceEntry + 20u);
+                const float p2z = rdf(sliceEntry + 24u);
+
+                const float midX = (p1x + p2x) * 0.5f;
+                const float midY = (p1y + p2y) * 0.5f;
+                const float midZ = (p1z + p2z) * 0.5f;
+
+                SET_GPR_U32(ctx, 4, sp + 0x130u);
+                SET_GPR_U32(ctx, 31, 0x40AC88u);
+                ctx->pc = kFindPlayerCoors;
+                g_findPlayerCoors(rdram, ctx, runtime);
+
+                const float curPx = rdf(sp + 0x130u);
+                const float curPy = rdf(sp + 0x134u);
+                const float curPz = rdf(sp + 0x138u);
+
+                const float dx = midX - curPx;
+                const float dy = midY - curPy;
+                const float dz = midZ - curPz;
+                const float distSq = dx * dx + dy * dy + dz * dz;
+
+                if (distSq < thresh2Sq)
+                {
+                    std::memcpy(rdram + ((sp + 0x120u) & PS2_RAM_MASK), rdram + (sliceEntry & PS2_RAM_MASK), 16);
+                    std::memcpy(rdram + ((sp + 0x130u) & PS2_RAM_MASK), rdram + ((sliceEntry + 16u) & PS2_RAM_MASK), 16);
+
+                    SET_GPR_U32(ctx, 4, sp + 0x120u);
+                    SET_GPR_U32(ctx, 5, sp + 0x130u);
+                    SET_GPR_U32(ctx, 31, 0x40AD30u);
+                    ctx->pc = kCarGeneratorProcess;
+                    g_carGenProcess(rdram, ctx, runtime);
+                }
+
+                wr32(sliceEntry + 32u, 0);
+            }
+
+            for (int i = 0; i < 8; ++i)
+                SET_GPR_U64(ctx, 16 + i, saved_s[i]);
+            ctx->f[20] = saved_f20;
+            SET_GPR_U32(ctx, 29, originalSp);
+            ctx->pc = returnAddress;
         }
 
         // Crowd LOD (the simulation by distance, as GTA IV / Project2DFX keep far things cheap). CWorld::Process
@@ -1081,6 +1281,15 @@ namespace vcs::distance
             runtime.replaceFunction(kRandomPedControl, &randomPedControl);
         if ((g_processCollision = runtime.lookupFunction(kProcessCollision)))
             runtime.replaceFunction(kProcessCollision, &processCollision);
+        if ((g_carGeneratorsProcess = runtime.lookupFunction(kCarGeneratorsProcess)) &&
+            (g_findPlayerCoors = runtime.lookupFunction(kFindPlayerCoors)) &&
+            (g_findPlayerPed = runtime.lookupFunction(kFindPlayerPed)) &&
+            (g_func408058 = runtime.lookupFunction(kFunc408058)) &&
+            (g_checkForSpawning = runtime.lookupFunction(kCheckForSpawning)) &&
+            (g_carGenProcess = runtime.lookupFunction(kCarGeneratorProcess)))
+        {
+            runtime.replaceFunction(kCarGeneratorsProcess, &carGeneratorsProcess);
+        }
         phases::install(runtime, std::make_index_sequence<phases::kMaxTargets>{});
         // crowdlod -> ok skipped=<ped updates skipped> processed=<LOD updates run> overflow=<sector entries in the
         //             overflow pool> peak=<most at once>
@@ -1089,13 +1298,15 @@ namespace vcs::distance
                   " cheap=" + std::to_string(g_lodCheap) +
                   " overflow=" + std::to_string(g_overflowUsed) + " peak=" + std::to_string(g_overflowPeak));
         });
-        // lodstats -> ok clamp330_skips=<skips> prefetch_expanded=<lookaheads> camspeed=<speed m/s>
+        // lodstats -> ok clamp330_skips=<skips> prefetch_expanded=<lookaheads> cargen_checks=<checks> cargen_active=<active> camspeed=<speed m/s>
         ps2control::addCommand("lodstats", [](const std::string &, ps2control::Reply reply) {
             char text[256];
             std::snprintf(text, sizeof(text),
-                          "ok clamp330_skips=%u prefetch_expanded=%u camspeed=%.1f",
+                          "ok clamp330_skips=%u prefetch_expanded=%u cargen_checks=%u cargen_active=%u camspeed=%.1f",
                           g_statClamp330Bypasses.load(std::memory_order_relaxed),
                           g_statPrefetchLookahead.load(std::memory_order_relaxed),
+                          g_statCarGenChecks.load(std::memory_order_relaxed),
+                          g_statCarGenActive.load(std::memory_order_relaxed),
                           g_cameraSpeed.load(std::memory_order_relaxed));
             reply(text);
         });
