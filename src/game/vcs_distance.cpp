@@ -104,13 +104,14 @@ namespace vcs::distance
         constexpr uint32_t kPedPoolReturn = 0x00288144u, kCarPoolReturn = 0x00288168u; // their calls in FUN_00288100
         constexpr uint32_t kPedPool = 0x00487A94u, kCarPool = 0x00487A98u;           // CPool *: +8 size
         // Realistic Open Limit Adjuster (OLA) pools for Vice City:
-        // 160 peds (PC GTA VC was 140) and 100 vehicles (PC GTA VC was 110)
-        constexpr uint32_t kLargePeds = 160u, kLargeCars = 100u;
+        // 200 peds (PC GTA VC was 140) and 120 vehicles (PC GTA VC was 110)
+        constexpr uint32_t kLargePeds = 200u, kLargeCars = 120u;
         constexpr uint32_t kCarsKept = 25u; // vehicle slots left for missions, parked cars, the player's
-        constexpr uint32_t kPedsKept = 30u; // ped slots left for missions and the player, besides a driver a car
+        constexpr uint32_t kPedsKept = 35u; // ped slots left for missions and the player, besides a driver a car
 
         PS2Runtime::RecompiledFunction g_original = nullptr, g_pedPoolCtor = nullptr, g_carPoolCtor = nullptr;
-        PS2Runtime::RecompiledFunction g_atomicFromDistance = nullptr, g_largestLodDistance = nullptr;
+        PS2Runtime::RecompiledFunction g_atomicFromDistance = nullptr, g_func3A53E0 = nullptr, g_largestLodDistance = nullptr;
+        constexpr uint32_t kFunc3A53E0 = 0x003A53E0u;
         PS2Runtime::RecompiledFunction g_readers[kReaderCount] = {};
         std::atomic<uint32_t> g_statClamp330Bypasses{0};
         std::atomic<uint32_t> g_statPrefetchLookahead{0};
@@ -315,11 +316,11 @@ namespace vcs::distance
             // that shares the room left, in proportion.
             // Realistic Open Limit Adjuster (OLA) caps for 1986 Vice City:
             // Base PS2: 16 cars, 30 peds.
-            // Realistic OLA target: up to 42 active cars and 70 active pedestrians.
+            // Realistic OLA target: up to 52 active cars and 86 active pedestrians (~20-25% above baseline OLA).
             // This provides rich, continuous traffic and bustling sidewalks without
             // unrealistic 1000-NPC gridlocks or single-threaded MIPS CPU starvation.
-            constexpr int32_t kOlaMaxCars = 42;
-            constexpr int32_t kOlaMaxPeds = 70;
+            constexpr int32_t kOlaMaxCars = 52;
+            constexpr int32_t kOlaMaxPeds = 86;
             const int32_t carPool = static_cast<int32_t>(poolSize(kCarPool)), pedPool = static_cast<int32_t>(poolSize(kPedPool));
             const int32_t carRoom = std::clamp<int32_t>(carPool - static_cast<int32_t>(kCarsKept), g_maxCars, kOlaMaxCars);
             int32_t maxCars = std::clamp(static_cast<int32_t>(std::lround(g_maxCars * cars)), 0, carRoom);
@@ -453,10 +454,12 @@ namespace vcs::distance
         // is set, else 0) to the count (+0x38) whose LOD distance (+0x2C) times LODDistMultiplier is beyond the distance,
         // 0 past the last. With a detail distance other than the view's, the distances before the last are scaled by
         // detail / view (at most the last); the original otherwise.
+        // For extended view distance, small attached props (dishes, antennas, signs) have tiny .IDE ranges (25m-40m).
+        // We enforce a propFloor (260m-360m) so they stay visible matching the parent building's LOD.
         PS2_GUEST_CC void atomicFromDistance(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const float view = percent(g_view), detail = percent(g_detail);
-            if (detail == view)
+            if (detail == view && view <= 1.0f)
                 return g_atomicFromDistance(rdram, ctx, runtime);
             g_rdram = rdram;
             const uint32_t mi = GPR_U32(ctx, 4);
@@ -469,17 +472,54 @@ namespace vcs::distance
                 std::memcpy(&flags, rdram + ((mi + 0x3Au) & PS2_RAM_MASK), 2);
                 const int count = rdram[(mi + 0x38u) & PS2_RAM_MASK];
                 const float mult = rdf(kLodMultiplier);
-                const float last = count > 0 ? rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(count - 1)) * mult : 0.0f;
+                const float propFloor = (view > 1.0f) ? std::min(260.0f * view, 360.0f) : 0.0f;
+                const float last = count > 0 ? std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(count - 1)) * mult, propFloor) : 0.0f;
                 for (int i = (flags & 8u) ? (flags & 3u) : 0; i < count; ++i)
                 {
                     float limit = rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(i)) * mult;
                     if (i < count - 1)
                         limit = std::min(limit * detail / view, last);
+                    else if (propFloor > 0.0f)
+                        limit = std::max(limit, propFloor);
                     if (distance < limit)
                     {
                         result = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(i)));
                         break;
                     }
+                }
+            }
+            SET_GPR_U32(ctx, 2, result);
+            ctx->pc = GPR_U32(ctx, 31);
+        }
+
+        // CBaseModelInfo::GetAtomicFromDistanceWithFlags (FUN_003A53E0):
+        // SetupEntityVisibility calls this for fading entities and models with flags. Without this hook,
+        // rooftop clutter, satellite dishes, antennas, and storefront signs pop abruptly at 25m-40m.
+        PS2_GUEST_CC void func3A53E0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const float view = percent(g_view);
+            if (view <= 1.0f)
+                return g_func3A53E0(rdram, ctx, runtime);
+            g_rdram = rdram;
+            const uint32_t mi = GPR_U32(ctx, 4);
+            const float distance = ctx->f[12];
+            const uint32_t atomics = static_cast<uint32_t>(rd32(mi + 0x28u));
+            uint32_t result = 0;
+            if (atomics)
+            {
+                const int count = rdram[(mi + 0x38u) & PS2_RAM_MASK];
+                if (count > 0)
+                {
+                    uint16_t flags;
+                    std::memcpy(&flags, rdram + ((mi + 0x3Au) & PS2_RAM_MASK), 2);
+                    int idx = count - 1;
+                    if (!(flags & 8u) && (flags & 3u))
+                        idx = static_cast<int>(flags & 3u) - 1;
+                    const float mult = rdf(kLodMultiplier);
+                    const float propFloor = std::min(260.0f * view, 360.0f);
+                    const float limit = std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(idx)) * mult, propFloor);
+                    if (distance < limit)
+                        result = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(idx)));
                 }
             }
             SET_GPR_U32(ctx, 2, result);
@@ -497,6 +537,8 @@ namespace vcs::distance
         // to decide whether to stream in models. At high speed (144 km/h = 40 m/s), a static 50m margin only gives 1.2s
         // of advance warning, causing billboards, streetlamps, and trees to pop in late. For streaming call sites,
         // we add a velocity-aware prefetch bonus so models stream well ahead of high-speed travel.
+        // Small attached props have tiny IDE distances (25m-40m); enforcing a 420m floor ensures CStreaming
+        // queues them well before the camera reaches propFloor (260m-360m).
         PS2_GUEST_CC void largestLodDistance(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t ra = GPR_U32(ctx, 31);
@@ -643,7 +685,7 @@ namespace vcs::distance
 
         // the pools' constructors, from CPools::Initialise only: larger pools when the main heap has the room.
         // VCS_POOLS=peds,vehicles sets the sizes for a test (0 or missing: the game's).
-        bool largePools() { return vcs::memory::streamingMegabytes() > 0; }
+        bool largePools() { return true; }
         uint32_t poolSizeFor(uint32_t requested, int which, uint32_t large)
         {
             if (const char *env = std::getenv("VCS_POOLS"))
@@ -736,8 +778,8 @@ namespace vcs::distance
 
             const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
             const float viewFactor = percent(g_view);
-            const float mult = std::max(1.0f, std::min(viewFactor, 1.25f));
-            const float baseDist = std::max(450.0f, 350.0f + speed * 3.5f) * mult;
+            const float mult = std::max(1.0f, std::min(viewFactor, 1.5f));
+            const float baseDist = std::max(500.0f, 380.0f + speed * 4.0f) * mult;
             const float thresh1Sq = baseDist * baseDist;
             const float dist2 = baseDist + 25.0f;
             const float thresh2Sq = dist2 * dist2;
@@ -1253,6 +1295,8 @@ namespace vcs::distance
         hookReaders(runtime, std::make_index_sequence<kReaderCount>{});
         if ((g_atomicFromDistance = runtime.lookupFunction(kAtomicFromDistance)))
             runtime.replaceFunction(kAtomicFromDistance, &atomicFromDistance);
+        if ((g_func3A53E0 = runtime.lookupFunction(kFunc3A53E0)))
+            runtime.replaceFunction(kFunc3A53E0, &func3A53E0);
         if ((g_largestLodDistance = runtime.lookupFunction(kLargestLodDistance)))
             runtime.replaceFunction(kLargestLodDistance, &largestLodDistance);
         if ((g_pedPoolCtor = runtime.lookupFunction(kPedPoolCtor)))
