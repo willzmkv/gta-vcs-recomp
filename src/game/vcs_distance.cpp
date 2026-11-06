@@ -1427,8 +1427,11 @@ namespace vcs::distance
             runtime.replaceFunction(kLargestLodDistance, &largestLodDistance);
         if ((g_func35E590 = runtime.lookupFunction(kFunc35E590)))
             runtime.replaceFunction(kFunc35E590, &func35E590);
-        if ((g_func35DEA8 = runtime.lookupFunction(kFunc35DEA8)))
-            runtime.replaceFunction(kFunc35DEA8, &func35DEA8);
+        // Note: FUN_0035DEA8 must NOT be hooked via replaceFunction - it contains 10 internal dispatchGuestBranch
+        // calls that yield to the EE scheduler, and its $a0 parameter is an internal renderer heap struct, causing
+        // infinite loading hangs during save/world transitions.
+        // if ((g_func35DEA8 = runtime.lookupFunction(kFunc35DEA8)))
+        //     runtime.replaceFunction(kFunc35DEA8, &func35DEA8);
         if ((g_pedPoolCtor = runtime.lookupFunction(kPedPoolCtor)))
             runtime.replaceFunction(kPedPoolCtor, &pedPoolCtor);
         if ((g_carPoolCtor = runtime.lookupFunction(kCarPoolCtor)))
