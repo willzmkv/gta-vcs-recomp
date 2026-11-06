@@ -1,12 +1,21 @@
 # Progress
 
-## 2026-11-06 - Small prop & vegetation popping resolution and safe on-foot frustum scanning
+## 2026-11-06 - Small prop, foliage & rooftop clutter 30m clamp elimination
 
-- Resolved popping of bushes/shrubs, street/traffic signs, rooftop antennas, and building storefront signs:
-  - In `atomicFromDistance` (`0x003A52F8`) and `func3A53E0` (`0x003A53E0`), props with base LOD $\le 60.0f$ now receive `propFloor` (`300m..900m`) across all atomics (including atomic 0) so high-detail meshes do not get skipped at 20m-30m when `count >= 2`. Added atomic pointer fallback to `atomics[0]` if a selected higher index atomic pointer is NULL in memory.
-  - Activated `FUN_0035DEA8` (`ScanSectorList_FrustumTriangle`) with safe tail-call semantics (no stack variable restoration after calling `g_func35DEA8`, avoiding EE scheduler yield corruptions), expanding on-foot sector scanning from 300m to 800m-1000m with ray coordinates clamped to sector grid bounds `[0.0f, 49.0f]`.
-  - Discovered the 30m discard trap in `ScanSectorList` (`FUN_0035fae8:636-730`): when `SetupEntityVisibility` returns 0 for an attached sub-object (`flags & 0x2000` / `0x4000`), it is only added to the 149-entry list 4 if within a 30m bounding box (`|dx| < 30.0f && |dy| < 30.0f`), else discarded without streaming. With `propFloor` and prefetch applied in `SetupEntityVisibility`, entities return 1 (normal render lists) and 3 (streaming prefetch) at extended ranges.
-- Verified with `tools/distance_check.py` PASS across Havana (+61.2% draws), Police (+69.7% draws), and Lighthouse (+65.2% draws) at 300% LOD scale.
+- Resolved close popping (~20m–30m) of bushes/shrubs, street/traffic signs, rooftop antennas, and building storefront signs:
+  - Reverse-engineered `ScanSectorList` (`FUN_0035fae8`), `ScanBigBuildingList` (`FUN_0035fed0`), and `SetupEntityVisibility` (`FUN_0035efd8`). Discovered that Rockstar used a 4th render list (`0x746A00`, List 4, 149 entity capacity) with a hard 30.0m GS fillrate clamp (`lui $at, 0x41F0` / `0xC1F0` at `0x35fdf0` / `0x35fe18`). Any entity returning 2 from `SetupEntityVisibility` was subjected to `abs(dx) < 30.0f && abs(dy) < 30.0f` and discarded completely past 30m.
+  - Foliage/bushes have bit 6 (`0x40` DRAW_LAST) in `modelInfo->m_nFlags`, and breakables/clutter/signs have `flags & 0x6000` or entity bit 36 (`bDistanceFade`), forcing `SetupEntityVisibility` to return 2.
+  - In `atomicFromDistance` (`0x003A52F8`) and `func3A53E0` (`0x003A53E0`), when `viewFactor > 1.0f`:
+    - Expanded `propFloor` to `std::clamp(350.0f * viewFactor, 350.0f, 950.0f)` for any model with `baseLod <= 80.0f` or `(flags & 0x6040u) != 0`.
+    - Added fallback to `rd32(atomics)` if indexed atomic pointer is null.
+    - Set model info alpha byte to 255 (`wr8(mi + 0x39u, 0xFFu)`), preventing 16-frame fade delay from returning 2.
+    - Cleared bit 6 (`0x40`) from `modelInfo->m_nFlags`, preventing return 2.
+    - Cleared bit 36 (`bDistanceFade`, bit 4 of upper flags `ent + 0x4Cu`), preventing return 2.
+    - Result: `SetupEntityVisibility` returns 1, routing entities directly to the 2000-capacity primary lists (`0x744AC0` opaque and `0x742B80` transparent), rendered natively by D3D11 with zero distance clamp.
+  - In `largestLodDistance` (`0x003A5380`):
+    - Expanded `streamFloor` to `std::clamp(400.0f * scale, 400.0f, 950.0f)` so CStreaming preloads small props and foliage far in advance.
+  - Added `props_boosted` counter to `lodstats` control command. Verified over 36,000 props boosted during gameplay with extended view distance, and exactly 0 boosted when `viewFactor == 1.0f` (100% authentic default preserved).
+  - Verified with `tools/distance_check.py` PASS (23 visible entities at 100%, 74 visible entities at 352%, 23 visible entities returning to 100%).
 
 ## 2026-11-05 - T2 prop popping elimination, 800m-1000m on-foot sector triangle and OLA density
 

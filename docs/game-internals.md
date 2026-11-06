@@ -1249,6 +1249,50 @@ pixels counted) and found with F12 draw logs, a read-back of the depth buffer ju
   a 0..1 depth range, and early depth rejection back on. `fire_check.py` passes: fire pixels in the best frame from
   0-12 to hundreds (flame-thrower) and thousands (molotov).
 
+### 6n. Render lists, small props, and foliage: The 30m GS fillrate clamp (2026-11-06)
+
+Reported by the player: bushes, road signs, rooftop antennas, and building storefront signs still popped in very
+close (~20m–30m) even with View Distance extended to 350%–1000%. Reverse-engineering `ScanSectorList` (`FUN_0035fae8`),
+`ScanBigBuildingList` (`FUN_0035fed0`), and `SetupEntityVisibility` (`FUN_0035efd8`) uncovered the root cause:
+
+- **The 4 Render Lists**:
+  1. `0x742B80`: Transparent List (count at `0x4CD598`, capacity 2000 entities)
+  2. `0x744AC0`: Opaque List (count at `0x4CD59C`, capacity 2000 entities)
+  3. `0x746C80`: Glass / Reflective List (count at `0x4CD5A0`)
+  4. `0x746A00`: List 4 — Fading & Small Clutter List (count at `0x4CD5A4`, capacity **149 entities**)
+
+- **The Return Values of `SetupEntityVisibility`**:
+  - `Return 1`: Entity is visible and fully opaque or transparent. `ScanSectorList` routes it to `label_35fc24` (List 1 or 2). There is **no distance clamp** applied.
+  - `Return 2`: Entity has alpha-fade delay, alpha foliage, or small clutter flags. `ScanSectorList` branches to `label_35fdd8` (`ScanBigBuildingList` branches to `label_360200`).
+  - `Return 0`: Model atomic not found or distance exceeded. If model has clutter/breakable flags (`flags & 0x6000`), `ScanSectorList` also branches directly to `label_35fdd8`.
+
+- **The 30m Discard Trap (`label_35fdd8` / `label_360200`)**:
+  ```mips
+  // 0x35fdf0: lui $at, 0xC1F0 (-30.0f)
+  // 0x35fe18: lui $at, 0x41F0 (+30.0f)
+  if (abs(cam.x - ent.x) < 30.0f && abs(cam.y - ent.y) < 30.0f) {
+      if (List4.count < 149) List4.append(ent);
+  } else {
+      goto label_35fe88; // DISCARD COMPLETELY! Never rendered!
+  }
+  ```
+  On the original PS2, Rockstar designed List 4 to protect the GS fillrate: any object requiring alpha blending or small detail clutter was strictly culled if farther than 30 meters from the camera. If an entity entered this branch and was beyond 30m, it was discarded completely from the frame.
+
+- **Why all four reported categories were trapped**:
+  1. **Alpha Foliage and Shrubs**: All bushes and foliage models have bit 6 (`0x40` DRAW_LAST) set in `modelInfo->m_nFlags` (+0x3A). At `0x35F728`, `SetupEntityVisibility` checks `flags & 0x40`, calls `SetClumpAlpha`, and immediately returns 2.
+  2. **Rooftop Antennas, Satellite Dishes, and Storefront Signs**: Have `flags & 0x2000` (attached clutter) or `flags & 0x4000` (breakables), or entity bit 36 (`bDistanceFade`, bit 4 of `ent + 0x4C`), or model alpha byte (`mi + 0x39`) < 255. `SetupEntityVisibility` returns 2 (or 0 if unstreamed), trapping them at 30m.
+
+- **The Native Fix (`src/game/vcs_distance.cpp`)**:
+  - In `atomicFromDistance` (`0x003A52F8`) and `func3A53E0` (`0x003A53E0`), when `viewFactor > 1.0f`:
+    1. Enforce `propFloor = std::clamp(350.0f * viewFactor, 350.0f, 950.0f)` for any model with `baseLod <= 80.0f` or `flags & 0x6040u`.
+    2. Set model alpha to 255 (`wr8(mi + 0x39u, 0xFFu)`), preventing the 16-frame fade delay that was returning 2.
+    3. Clear bit 6 (`0x40`) from `modelInfo->m_nFlags`, preventing `SetupEntityVisibility` from returning 2.
+    4. Clear entity bit 36 (`bDistanceFade`), preventing return 2.
+    5. Fall back to `rd32(atomics)` if the indexed atomic pointer is null.
+  - In `largestLodDistance` (`0x003A5380`), enforce `streamFloor = std::clamp(400.0f * scale, 400.0f, 950.0f)` for lookaheads so CStreaming loads props and foliage well in advance.
+  - With these in place, `SetupEntityVisibility` returns 1, routing bushes, signs, and rooftop clutter into the 2000-slot primary render lists (`0x744AC0` / `0x742B80`) rendered natively by D3D11.
+  - Authenticity: when `viewFactor == 1.0f` (0 on slider, 100% default), zero flags are modified and authentic PS2 culling is strictly preserved.
+
 ## 7. Textures: `.XTX`
 
 **Host replacement identity (2026-10-31).** PCSX2 packs match the GS texture as it is sampled, rather than the RAM

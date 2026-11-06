@@ -81,6 +81,10 @@ namespace vcs::distance
         constexpr uint32_t kSetupBigBuildingPrefetchNoFadeReturn = 0x0035FA70u;
         constexpr uint32_t kSetupBigBuildingPrefetchWithFadeReturn = 0x0035FAA0u;
 
+        // Call-site return addresses of GetAtomicFromDistance and GetAtomicFromDistanceWithFlags in SetupEntityVisibility:
+        constexpr uint32_t kSetupEntityVisibilityAtomicReturn = 0x0035F64Cu;
+        constexpr uint32_t kSetupEntityVisibilityFlagsReturn = 0x0035F7E4u;
+
         // the functions that read GenerationDistMultiplier (not FUN_00219898: its +0x7D0 is a ped's); the first two are
         // the peds'
         constexpr uint32_t kGenReaders[] = {0x002AFE80u, 0x002B0200u, 0x0036EBF8u, 0x003DA070u, 0x003F29D8u, 0x00430290u, 0x00433378u};
@@ -132,6 +136,7 @@ namespace vcs::distance
         std::atomic<uint32_t> g_statClamp330Bypasses{0};
         std::atomic<uint32_t> g_statPrefetchLookahead{0};
         std::atomic<uint32_t> g_statSectorLookaheads{0};
+        std::atomic<uint32_t> g_statPropsBoosted{0};
         std::atomic<float> g_cameraSpeed{0.0f};
         float g_lastCamX = 0.0f, g_lastCamY = 0.0f;
         bool g_lastCamInit = false;
@@ -471,8 +476,11 @@ namespace vcs::distance
         // is set, else 0) to the count (+0x38) whose LOD distance (+0x2C) times LODDistMultiplier is beyond the distance,
         // 0 past the last. With a detail distance other than the view's, the distances before the last are scaled by
         // detail / view (at most the last); the original otherwise.
-        // For extended view distance, small attached props (dishes, antennas, signs) have tiny .IDE ranges (25m-40m).
-        // We enforce a propFloor (500m-900m) so they stay visible matching the parent building's LOD.
+        // For extended view distance, small attached props (dishes, antennas, signs, foliage) have tiny .IDE ranges (25m-40m).
+        // We enforce a propFloor (350m-950m) so they stay visible matching the parent building's LOD.
+        // Furthermore, foliage (bit 6/0x40 in flags) and distance-fading entities (bit 36 in entity flags) were hard-culled
+        // at 30m by Rockstar to protect the PS2's GS fillrate. When viewFactor > 1.0f, clearing bit 0x40 and bit 36 routes
+        // them to the primary opaque/transparent render lists (0x744AC0/0x742B80), eliminating the 30m pop-in wall.
         PS2_GUEST_CC void atomicFromDistance(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const float view = percent(g_view), detail = percent(g_detail);
@@ -488,10 +496,10 @@ namespace vcs::distance
                 const int count = rdram[(mi + 0x38u) & PS2_RAM_MASK];
                 const float mult = rdf(kLodMultiplier);
                 const float viewFactor = view;
-                const float propFloor = viewFactor > 1.0f ? std::clamp(300.0f * viewFactor, 300.0f, 900.0f) : 0.0f;
+                const float propFloor = viewFactor > 1.0f ? std::clamp(350.0f * viewFactor, 350.0f, 950.0f) : 0.0f;
                 const float baseLod = count > 0 ? rdf(mi + 0x2Cu) : 0.0f;
-                const bool isSmallProp = baseLod <= 60.0f;
-                const float last = count > 0 ? std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(count - 1)) * mult, propFloor) : 0.0f;
+                const bool isSmallProp = (baseLod <= 80.0f) || ((flags & 0x6040u) != 0);
+                const float last = count > 0 ? std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(count - 1)) * mult, isSmallProp ? propFloor : 0.0f) : 0.0f;
                 for (int i = (flags & 8u) ? (flags & 3u) : 0; i < count; ++i)
                 {
                     float limit = rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(i)) * mult;
@@ -501,18 +509,49 @@ namespace vcs::distance
                         if (isSmallProp && propFloor > 0.0f)
                             limit = std::max(limit, propFloor);
                     }
-                    else if (propFloor > 0.0f)
+                    else if (isSmallProp && propFloor > 0.0f)
                     {
                         limit = std::max(limit, propFloor);
                     }
                     if (distance < limit)
                     {
                         uint32_t atomicPtr = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(i)));
-                        if (!atomicPtr && i != 0)
+                        if (!atomicPtr)
                             atomicPtr = static_cast<uint32_t>(rd32(atomics));
                         result = atomicPtr;
                         break;
                     }
+                }
+                if (viewFactor > 1.0f && result != 0)
+                {
+                    // 1. Model info: Set alpha to 255 (fully visible, avoids 16-frame fade delay & return 2)
+                    wr8(mi + 0x39u, 0xFFu);
+
+                    // 2. Model info: Clear bit 6 (0x40 DRAW_LAST / alpha foliage), which forces SetupEntityVisibility
+                    // to return 2 and route to the 30m PS2 discard trap
+                    if (flags & 0x40u)
+                    {
+                        flags &= ~0x40u;
+                        wr16(mi + 0x3Au, flags);
+                    }
+
+                    // 3. Entity: If called from SetupEntityVisibility (0x0035F64C), clear bit 36 (bDistanceFade),
+                    // which causes SetupEntityVisibility to return 2 and route to the 30m PS2 discard trap.
+                    const uint32_t ra = GPR_U32(ctx, 31);
+                    if (ra == kSetupEntityVisibilityAtomicReturn)
+                    {
+                        const uint32_t ent = GPR_U32(ctx, 16);
+                        if (ent >= 0x00010000u && ent < 0x02000000u)
+                        {
+                            const uint32_t hiFlags = static_cast<uint32_t>(rd32(ent + 0x4Cu));
+                            constexpr uint32_t kHiDistanceFade = 1u << 4; // bit 36 in 64-bit entity flags
+                            if (hiFlags & kHiDistanceFade)
+                            {
+                                wr32(ent + 0x4Cu, static_cast<int32_t>(hiFlags & ~kHiDistanceFade));
+                            }
+                        }
+                    }
+                    g_statPropsBoosted.fetch_add(1, std::memory_order_relaxed);
                 }
             }
             SET_GPR_U32(ctx, 2, result);
@@ -543,14 +582,38 @@ namespace vcs::distance
                     idx = std::clamp(idx, 0, count - 1);
                     const float mult = rdf(kLodMultiplier);
                     const float viewFactor = view;
-                    const float propFloor = viewFactor > 1.0f ? std::clamp(300.0f * viewFactor, 300.0f, 900.0f) : 0.0f;
+                    const float propFloor = viewFactor > 1.0f ? std::clamp(350.0f * viewFactor, 350.0f, 950.0f) : 0.0f;
                     const float limit = std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(idx)) * mult, propFloor);
                     if (distance < limit)
                     {
                         uint32_t atomicPtr = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(idx)));
-                        if (!atomicPtr && idx != 0)
+                        if (!atomicPtr)
                             atomicPtr = static_cast<uint32_t>(rd32(atomics));
                         result = atomicPtr;
+                    }
+                    if (viewFactor > 1.0f && result != 0)
+                    {
+                        wr8(mi + 0x39u, 0xFFu);
+                        if (flags & 0x40u)
+                        {
+                            flags &= ~0x40u;
+                            wr16(mi + 0x3Au, flags);
+                        }
+                        const uint32_t ra = GPR_U32(ctx, 31);
+                        if (ra == kSetupEntityVisibilityFlagsReturn)
+                        {
+                            const uint32_t ent = GPR_U32(ctx, 16);
+                            if (ent >= 0x00010000u && ent < 0x02000000u)
+                            {
+                                const uint32_t hiFlags = static_cast<uint32_t>(rd32(ent + 0x4Cu));
+                                constexpr uint32_t kHiDistanceFade = 1u << 4;
+                                if (hiFlags & kHiDistanceFade)
+                                {
+                                    wr32(ent + 0x4Cu, static_cast<int32_t>(hiFlags & ~kHiDistanceFade));
+                                }
+                            }
+                        }
+                        g_statPropsBoosted.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
             }
@@ -569,8 +632,8 @@ namespace vcs::distance
         // to decide whether to stream in models. At high speed (144 km/h = 40 m/s), a static 50m margin only gives 1.2s
         // of advance warning, causing billboards, streetlamps, and trees to pop in late. For streaming call sites,
         // we add a velocity-aware prefetch bonus so models stream well ahead of high-speed travel.
-        // Small attached props have tiny IDE distances (25m-40m); enforcing a 420m floor ensures CStreaming
-        // queues them well before the camera reaches propFloor (260m-360m).
+        // Small attached props have tiny IDE distances (25m-40m); enforcing a 400m floor ensures CStreaming
+        // queues them well before the camera reaches propFloor (350m-950m).
         PS2_GUEST_CC void largestLodDistance(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t ra = GPR_U32(ctx, 31);
@@ -597,7 +660,7 @@ namespace vcs::distance
                 // Base 350m ensures roadside signs, poles, and shopfronts (like near Pay 'n' Spray)
                 // are queued and alpha-faded well before arriving, eliminating late popping.
                 const float prefetchBonus = std::max(200.0f, 100.0f + speed * 6.0f) * scale;
-                const float streamFloor = std::clamp(350.0f * scale, 400.0f, 950.0f);
+                const float streamFloor = std::clamp(400.0f * scale, 400.0f, 950.0f);
                 ctx->f[0] = std::max(ctx->f[0] + prefetchBonus, streamFloor);
                 g_statPrefetchLookahead.fetch_add(1, std::memory_order_relaxed);
             }
@@ -1475,14 +1538,15 @@ namespace vcs::distance
                   " cheap=" + std::to_string(g_lodCheap) +
                   " overflow=" + std::to_string(g_overflowUsed) + " peak=" + std::to_string(g_overflowPeak));
         });
-        // lodstats -> ok clamp330_skips=<skips> prefetch_expanded=<lookaheads> sectors_expanded=<lookaheads> cargen_checks=<checks> cargen_active=<active> camspeed=<speed m/s>
+        // lodstats -> ok clamp330_skips=<skips> prefetch_expanded=<lookaheads> sectors_expanded=<lookaheads> props_boosted=<props> cargen_checks=<checks> cargen_active=<active> camspeed=<speed m/s>
         ps2control::addCommand("lodstats", [](const std::string &, ps2control::Reply reply) {
             char text[256];
             std::snprintf(text, sizeof(text),
-                          "ok clamp330_skips=%u prefetch_expanded=%u sectors_expanded=%u cargen_checks=%u cargen_active=%u camspeed=%.1f",
+                          "ok clamp330_skips=%u prefetch_expanded=%u sectors_expanded=%u props_boosted=%u cargen_checks=%u cargen_active=%u camspeed=%.1f",
                           g_statClamp330Bypasses.load(std::memory_order_relaxed),
                           g_statPrefetchLookahead.load(std::memory_order_relaxed),
                           g_statSectorLookaheads.load(std::memory_order_relaxed),
+                          g_statPropsBoosted.load(std::memory_order_relaxed),
                           g_statCarGenChecks.load(std::memory_order_relaxed),
                           g_statCarGenActive.load(std::memory_order_relaxed),
                           g_cameraSpeed.load(std::memory_order_relaxed));
