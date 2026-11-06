@@ -115,22 +115,16 @@ namespace vcs::distance
 
         PS2Runtime::RecompiledFunction g_original = nullptr, g_pedPoolCtor = nullptr, g_carPoolCtor = nullptr;
         PS2Runtime::RecompiledFunction g_atomicFromDistance = nullptr, g_func3A53E0 = nullptr, g_largestLodDistance = nullptr;
-        PS2Runtime::RecompiledFunction g_func35E590 = nullptr, g_func35DEA8 = nullptr;
-        constexpr uint32_t kFunc3A53E0 = 0x003A53E0u;
-        constexpr uint32_t kFunc35E590 = 0x0035E590u;
-        constexpr uint32_t kFunc35DEA8 = 0x0035DEA8u;
+        PS2Runtime::RecompiledFunction g_setupEntityVisibility = nullptr;
+        PS2Runtime::RecompiledFunction g_storeCarLightShadow = nullptr;
+        PS2Runtime::RecompiledFunction g_renderHeadLightBeams = nullptr;
+        PS2Runtime::RecompiledFunction g_process2dEffects = nullptr;
 
-        // Call-site return addresses of func_35E590 (frustum ray-plane intersection):
-        // 1. FUN_0035e620 (standard entities):
-        constexpr uint32_t kFrustumRayReturn1_Standard = 0x0035EC90u;
-        constexpr uint32_t kFrustumRayReturn2_Standard = 0x0035ED08u;
-        constexpr uint32_t kFrustumRayReturn3_Standard = 0x0035ED80u;
-        constexpr uint32_t kFrustumRayReturn4_Standard = 0x0035EDF8u;
-        // 2. FUN_003606c8 (fading entities / big buildings):
-        constexpr uint32_t kFrustumRayReturn1_Fading = 0x00360B24u;
-        constexpr uint32_t kFrustumRayReturn2_Fading = 0x00360B9Cu;
-        constexpr uint32_t kFrustumRayReturn3_Fading = 0x00360C14u;
-        constexpr uint32_t kFrustumRayReturn4_Fading = 0x00360C8Cu;
+        constexpr uint32_t kFunc3A53E0 = 0x003A53E0u;
+        constexpr uint32_t kSetupEntityVisibility = 0x0035EFD8u;
+        constexpr uint32_t kStoreCarLightShadow = 0x002E1140u;
+        constexpr uint32_t kRenderHeadLightBeams = 0x002E23A0u;
+        constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
 
         PS2Runtime::RecompiledFunction g_readers[kReaderCount] = {};
         std::atomic<uint32_t> g_statClamp330Bypasses{0};
@@ -664,97 +658,86 @@ namespace vcs::distance
             }
         }
 
-        // CRenderer frustum ray-plane intersection (FUN_0035E590):
-        // FUN_0035e620 (standard entities) and FUN_003606c8 (fading entities / big buildings) project the 4 corners of
-        // the view frustum onto a hardcoded ground plane $f12 = -100.0f at return addresses 0x35EC90..0x35EDF8 and
-        // 0x360B24..0x360C8C. This restricted the 50x50 world sector scanning bounding box to merely 1-2 sectors ahead
-        // (~100m-160m), starving CStreaming of advance notice for props, roadside signage, street poles, antennas, and
-        // parked vehicles when driving at high speed or turning corners.
-        // We expand lookahead plane distance to 500m-1000m based on viewFactor and camera speed, allowing CRenderer to
-        // naturally compute an expanded sector bounding box covering all sectors along the camera view direction.
-        PS2_GUEST_CC void func35E590(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        bool isVehicle(uint32_t entity)
         {
-            const uint32_t ra = GPR_U32(ctx, 31);
-            const bool isStandard = (ra == kFrustumRayReturn1_Standard || ra == kFrustumRayReturn2_Standard ||
-                                     ra == kFrustumRayReturn3_Standard || ra == kFrustumRayReturn4_Standard);
-            const bool isFading = (ra == kFrustumRayReturn1_Fading || ra == kFrustumRayReturn2_Fading ||
-                                   ra == kFrustumRayReturn3_Fading || ra == kFrustumRayReturn4_Fading);
-
-            if (!isStandard && !isFading)
-                return g_func35E590(rdram, ctx, runtime);
-
-            const float viewFactor = percent(g_view);
-            if (viewFactor > 1.0f)
-            {
-                const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
-                const float lookahead = std::clamp(500.0f * std::min(viewFactor, 2.5f) + speed * 8.0f, 500.0f, 1000.0f);
-                ctx->f[12] = -lookahead;
-                g_statSectorLookaheads.fetch_add(1, std::memory_order_relaxed);
-            }
-
-            g_func35E590(rdram, ctx, runtime);
+            const uint32_t pool = static_cast<uint32_t>(rd32(kCarPool));
+            if (!pool)
+                return false;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool));
+            const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), 1024u);
+            constexpr uint32_t kCarSize = 0x8C0u;
+            return entity >= entries && entity < entries + size * kCarSize && ((entity - entries) % kCarSize == 0u);
         }
 
-        // CRenderer::ScanSectorList_FrustumTriangle (FUN_0035DEA8):
-        // On foot, Rockstar rasterizes a 3-point frustum triangle in sector coordinates (apex at camera,
-        // base at a hardcoded 300m ray depth). This leaves distant buildings, rooftop antennas, and props
-        // unscanned by CRenderer until the player walks within 300m.
-        // We scale the far frustum ray endpoints (vertices 1 and 2) from 300m out to 800m-1000m based on
-        // viewFactor, seamlessly extending on-foot sector scanning across the entire visible map with
-        // ZERO camera mode tampering (no risk of loading hangs or camera state corruption).
-        PS2_GUEST_CC void func35DEA8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        // SetupEntityVisibility (0x0035EFD8):
+        // Rockstar's PS2 GS fillrate clamp subject entities returning 2 (foliage with bit 0x40, distance-fading entities
+        // with bit 36, storefront signs, fences, street poles, and trees) to an aggressive 30m box clamp in ScanSectorList
+        // and ScanBigBuildingList (abs(dx) < 30.0f && abs(dy) < 30.0f). Any entity >= 30.0f away is immediately discarded.
+        // When viewFactor > 1.0f, overriding return value 2 -> 1 routes them directly to the primary 2000-capacity render
+        // lists (0x744AC0 opaque, 0x742B80 transparent), rendering them natively at their full extended LOD distance.
+        PS2_GUEST_CC void setupEntityVisibility(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            g_rdram = rdram;
-            const uint32_t vertAddr = GPR_U32(ctx, 4);
-            const uint32_t count = GPR_U32(ctx, 5);
-
-            if (count == 3 && vertAddr)
+            const uint32_t ent = GPR_U32(ctx, 4);
+            g_setupEntityVisibility(rdram, ctx, runtime);
+            const float viewFactor = percent(g_view);
+            if (viewFactor > 1.0f && GPR_U32(ctx, 2) == 2u)
             {
-                const float viewFactor = percent(g_view);
-                if (viewFactor > 1.0f)
+                SET_GPR_U32(ctx, 2, 1u);
+                if (ent >= 0x00010000u && ent < 0x02000000u)
                 {
-                    // Target lookahead: 800m to 1000m based on viewFactor:
-                    const float lookahead = std::clamp(800.0f * viewFactor, 800.0f, 1000.0f);
-                    const float scale = lookahead / 300.0f; // Original base is 300m
+                    const uint32_t hi = static_cast<uint32_t>(rd32(ent + 0x4Cu));
+                    constexpr uint32_t kHiDistanceFade = 1u << 4; // bit 36 in 64-bit entity flags
+                    if (hi & kHiDistanceFade)
+                        wr32(ent + 0x4Cu, static_cast<int32_t>(hi & ~kHiDistanceFade));
+                }
+                g_statPropsBoosted.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
 
-                    const float x0 = rdf(vertAddr);
-                    const float y0 = rdf(vertAddr + 4u);
-                    const float orig_x1 = rdf(vertAddr + 8u);
-                    const float orig_y1 = rdf(vertAddr + 12u);
-                    const float orig_x2 = rdf(vertAddr + 16u);
-                    const float orig_y2 = rdf(vertAddr + 20u);
+        // CShadows::StoreCarLightShadow (0x002E1140):
+        // Prevents parked / stationary cars (m_pDriver == nullptr at vehicle +0x384) from storing headlight beam shadows.
+        PS2_GUEST_CC void storeCarLightShadow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t veh = GPR_U32(ctx, 4);
+            if (veh >= 0x00010000u && veh < 0x02000000u && !rd32(veh + 0x384u))
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
+            g_storeCarLightShadow(rdram, ctx, runtime);
+        }
 
-                    const float dx1 = orig_x1 - x0;
-                    const float dy1 = orig_y1 - y0;
-                    const float dx2 = orig_x2 - x0;
-                    const float dy2 = orig_y2 - y0;
-
-                    const float lenSq1 = dx1 * dx1 + dy1 * dy1;
-                    const float lenSq2 = dx2 * dx2 + dy2 * dy2;
-
-                    // Sector grid is 50x50; 300m is ~3.75 sectors (lenSq ~ 14).
-                    // Ensure rays have reasonable length before expanding:
-                    if (lenSq1 > 0.5f && lenSq2 > 0.5f)
+        // CShadows::RenderHeadLightBeams (0x002E23A0):
+        // Deactivates any headlight beam slot belonging to a parked car before RegisterCorona is called.
+        PS2_GUEST_CC void renderHeadLightBeams(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            constexpr uint32_t kSlots = 0x0051E510u;
+            for (uint32_t i = 0; i < 32u; ++i)
+            {
+                const uint32_t slot = kSlots + i * 80u;
+                if (rd8(slot + 0x34u))
+                {
+                    const uint32_t veh = static_cast<uint32_t>(rd32(slot + 0x2Cu));
+                    if (veh >= 0x00010000u && veh < 0x02000000u && !rd32(veh + 0x384u))
                     {
-                        const float new_x1 = std::clamp(x0 + dx1 * scale, 0.0f, 49.0f);
-                        const float new_y1 = std::clamp(y0 + dy1 * scale, 0.0f, 49.0f);
-                        const float new_x2 = std::clamp(x0 + dx2 * scale, 0.0f, 49.0f);
-                        const float new_y2 = std::clamp(y0 + dy2 * scale, 0.0f, 49.0f);
-
-                        wrf(vertAddr + 8u, new_x1);
-                        wrf(vertAddr + 12u, new_y1);
-                        wrf(vertAddr + 16u, new_x2);
-                        wrf(vertAddr + 20u, new_y2);
-
-                        g_statSectorLookaheads.fetch_add(1, std::memory_order_relaxed);
-
-                        g_func35DEA8(rdram, ctx, runtime);
-                        return;
+                        wr8(slot + 0x34u, 0u);
                     }
                 }
             }
+            g_renderHeadLightBeams(rdram, ctx, runtime);
+        }
 
-            g_func35DEA8(rdram, ctx, runtime);
+        // CEntity::Process2dEffects (0x003C35A8):
+        // Prevents parked cars (no driver) from processing 2DFX headlight / tail light coronas.
+        PS2_GUEST_CC void process2dEffects(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ent = GPR_U32(ctx, 4);
+            if (ent >= 0x00010000u && ent < 0x02000000u && isVehicle(ent) && !rd32(ent + 0x384u))
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
+            g_process2dEffects(rdram, ctx, runtime);
         }
 
         // The spot finder FUN_00267928(x, y, dirx, diry, distance, cos, nodes, ...) looks for a road node `distance` (110 x
@@ -1486,15 +1469,14 @@ namespace vcs::distance
             runtime.replaceFunction(kFunc3A53E0, &func3A53E0);
         if ((g_largestLodDistance = runtime.lookupFunction(kLargestLodDistance)))
             runtime.replaceFunction(kLargestLodDistance, &largestLodDistance);
-        // Do not hook FUN_0035E590: modifying ground plane Z projects frustum rays 20km away, exploding sector
-        // scan to all 2500 sectors on the entire map and causing severe CPU slowdown & streaming starvation.
-        // if ((g_func35E590 = runtime.lookupFunction(kFunc35E590)))
-        //     runtime.replaceFunction(kFunc35E590, &func35E590);
-        // Note: FUN_0035DEA8 must NOT be hooked via replaceFunction - it contains 10 internal dispatchGuestBranch
-        // calls that yield to the EE scheduler, and its $a0 parameter is an internal renderer heap struct, causing
-        // infinite loading hangs during save/world transitions.
-        // if ((g_func35DEA8 = runtime.lookupFunction(kFunc35DEA8)))
-        //     runtime.replaceFunction(kFunc35DEA8, &func35DEA8);
+        if ((g_setupEntityVisibility = runtime.lookupFunction(kSetupEntityVisibility)))
+            runtime.replaceFunction(kSetupEntityVisibility, &setupEntityVisibility);
+        if ((g_storeCarLightShadow = runtime.lookupFunction(kStoreCarLightShadow)))
+            runtime.replaceFunction(kStoreCarLightShadow, &storeCarLightShadow);
+        if ((g_renderHeadLightBeams = runtime.lookupFunction(kRenderHeadLightBeams)))
+            runtime.replaceFunction(kRenderHeadLightBeams, &renderHeadLightBeams);
+        if ((g_process2dEffects = runtime.lookupFunction(kProcess2dEffects)))
+            runtime.replaceFunction(kProcess2dEffects, &process2dEffects);
         if ((g_pedPoolCtor = runtime.lookupFunction(kPedPoolCtor)))
             runtime.replaceFunction(kPedPoolCtor, &pedPoolCtor);
         if ((g_carPoolCtor = runtime.lookupFunction(kCarPoolCtor)))

@@ -1,19 +1,26 @@
 # Progress
 
-## 2026-11-06 - Resolution of parked cars coronas, game slowdown, and streaming queue choke
+## 2026-11-06 - Complete elimination of 30m prop/foliage discard trap and parked cars coronas
 
-- **Parked Cars Corona Glitch Resolved**:
-  - In `src/game/vcs_distant.cpp::addTemplates(false)`, off-screen template car selection was picking parked/unoccupied vehicles without verifying driver existence. Parked vehicles have `m_pDriver == nullptr` (offset `+0x384` on `CVehicle` in VCS PS2, as verified in `docs/game-internals.md`).
-  - Added strict check `if (!ped && !rd32(e + 0x384u)) continue;` so parked vehicles are never picked as templates and never have their `CVehicle::PreRender` / `CVehicle::DoHeadLightBeam` triggered off-screen.
-  - Removed `runtime.replaceFunction(kRegisterCorona, &registerCorona);` hook completely, eliminating corona buffer memory stride misalignment (`0x30` vs real `0x90` stride in VCS PS2 `0x00512560`) and restoring 100% authentic corona handling.
-- **Game Slowdown & 2,500 Sectors Scan Eliminated**:
-  - In `src/game/vcs_distance.cpp::func35E590`, `$f12` is the Z coordinate of the seabed ground plane (`-100.0f`), not a distance. Replacing it with `-lookahead` (`-500.0f` to `-1000.0f`) caused ray-plane intersection math `t = ($f12 - cam.z) / ray_dir.z` to intersect 20 kilometers away, expanding `[min_x..max_x, min_y..max_y]` to `[0..49, 0..49]` — all 2,500 sectors on the entire map every frame!
-  - Removed `kFunc35E590` hook completely. Let the original game compute natural sector scanning bounds at `Z = -100.0f`.
-  - Benchmark verified: rock-solid 60.0 FPS across all spots (`fortbaxter` 4.0 ms, `city_1325_-325` 3.0 ms, `drive` 6.4 ms game thread / 1588 draws).
-- **CStreaming Queue Unchoked & Small Prop / Foliage Distance Calibrated**:
-  - In `src/game/vcs_distance.cpp::largestLodDistance`, removed `streamFloor = std::clamp(400.0f * scale, 400.0f, 950.0f)`. Replaced with velocity-aware prefetch bonus `std::max(60.0f, speed * 3.5f) * (viewFactor - 1.0f)` for entities within the natural camera view direction.
-  - In `atomicFromDistance` and `func3A53E0`, calibrated `propFloor = std::clamp(180.0f * viewFactor, 180.0f, 400.0f)` for small props (`baseLod <= 80.0f` or `flags & 0x6040`).
-  - Verified with `tools/bench.py` (PASS, 60.0 FPS) and `tools/distance_check.py` (PASS, 23 entities at 100%, 74 entities at 352%).
+- **Parked Cars Corona and Headlight Beam Glitch Fully Resolved**:
+  - Investigated all guest calls to `CCoronas::RegisterCorona` (`0x0027DD80`). Traced vehicle headlight registration to `CShadows::StoreCarLightShadow` (`0x002E1140`), `CShadows::RenderHeadLightBeams` (`0x002E23A0`), and `CEntity::Process2dEffects` (`0x003C35A8`).
+  - Implemented 3 dedicated hooks in `src/game/vcs_distance.cpp`:
+    1. In `storeCarLightShadow` (`0x002E1140`), checked vehicle driver pointer `rd32(veh + 0x384u)`. If `m_pDriver == nullptr` (parked car), returns immediately (`ctx->pc = $ra`) without allocating any active headlight slot.
+    2. In `renderHeadLightBeams` (`0x002E23A0`), scanned all 32 slots in `0x0051E510` (stride 80). If any active slot belongs to a driverless car, deactivates it (`wr8(slot + 0x34u, 0)`), preventing corona registration.
+    3. In `process2dEffects` (`0x003C35A8`), checked if entity is a vehicle (`isVehicle(ent)`) and has no driver (`!rd32(ent + 0x384u)`). If parked, skips 2DFX processing (`ctx->pc = $ra`).
+  - Live gameplay telemetry verified: `CORONAS: active=5 veh=0 calls=0 tmplskip=0 behindskip=0 evicted=0` (exactly zero coronas registered for parked cars).
+- **Hardcoded 30m Discard Trap Eradicated (Bushes, Trees, Poles, Signs, Fences)**:
+  - Discovered the exact root cause of pop-in for bushes, trees, poles, signs, building storefront signs, and fences:
+    - In `CRenderer::SetupEntityVisibility` (`0x0035EFD8`), if an entity has `flags & 0x40` (alpha foliage / draw last) or bit 36 (`bDistanceFade`), or model alpha `< 255`, it sets return code `$v0 = 2` (fading entity).
+    - When `$v0 == 2`, the callers `CRenderer::ScanSectorList` (`FUN_0035fae8:636-699`), `CRenderer::ScanBigBuildingList` (`FUN_0035fed0:684-710`), and `CRenderer::ScanSectorList_FrustumTriangle` (`FUN_003602f8:470-520`) evaluate `abs(camX - entX) < 30.0f && abs(camY - entY) < 30.0f` (65m for frustum triangle). If `>= 30.0f`, they branch to discard the entity completely!
+    - Rooftop antennas loaded before because they are non-fading standard models returning `$v0 = 1`. Everything else (props, foliage, signs, poles, fences) returned `$v0 = 2` and was discarded past 30m.
+  - Implemented `setupEntityVisibility` hook (`0x0035EFD8`) in `src/game/vcs_distance.cpp`:
+    - When `viewFactor > 1.0f` and `SetupEntityVisibility` returns `$v0 == 2`, overrides `SET_GPR_U32(ctx, 2, 1u)` and clears bit 36 (`bDistanceFade`) in `ent + 0x4C`.
+    - This routes entities directly to primary render lists 1 and 2 (2,000 capacity each), completely bypassing the 30m discard trap and List 4 (149 capacity).
+  - Verified with `tools/distance_check.py` (PASS: 102 visible entities at 352% vs 23 at 100%) and live telemetry (41,590 props boosted during gameplay in Little Havana).
+- **Zero Slowdown Verified**:
+  - Removed unstable ground plane / ray expansion hooks. Original sector scanning bounds at $Z = -100.0f$ are preserved.
+  - Verified with `tools/bench.py`: rock-solid 60.0 FPS across all spots (`fortbaxter` 4.6 ms, `city_1325_-325` 2.8 ms, `drive` 6.2 ms game thread / 1,558 draws). Telemetry at Little Havana: `game_ms=5.5, worker_ms=3.4, wait_ms=26.9` (locking 60 FPS with 27 ms of headroom).
 
 ## 2026-11-06 - Small prop, foliage & rooftop clutter 30m clamp elimination
 
