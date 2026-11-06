@@ -487,19 +487,30 @@ namespace vcs::distance
                 std::memcpy(&flags, rdram + ((mi + 0x3Au) & PS2_RAM_MASK), 2);
                 const int count = rdram[(mi + 0x38u) & PS2_RAM_MASK];
                 const float mult = rdf(kLodMultiplier);
-                const float viewFactor = std::max(1.0f, view);
-                const float propFloor = std::clamp(300.0f * viewFactor, 500.0f, 900.0f);
+                const float viewFactor = view;
+                const float propFloor = viewFactor > 1.0f ? std::clamp(300.0f * viewFactor, 300.0f, 900.0f) : 0.0f;
+                const float baseLod = count > 0 ? rdf(mi + 0x2Cu) : 0.0f;
+                const bool isSmallProp = baseLod <= 60.0f;
                 const float last = count > 0 ? std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(count - 1)) * mult, propFloor) : 0.0f;
                 for (int i = (flags & 8u) ? (flags & 3u) : 0; i < count; ++i)
                 {
                     float limit = rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(i)) * mult;
                     if (i < count - 1)
+                    {
                         limit = std::min(limit * detail / view, last);
+                        if (isSmallProp && propFloor > 0.0f)
+                            limit = std::max(limit, propFloor);
+                    }
                     else if (propFloor > 0.0f)
+                    {
                         limit = std::max(limit, propFloor);
+                    }
                     if (distance < limit)
                     {
-                        result = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(i)));
+                        uint32_t atomicPtr = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(i)));
+                        if (!atomicPtr && i != 0)
+                            atomicPtr = static_cast<uint32_t>(rd32(atomics));
+                        result = atomicPtr;
                         break;
                     }
                 }
@@ -529,12 +540,18 @@ namespace vcs::distance
                     int idx = count - 1;
                     if (!(flags & 8u) && (flags & 3u))
                         idx = static_cast<int>(flags & 3u) - 1;
+                    idx = std::clamp(idx, 0, count - 1);
                     const float mult = rdf(kLodMultiplier);
-                    const float viewFactor = std::max(1.0f, view);
-                    const float propFloor = std::clamp(300.0f * viewFactor, 500.0f, 900.0f);
+                    const float viewFactor = view;
+                    const float propFloor = viewFactor > 1.0f ? std::clamp(300.0f * viewFactor, 300.0f, 900.0f) : 0.0f;
                     const float limit = std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(idx)) * mult, propFloor);
                     if (distance < limit)
-                        result = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(idx)));
+                    {
+                        uint32_t atomicPtr = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(idx)));
+                        if (!atomicPtr && idx != 0)
+                            atomicPtr = static_cast<uint32_t>(rd32(atomics));
+                        result = atomicPtr;
+                    }
                 }
             }
             SET_GPR_U32(ctx, 2, result);
@@ -561,6 +578,9 @@ namespace vcs::distance
 
             g_largestLodDistance(rdram, ctx, runtime);
 
+            if (viewFactor <= 1.0f)
+                return;
+
             if (ra == kSetupEntityVisibility330ClampReturn)
             {
                 ctx->f[0] = 0.0f;
@@ -572,12 +592,12 @@ namespace vcs::distance
                      ra == kSetupBigBuildingPrefetchWithFadeReturn)
             {
                 const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
-                const float scale = std::max(1.0f, viewFactor);
+                const float scale = viewFactor;
                 // Expand prefetch lookahead significantly during high-speed driving or on foot:
                 // Base 350m ensures roadside signs, poles, and shopfronts (like near Pay 'n' Spray)
                 // are queued and alpha-faded well before arriving, eliminating late popping.
-                const float prefetchBonus = std::max(350.0f, 200.0f + speed * 8.0f) * scale;
-                const float streamFloor = std::clamp(350.0f * scale, 550.0f, 950.0f);
+                const float prefetchBonus = std::max(200.0f, 100.0f + speed * 6.0f) * scale;
+                const float streamFloor = std::clamp(350.0f * scale, 400.0f, 950.0f);
                 ctx->f[0] = std::max(ctx->f[0] + prefetchBonus, streamFloor);
                 g_statPrefetchLookahead.fetch_add(1, std::memory_order_relaxed);
             }
@@ -589,8 +609,8 @@ namespace vcs::distance
         // 0x360B24..0x360C8C. This restricted the 50x50 world sector scanning bounding box to merely 1-2 sectors ahead
         // (~100m-160m), starving CStreaming of advance notice for props, roadside signage, street poles, antennas, and
         // parked vehicles when driving at high speed or turning corners.
-        // We expand lookahead plane distance to 600m-1000m based on viewFactor and camera speed, clamp rays forward, and on
-        // the 4th ray inject an omnidirectional 350m corner-turning radius plus lookahead cone into the caller's stack bounding box.
+        // We expand lookahead plane distance to 500m-1000m based on viewFactor and camera speed, allowing CRenderer to
+        // naturally compute an expanded sector bounding box covering all sectors along the camera view direction.
         PS2_GUEST_CC void func35E590(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t ra = GPR_U32(ctx, 31);
@@ -602,72 +622,16 @@ namespace vcs::distance
             if (!isStandard && !isFading)
                 return g_func35E590(rdram, ctx, runtime);
 
-            g_rdram = rdram;
             const float viewFactor = percent(g_view);
-            const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
-            // 600m to 1000m lookahead based on viewFactor and camera speed (e.g. Banshee at 45 m/s):
-            const float lookahead = std::clamp(600.0f * std::max(1.0f, viewFactor) + speed * 8.0f, 600.0f, 1000.0f);
-
-            ctx->f[12] = -lookahead;
-
-            const uint32_t callerSp = GPR_U32(ctx, 29);
-            const uint32_t outAddr = GPR_U32(ctx, 4);
-
-            g_func35E590(rdram, ctx, runtime);
-
-            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
-            const float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u);
-
-            // Ensure projected ray intersection never points backwards if camera pitch tilts upward:
-            const float rx = rdf(outAddr), ry = rdf(outAddr + 4u);
-            const float dot = (rx - cx) * fx + (ry - cy) * fy;
-            if (dot < 0.0f)
+            if (viewFactor > 1.0f)
             {
-                wrf(outAddr, cx + fx * lookahead);
-                wrf(outAddr + 4u, cy + fy * lookahead);
-            }
-
-            // On the 4th ray return, expand the caller's stack bounding box before the sector loop executes:
-            if (ra == kFrustumRayReturn4_Standard || ra == kFrustumRayReturn4_Fading)
-            {
-                const uint32_t minX_addr = callerSp + (isStandard ? 0xB0u : 0x90u);
-                const uint32_t minY_addr = callerSp + (isStandard ? 0xB4u : 0x94u);
-                const uint32_t maxX_addr = callerSp + (isStandard ? 0xB8u : 0x98u);
-                const uint32_t maxY_addr = callerSp + (isStandard ? 0xBCu : 0x9Cu);
-
-                float minX = rdf(minX_addr);
-                float maxX = rdf(maxX_addr);
-                float minY = rdf(minY_addr);
-                float maxY = rdf(maxY_addr);
-
-                // 1. Omnidirectional corner-turning radius around camera (350m covers ~4.5 sectors in every direction):
-                constexpr float kCornerRadius = 350.0f;
-                minX = std::min(minX, cx - kCornerRadius);
-                maxX = std::max(maxX, cx + kCornerRadius);
-                minY = std::min(minY, cy - kCornerRadius);
-                maxY = std::max(maxY, cy + kCornerRadius);
-
-                // 2. Forward lookahead cone (600m - 1000m along camera view direction):
-                const float halfWidth = lookahead * 0.7f;
-                const float p1x = cx + fx * lookahead - fy * halfWidth;
-                const float p1y = cy + fy * lookahead + fx * halfWidth;
-                const float p2x = cx + fx * lookahead + fy * halfWidth;
-                const float p2y = cy + fy * lookahead - fx * halfWidth;
-                const float p3x = cx + fx * lookahead;
-                const float p3y = cy + fy * lookahead;
-
-                minX = std::min({minX, p1x, p2x, p3x});
-                maxX = std::max({maxX, p1x, p2x, p3x});
-                minY = std::min({minY, p1y, p2y, p3y});
-                maxY = std::max({maxY, p1y, p2y, p3y});
-
-                wrf(minX_addr, minX);
-                wrf(maxX_addr, maxX);
-                wrf(minY_addr, minY);
-                wrf(maxY_addr, maxY);
-
+                const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
+                const float lookahead = std::clamp(500.0f * std::min(viewFactor, 2.5f) + speed * 8.0f, 500.0f, 1000.0f);
+                ctx->f[12] = -lookahead;
                 g_statSectorLookaheads.fetch_add(1, std::memory_order_relaxed);
             }
+
+            g_func35E590(rdram, ctx, runtime);
         }
 
         // CRenderer::ScanSectorList_FrustumTriangle (FUN_0035DEA8):
@@ -686,49 +650,46 @@ namespace vcs::distance
             if (count == 3 && vertAddr)
             {
                 const float viewFactor = percent(g_view);
-                // Target lookahead: 800m to 1000m based on viewFactor:
-                const float lookahead = std::clamp(800.0f * std::max(1.0f, viewFactor), 800.0f, 1000.0f);
-                const float scale = lookahead / 300.0f; // Original base is 300m
-
-                const float x0 = rdf(vertAddr);
-                const float y0 = rdf(vertAddr + 4u);
-                const float orig_x1 = rdf(vertAddr + 8u);
-                const float orig_y1 = rdf(vertAddr + 12u);
-                const float orig_x2 = rdf(vertAddr + 16u);
-                const float orig_y2 = rdf(vertAddr + 20u);
-
-                const float dx1 = orig_x1 - x0;
-                const float dy1 = orig_y1 - y0;
-                const float dx2 = orig_x2 - x0;
-                const float dy2 = orig_y2 - y0;
-
-                const float lenSq1 = dx1 * dx1 + dy1 * dy1;
-                const float lenSq2 = dx2 * dx2 + dy2 * dy2;
-
-                // Sector grid is 50x50; 300m is ~3.75 sectors (lenSq ~ 14).
-                // Ensure rays have reasonable length before expanding:
-                if (lenSq1 > 0.5f && lenSq2 > 0.5f)
+                if (viewFactor > 1.0f)
                 {
-                    const float new_x1 = std::clamp(x0 + dx1 * scale, -5.0f, 54.0f);
-                    const float new_y1 = std::clamp(y0 + dy1 * scale, -5.0f, 54.0f);
-                    const float new_x2 = std::clamp(x0 + dx2 * scale, -5.0f, 54.0f);
-                    const float new_y2 = std::clamp(y0 + dy2 * scale, -5.0f, 54.0f);
+                    // Target lookahead: 800m to 1000m based on viewFactor:
+                    const float lookahead = std::clamp(800.0f * viewFactor, 800.0f, 1000.0f);
+                    const float scale = lookahead / 300.0f; // Original base is 300m
 
-                    wrf(vertAddr + 8u, new_x1);
-                    wrf(vertAddr + 12u, new_y1);
-                    wrf(vertAddr + 16u, new_x2);
-                    wrf(vertAddr + 20u, new_y2);
+                    const float x0 = rdf(vertAddr);
+                    const float y0 = rdf(vertAddr + 4u);
+                    const float orig_x1 = rdf(vertAddr + 8u);
+                    const float orig_y1 = rdf(vertAddr + 12u);
+                    const float orig_x2 = rdf(vertAddr + 16u);
+                    const float orig_y2 = rdf(vertAddr + 20u);
 
-                    g_statSectorLookaheads.fetch_add(1, std::memory_order_relaxed);
+                    const float dx1 = orig_x1 - x0;
+                    const float dy1 = orig_y1 - y0;
+                    const float dx2 = orig_x2 - x0;
+                    const float dy2 = orig_y2 - y0;
 
-                    g_func35DEA8(rdram, ctx, runtime);
+                    const float lenSq1 = dx1 * dx1 + dy1 * dy1;
+                    const float lenSq2 = dx2 * dx2 + dy2 * dy2;
 
-                    // Restore original stack values:
-                    wrf(vertAddr + 8u, orig_x1);
-                    wrf(vertAddr + 12u, orig_y1);
-                    wrf(vertAddr + 16u, orig_x2);
-                    wrf(vertAddr + 20u, orig_y2);
-                    return;
+                    // Sector grid is 50x50; 300m is ~3.75 sectors (lenSq ~ 14).
+                    // Ensure rays have reasonable length before expanding:
+                    if (lenSq1 > 0.5f && lenSq2 > 0.5f)
+                    {
+                        const float new_x1 = std::clamp(x0 + dx1 * scale, 0.0f, 49.0f);
+                        const float new_y1 = std::clamp(y0 + dy1 * scale, 0.0f, 49.0f);
+                        const float new_x2 = std::clamp(x0 + dx2 * scale, 0.0f, 49.0f);
+                        const float new_y2 = std::clamp(y0 + dy2 * scale, 0.0f, 49.0f);
+
+                        wrf(vertAddr + 8u, new_x1);
+                        wrf(vertAddr + 12u, new_y1);
+                        wrf(vertAddr + 16u, new_x2);
+                        wrf(vertAddr + 20u, new_y2);
+
+                        g_statSectorLookaheads.fetch_add(1, std::memory_order_relaxed);
+
+                        g_func35DEA8(rdram, ctx, runtime);
+                        return;
+                    }
                 }
             }
 
@@ -1494,15 +1455,15 @@ namespace vcs::distance
             runtime.replaceFunction(kRandomPedControl, &randomPedControl);
         if ((g_processCollision = runtime.lookupFunction(kProcessCollision)))
             runtime.replaceFunction(kProcessCollision, &processCollision);
-        if ((g_carGeneratorsProcess = runtime.lookupFunction(kCarGeneratorsProcess)) &&
-            (g_findPlayerCoors = runtime.lookupFunction(kFindPlayerCoors)) &&
-            (g_findPlayerPed = runtime.lookupFunction(kFindPlayerPed)) &&
-            (g_func408058 = runtime.lookupFunction(kFunc408058)) &&
-            (g_checkForSpawning = runtime.lookupFunction(kCheckForSpawning)) &&
-            (g_carGenProcess = runtime.lookupFunction(kCarGeneratorProcess)))
-        {
-            runtime.replaceFunction(kCarGeneratorsProcess, &carGeneratorsProcess);
-        }
+        // if ((g_carGeneratorsProcess = runtime.lookupFunction(kCarGeneratorsProcess)) &&
+        //     (g_findPlayerCoors = runtime.lookupFunction(kFindPlayerCoors)) &&
+        //     (g_findPlayerPed = runtime.lookupFunction(kFindPlayerPed)) &&
+        //     (g_func408058 = runtime.lookupFunction(kFunc408058)) &&
+        //     (g_checkForSpawning = runtime.lookupFunction(kCheckForSpawning)) &&
+        //     (g_carGenProcess = runtime.lookupFunction(kCarGeneratorProcess)))
+        // {
+        //     runtime.replaceFunction(kCarGeneratorsProcess, &carGeneratorsProcess);
+        // }
         phases::install(runtime, std::make_index_sequence<phases::kMaxTargets>{});
         // crowdlod -> ok skipped=<ped updates skipped> processed=<LOD updates run> overflow=<sector entries in the
         //             overflow pool> peak=<most at once>

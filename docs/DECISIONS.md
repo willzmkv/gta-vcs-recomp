@@ -1173,3 +1173,14 @@ lossless (only shorter strips); textures stay 128 px, 4 or 8 bit like the disc's
   then fixed: cruise.py p99 16.9 ms against D3D11's 33.1, NATIVE_RENDERER.md). With no D3D12 device the presenter makes
   a D3D11 one for the run; Graphics > Graphics API keeps D3D11 (the reference) and Vulkan. A vcs.ini that names a
   renderer keeps it.
+
+## 2026-11-05 - On-foot sector frustum lookahead via FUN_0035DEA8 without camera mode mutation
+
+- Mutating `TheCamera.m_nMode` (`0x006F4540`) under the hood to force vehicle mode during on-foot sector scanning corrupted
+  internal camera transitions during cutscenes and save loading, freezing the game thread on loading screens (`0x004683C0`).
+- Rather than mutating camera state, on-foot sector scanning is extended cleanly by hooking `FUN_0035DEA8`
+  (`CRenderer::ScanSectorList_FrustumTriangle`), scaling the 300m frustum ray endpoints out to 800m..1000m based on
+  view factor and performing a pure tail-call `g_func35DEA8(rdram, ctx, runtime); return;` without post-call stack restoration
+  (as callers never read the stack vertex array again, and `g_func35DEA8` yields to the EE scheduler via `dispatchGuestBranch`).
+  Frustum ray sector endpoints are strictly clamped to `[0.0f, 49.0f]`. Full draw distance is achieved on-foot without side effects.
+

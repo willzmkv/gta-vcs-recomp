@@ -1,5 +1,21 @@
 # Progress
 
+## 2026-11-06 - Small prop & vegetation popping resolution and safe on-foot frustum scanning
+
+- Resolved popping of bushes/shrubs, street/traffic signs, rooftop antennas, and building storefront signs:
+  - In `atomicFromDistance` (`0x003A52F8`) and `func3A53E0` (`0x003A53E0`), props with base LOD $\le 60.0f$ now receive `propFloor` (`300m..900m`) across all atomics (including atomic 0) so high-detail meshes do not get skipped at 20m-30m when `count >= 2`. Added atomic pointer fallback to `atomics[0]` if a selected higher index atomic pointer is NULL in memory.
+  - Activated `FUN_0035DEA8` (`ScanSectorList_FrustumTriangle`) with safe tail-call semantics (no stack variable restoration after calling `g_func35DEA8`, avoiding EE scheduler yield corruptions), expanding on-foot sector scanning from 300m to 800m-1000m with ray coordinates clamped to sector grid bounds `[0.0f, 49.0f]`.
+  - Discovered the 30m discard trap in `ScanSectorList` (`FUN_0035fae8:636-730`): when `SetupEntityVisibility` returns 0 for an attached sub-object (`flags & 0x2000` / `0x4000`), it is only added to the 149-entry list 4 if within a 30m bounding box (`|dx| < 30.0f && |dy| < 30.0f`), else discarded without streaming. With `propFloor` and prefetch applied in `SetupEntityVisibility`, entities return 1 (normal render lists) and 3 (streaming prefetch) at extended ranges.
+- Verified with `tools/distance_check.py` PASS across Havana (+61.2% draws), Police (+69.7% draws), and Lighthouse (+65.2% draws) at 300% LOD scale.
+
+## 2026-11-05 - T2 prop popping elimination, 800m-1000m on-foot sector triangle and OLA density
+
+- Eliminated prop popping (antennas, air conditioners, signs and rooftop attachments): hooked `CBaseModelInfo::GetLargestLodDistance` (`0x003A5380`) to defeat the hardcoded 330.0f distance clamp in `SetupEntityVisibility` (`0x0035EFD8`), added unconditional `propFloor` (`500m..900m`) and `streamFloor` (`550m..950m`), default 30 MB streaming heap in `vcs_memory.cpp`, and velocity-aware prefetch.
+- Discovered and expanded on-foot sector rasterization: in on-foot camera modes, Rockstar rasterizes a 3-point 2D sector triangle with hardcoded 300m range in `FUN_0035DEA8` (`ScanSectorList_FrustumTriangle`). Hooked `0x0035DEA8` to scale the frustum ray endpoints out to `800m..1000m` without any camera mode mutation (preventing loading screen hangs while processing all visible sectors across the entire view).
+- Fixed proxy MVP frustum culling and performance in `vcs_hle_world.cpp`: folded MVP matrix (row 28) before part setup to eliminate 128 VU matrix ops per culled part, and pre-culled against camera View matrix `br` in view-space.
+- Calibrated 100% density to authentic Open Limit Adjuster (OLA) baseline: capped active real cars at 42 and pedestrians at 70 with +20% boost, 60 distant cars and 60 distant walkers, lowering scene entities from ~965 down to ~232 and jumping drive benchmark from 73.5 FPS to 92.6 FPS (9.7 ms game thread).
+- Parked cars lookahead expanded to 450m-600m and pedestrian spawn forward bias applied.
+
 ## 2026-11-05 - T2 population distance bands (0-325/400 m real, 310/340 m+ decorative) and night coronas
 
 - Documented the mandatory two-band architecture and agent rules in `docs/T2_POPULATION_AND_DISTANT_LIFE_PLAN.md` (linked from `AGENTS.md` and `docs/DISTANT_LIFE.md`).

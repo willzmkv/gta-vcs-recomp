@@ -1708,6 +1708,16 @@ its lists; `pokef` of the scale below with screenshots).
   `FUN_003a52f8`: the first atomic with `distance < lod[i] * LODDistMultiplier`; GetLargestLodDistance `FUN_003a5380`;
   past it a 20 m fade, the model streamed within +50 m (+30 without fade), beyond 330 m the distance is clamped to
   the largest LOD distance. VC's IDE distances in VCS's data (e.g. model 0x1D1E and 0x18F5 forced to 300).
+- **Sector grid frustum scanning (vehicle vs. on-foot)** (found 2026-11-05 for T2 prop popping):
+  In `CRenderer::ConstructRenderList` (`FUN_0035e620`) and `ConstructRenderList_FadingEntities` (`FUN_003606c8`),
+  Rockstar switches on camera mode (`0x006F4540 + activeCam * 0x270`):
+  In vehicle modes (1 and 37), it calls `FUN_0035e590` to project ray planes and calculate a full 2D sector bounding
+  box (extended to 600m..1000m with 350m corner turning radius).
+  In all on-foot camera modes, it branches to `FUN_0035dea8` (`CRenderer::ScanSectorList_FrustumTriangle`), which
+  rasterizes a 3-point sector triangle (apex at camera, two endpoints at hardcoded 300m ray depth `0x43960000`).
+  Sector contents (props, building attachments) beyond 300m were completely omitted from scan lists until the player
+  walked closer. Intercepting `FUN_0035dea8` to scale the ray endpoints to 800m..1000m extends sector scanning across
+  the whole map on foot without touching camera state.
 - **Rendering the lists, vehicles' classes, the draws' origin** (found 2026-11-04 for DISTANT_LIFE.md A2):
   `FUN_0035c4b8` walks the four visible lists (entity pointers, 4 bytes each) calling each entry's vtable `+0x40`
   (PreRender), then the moving list at `0x6F40D0`; the render functions that read the lists are `FUN_0035cd98` /
