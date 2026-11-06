@@ -471,6 +471,10 @@ namespace vcs::distant
                 const uint32_t vt = rd32(e + 0x5Cu);
                 if ((ped ? vt != kRandomPedVtable : (vt != kCarVtable && vt != kCar2Vtable)) || !rd32(e + 0x50u))
                     continue;
+                // Never pick a parked / driverless car as a template: parked cars have m_pDriver == nullptr
+                // (+0x384 == 0) and must keep their headlights / coronas OFF.
+                if (!ped && !rd32(e + 0x384u))
+                    continue;
                 const float dx = rdf(e + 0x30u) - cx, dy = rdf(e + 0x34u) - cy, dz = rdf(e + 0x38u) - cz;
                 float d = std::sqrt(dx * dx + dy * dy + dz * dz);
                 if (d > (ped ? kPedTemplateRange : kTemplateRange))
@@ -861,8 +865,9 @@ namespace vcs::distant
             runtime.replaceFunction(kEntityRender, &entityRender);
         if ((g_preRenderLists = runtime.lookupFunction(kPreRenderLists)))
             runtime.replaceFunction(kPreRenderLists, &preRenderLists);
-        if ((g_registerCorona = runtime.lookupFunction(kRegisterCorona)))
-            runtime.replaceFunction(kRegisterCorona, &registerCorona);
+        // Do not hook RegisterCorona: allow authentic game corona registration without stride/scaling corruption.
+        // if ((g_registerCorona = runtime.lookupFunction(kRegisterCorona)))
+        //     runtime.replaceFunction(kRegisterCorona, &registerCorona);
 
         // proxies -> ok frame=<n> count=<n>, the templates / proxy draw counters, then "x,y,z,distance" for the first eight
         ps2control::addCommand("proxies", [](const std::string &, ps2control::Reply reply) {

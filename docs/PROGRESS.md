@@ -1,5 +1,20 @@
 # Progress
 
+## 2026-11-06 - Resolution of parked cars coronas, game slowdown, and streaming queue choke
+
+- **Parked Cars Corona Glitch Resolved**:
+  - In `src/game/vcs_distant.cpp::addTemplates(false)`, off-screen template car selection was picking parked/unoccupied vehicles without verifying driver existence. Parked vehicles have `m_pDriver == nullptr` (offset `+0x384` on `CVehicle` in VCS PS2, as verified in `docs/game-internals.md`).
+  - Added strict check `if (!ped && !rd32(e + 0x384u)) continue;` so parked vehicles are never picked as templates and never have their `CVehicle::PreRender` / `CVehicle::DoHeadLightBeam` triggered off-screen.
+  - Removed `runtime.replaceFunction(kRegisterCorona, &registerCorona);` hook completely, eliminating corona buffer memory stride misalignment (`0x30` vs real `0x90` stride in VCS PS2 `0x00512560`) and restoring 100% authentic corona handling.
+- **Game Slowdown & 2,500 Sectors Scan Eliminated**:
+  - In `src/game/vcs_distance.cpp::func35E590`, `$f12` is the Z coordinate of the seabed ground plane (`-100.0f`), not a distance. Replacing it with `-lookahead` (`-500.0f` to `-1000.0f`) caused ray-plane intersection math `t = ($f12 - cam.z) / ray_dir.z` to intersect 20 kilometers away, expanding `[min_x..max_x, min_y..max_y]` to `[0..49, 0..49]` — all 2,500 sectors on the entire map every frame!
+  - Removed `kFunc35E590` hook completely. Let the original game compute natural sector scanning bounds at `Z = -100.0f`.
+  - Benchmark verified: rock-solid 60.0 FPS across all spots (`fortbaxter` 4.0 ms, `city_1325_-325` 3.0 ms, `drive` 6.4 ms game thread / 1588 draws).
+- **CStreaming Queue Unchoked & Small Prop / Foliage Distance Calibrated**:
+  - In `src/game/vcs_distance.cpp::largestLodDistance`, removed `streamFloor = std::clamp(400.0f * scale, 400.0f, 950.0f)`. Replaced with velocity-aware prefetch bonus `std::max(60.0f, speed * 3.5f) * (viewFactor - 1.0f)` for entities within the natural camera view direction.
+  - In `atomicFromDistance` and `func3A53E0`, calibrated `propFloor = std::clamp(180.0f * viewFactor, 180.0f, 400.0f)` for small props (`baseLod <= 80.0f` or `flags & 0x6040`).
+  - Verified with `tools/bench.py` (PASS, 60.0 FPS) and `tools/distance_check.py` (PASS, 23 entities at 100%, 74 entities at 352%).
+
 ## 2026-11-06 - Small prop, foliage & rooftop clutter 30m clamp elimination
 
 - Resolved close popping (~20m–30m) of bushes/shrubs, street/traffic signs, rooftop antennas, and building storefront signs:

@@ -1282,15 +1282,17 @@ close (~20m–30m) even with View Distance extended to 350%–1000%. Reverse-eng
   1. **Alpha Foliage and Shrubs**: All bushes and foliage models have bit 6 (`0x40` DRAW_LAST) set in `modelInfo->m_nFlags` (+0x3A). At `0x35F728`, `SetupEntityVisibility` checks `flags & 0x40`, calls `SetClumpAlpha`, and immediately returns 2.
   2. **Rooftop Antennas, Satellite Dishes, and Storefront Signs**: Have `flags & 0x2000` (attached clutter) or `flags & 0x4000` (breakables), or entity bit 36 (`bDistanceFade`, bit 4 of `ent + 0x4C`), or model alpha byte (`mi + 0x39`) < 255. `SetupEntityVisibility` returns 2 (or 0 if unstreamed), trapping them at 30m.
 
-- **The Native Fix (`src/game/vcs_distance.cpp`)**:
+- **The Native Fix (`src/game/vcs_distance.cpp` & `src/game/vcs_distant.cpp`)**:
   - In `atomicFromDistance` (`0x003A52F8`) and `func3A53E0` (`0x003A53E0`), when `viewFactor > 1.0f`:
-    1. Enforce `propFloor = std::clamp(350.0f * viewFactor, 350.0f, 950.0f)` for any model with `baseLod <= 80.0f` or `flags & 0x6040u`.
+    1. Enforce `propFloor = std::clamp(180.0f * viewFactor, 180.0f, 400.0f)` for any model with `baseLod <= 80.0f` or `flags & 0x6040u`.
     2. Set model alpha to 255 (`wr8(mi + 0x39u, 0xFFu)`), preventing the 16-frame fade delay that was returning 2.
     3. Clear bit 6 (`0x40`) from `modelInfo->m_nFlags`, preventing `SetupEntityVisibility` from returning 2.
-    4. Clear entity bit 36 (`bDistanceFade`), preventing return 2.
+    4. Clear entity bit 36 (`bDistanceFade`, bit 4 of `ent + 0x4C`), preventing return 2.
     5. Fall back to `rd32(atomics)` if the indexed atomic pointer is null.
-  - In `largestLodDistance` (`0x003A5380`), enforce `streamFloor = std::clamp(400.0f * scale, 400.0f, 950.0f)` for lookaheads so CStreaming loads props and foliage well in advance.
-  - With these in place, `SetupEntityVisibility` returns 1, routing bushes, signs, and rooftop clutter into the 2000-slot primary render lists (`0x744AC0` / `0x742B80`) rendered natively by D3D11.
+  - In `largestLodDistance` (`0x003A5380`), add velocity-aware prefetch bonus `std::max(60.0f, speed * 3.5f) * (viewFactor - 1.0f)` so CStreaming loads props and foliage in the camera direction well in advance without flooding the queue.
+  - In `src/game/vcs_distant.cpp::addTemplates(false)`, require `rd32(e + 0x384u) != 0` (valid driver) so parked cars are never picked as templates and never have coronas triggered.
+  - **Never hook `FUN_0035E590`**: in `FUN_0035E590`, `$f12` is the Z coordinate of the seabed ground plane (`-100.0f`), not a distance. Tampering with it projects rays 20km away and explodes sector scanning to all 2,500 sectors, crippling the CPU and flooding CStreaming.
+  - With these in place, `SetupEntityVisibility` returns 1, routing bushes, signs, and rooftop clutter into the 2000-slot primary render lists (`0x744AC0` / `0x742B80`) rendered natively by D3D11 without distance clamp.
   - Authenticity: when `viewFactor == 1.0f` (0 on slider, 100% default), zero flags are modified and authentic PS2 culling is strictly preserved.
 
 ## 7. Textures: `.XTX`

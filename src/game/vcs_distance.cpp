@@ -496,9 +496,9 @@ namespace vcs::distance
                 const int count = rdram[(mi + 0x38u) & PS2_RAM_MASK];
                 const float mult = rdf(kLodMultiplier);
                 const float viewFactor = view;
-                const float propFloor = viewFactor > 1.0f ? std::clamp(350.0f * viewFactor, 350.0f, 950.0f) : 0.0f;
                 const float baseLod = count > 0 ? rdf(mi + 0x2Cu) : 0.0f;
                 const bool isSmallProp = (baseLod <= 80.0f) || ((flags & 0x6040u) != 0);
+                const float propFloor = (viewFactor > 1.0f && isSmallProp) ? std::clamp(180.0f * viewFactor, 180.0f, 400.0f) : 0.0f;
                 const float last = count > 0 ? std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(count - 1)) * mult, isSmallProp ? propFloor : 0.0f) : 0.0f;
                 for (int i = (flags & 8u) ? (flags & 3u) : 0; i < count; ++i)
                 {
@@ -582,7 +582,9 @@ namespace vcs::distance
                     idx = std::clamp(idx, 0, count - 1);
                     const float mult = rdf(kLodMultiplier);
                     const float viewFactor = view;
-                    const float propFloor = viewFactor > 1.0f ? std::clamp(350.0f * viewFactor, 350.0f, 950.0f) : 0.0f;
+                    const float baseLod = rdf(mi + 0x2Cu);
+                    const bool isSmallProp = (baseLod <= 80.0f) || ((flags & 0x6040u) != 0);
+                    const float propFloor = (viewFactor > 1.0f && isSmallProp) ? std::clamp(180.0f * viewFactor, 180.0f, 400.0f) : 0.0f;
                     const float limit = std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(idx)) * mult, propFloor);
                     if (distance < limit)
                     {
@@ -655,13 +657,9 @@ namespace vcs::distance
                      ra == kSetupBigBuildingPrefetchWithFadeReturn)
             {
                 const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
-                const float scale = viewFactor;
-                // Expand prefetch lookahead significantly during high-speed driving or on foot:
-                // Base 350m ensures roadside signs, poles, and shopfronts (like near Pay 'n' Spray)
-                // are queued and alpha-faded well before arriving, eliminating late popping.
-                const float prefetchBonus = std::max(200.0f, 100.0f + speed * 6.0f) * scale;
-                const float streamFloor = std::clamp(400.0f * scale, 400.0f, 950.0f);
-                ctx->f[0] = std::max(ctx->f[0] + prefetchBonus, streamFloor);
+                // Advance streaming prefetch proportional to vehicle speed and view distance
+                const float prefetchBonus = std::max(60.0f, speed * 3.5f) * (viewFactor - 1.0f);
+                ctx->f[0] += prefetchBonus;
                 g_statPrefetchLookahead.fetch_add(1, std::memory_order_relaxed);
             }
         }
@@ -1488,8 +1486,10 @@ namespace vcs::distance
             runtime.replaceFunction(kFunc3A53E0, &func3A53E0);
         if ((g_largestLodDistance = runtime.lookupFunction(kLargestLodDistance)))
             runtime.replaceFunction(kLargestLodDistance, &largestLodDistance);
-        if ((g_func35E590 = runtime.lookupFunction(kFunc35E590)))
-            runtime.replaceFunction(kFunc35E590, &func35E590);
+        // Do not hook FUN_0035E590: modifying ground plane Z projects frustum rays 20km away, exploding sector
+        // scan to all 2500 sectors on the entire map and causing severe CPU slowdown & streaming starvation.
+        // if ((g_func35E590 = runtime.lookupFunction(kFunc35E590)))
+        //     runtime.replaceFunction(kFunc35E590, &func35E590);
         // Note: FUN_0035DEA8 must NOT be hooked via replaceFunction - it contains 10 internal dispatchGuestBranch
         // calls that yield to the EE scheduler, and its $a0 parameter is an internal renderer heap struct, causing
         // infinite loading hangs during save/world transitions.
