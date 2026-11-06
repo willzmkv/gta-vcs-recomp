@@ -111,11 +111,10 @@ namespace vcs::distance
 
         PS2Runtime::RecompiledFunction g_original = nullptr, g_pedPoolCtor = nullptr, g_carPoolCtor = nullptr;
         PS2Runtime::RecompiledFunction g_atomicFromDistance = nullptr, g_func3A53E0 = nullptr, g_largestLodDistance = nullptr;
-        PS2Runtime::RecompiledFunction g_func35E590 = nullptr, g_func35E620 = nullptr, g_func3606C8 = nullptr;
+        PS2Runtime::RecompiledFunction g_func35E590 = nullptr, g_func35DEA8 = nullptr;
         constexpr uint32_t kFunc3A53E0 = 0x003A53E0u;
         constexpr uint32_t kFunc35E590 = 0x0035E590u;
-        constexpr uint32_t kFunc35E620 = 0x0035E620u;
-        constexpr uint32_t kFunc3606C8 = 0x003606C8u;
+        constexpr uint32_t kFunc35DEA8 = 0x0035DEA8u;
 
         // Call-site return addresses of func_35E590 (frustum ray-plane intersection):
         // 1. FUN_0035e620 (standard entities):
@@ -671,35 +670,69 @@ namespace vcs::distance
             }
         }
 
-        // CRenderer::ConstructRenderList (FUN_0035E620):
-        // Rockstar implemented a camera mode switch at 0x35EA38: on-foot modes branch to FUN_0035DEA8
-        // which rasterizes only a narrow 300m triangle frustum, starving CStreaming and skipping the
-        // extended sector bounding box. Vehicle modes (1 and 37) take label_35ec70 which calls func35E590
-        // to compute a full bounding box. By temporarily presenting vehicle mode (1) to this check,
-        // ALL camera modes (on foot, sprint, aim, vehicle, helicopter) get the complete 600m-1000m
-        // forward sector scan and 350m omnidirectional corner-turning radius.
-        PS2_GUEST_CC void func35E620(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        // CRenderer::ScanSectorList_FrustumTriangle (FUN_0035DEA8):
+        // On foot, Rockstar rasterizes a 3-point frustum triangle in sector coordinates (apex at camera,
+        // base at a hardcoded 300m ray depth). This leaves distant buildings, rooftop antennas, and props
+        // unscanned by CRenderer until the player walks within 300m.
+        // We scale the far frustum ray endpoints (vertices 1 and 2) from 300m out to 800m-1000m based on
+        // viewFactor, seamlessly extending on-foot sector scanning across the entire visible map with
+        // ZERO camera mode tampering (no risk of loading hangs or camera state corruption).
+        PS2_GUEST_CC void func35DEA8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_rdram = rdram;
-            const uint8_t activeCam = rd8(0x006F4520u);
-            const uint32_t modeAddr = 0x006F4540u + static_cast<uint32_t>(activeCam & 3u) * 0x270u;
-            const uint16_t origMode = rd16(modeAddr);
-            wr16(modeAddr, 1u);
-            g_func35E620(rdram, ctx, runtime);
-            wr16(modeAddr, origMode);
-        }
+            const uint32_t vertAddr = GPR_U32(ctx, 4);
+            const uint32_t count = GPR_U32(ctx, 5);
 
-        // CRenderer::ConstructRenderList_FadingEntities (FUN_003606C8):
-        // Same camera mode switch at 0x360A5C for fading entities and large LOD buildings.
-        PS2_GUEST_CC void func3606C8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-        {
-            g_rdram = rdram;
-            const uint8_t activeCam = rd8(0x006F4520u);
-            const uint32_t modeAddr = 0x006F4540u + static_cast<uint32_t>(activeCam & 3u) * 0x270u;
-            const uint16_t origMode = rd16(modeAddr);
-            wr16(modeAddr, 1u);
-            g_func3606C8(rdram, ctx, runtime);
-            wr16(modeAddr, origMode);
+            if (count == 3 && vertAddr)
+            {
+                const float viewFactor = percent(g_view);
+                // Target lookahead: 800m to 1000m based on viewFactor:
+                const float lookahead = std::clamp(800.0f * std::max(1.0f, viewFactor), 800.0f, 1000.0f);
+                const float scale = lookahead / 300.0f; // Original base is 300m
+
+                const float x0 = rdf(vertAddr);
+                const float y0 = rdf(vertAddr + 4u);
+                const float orig_x1 = rdf(vertAddr + 8u);
+                const float orig_y1 = rdf(vertAddr + 12u);
+                const float orig_x2 = rdf(vertAddr + 16u);
+                const float orig_y2 = rdf(vertAddr + 20u);
+
+                const float dx1 = orig_x1 - x0;
+                const float dy1 = orig_y1 - y0;
+                const float dx2 = orig_x2 - x0;
+                const float dy2 = orig_y2 - y0;
+
+                const float lenSq1 = dx1 * dx1 + dy1 * dy1;
+                const float lenSq2 = dx2 * dx2 + dy2 * dy2;
+
+                // Sector grid is 50x50; 300m is ~3.75 sectors (lenSq ~ 14).
+                // Ensure rays have reasonable length before expanding:
+                if (lenSq1 > 0.5f && lenSq2 > 0.5f)
+                {
+                    const float new_x1 = std::clamp(x0 + dx1 * scale, -5.0f, 54.0f);
+                    const float new_y1 = std::clamp(y0 + dy1 * scale, -5.0f, 54.0f);
+                    const float new_x2 = std::clamp(x0 + dx2 * scale, -5.0f, 54.0f);
+                    const float new_y2 = std::clamp(y0 + dy2 * scale, -5.0f, 54.0f);
+
+                    wrf(vertAddr + 8u, new_x1);
+                    wrf(vertAddr + 12u, new_y1);
+                    wrf(vertAddr + 16u, new_x2);
+                    wrf(vertAddr + 20u, new_y2);
+
+                    g_statSectorLookaheads.fetch_add(1, std::memory_order_relaxed);
+
+                    g_func35DEA8(rdram, ctx, runtime);
+
+                    // Restore original stack values:
+                    wrf(vertAddr + 8u, orig_x1);
+                    wrf(vertAddr + 12u, orig_y1);
+                    wrf(vertAddr + 16u, orig_x2);
+                    wrf(vertAddr + 20u, orig_y2);
+                    return;
+                }
+            }
+
+            g_func35DEA8(rdram, ctx, runtime);
         }
 
         // The spot finder FUN_00267928(x, y, dirx, diry, distance, cos, nodes, ...) looks for a road node `distance` (110 x
@@ -1433,10 +1466,8 @@ namespace vcs::distance
             runtime.replaceFunction(kLargestLodDistance, &largestLodDistance);
         if ((g_func35E590 = runtime.lookupFunction(kFunc35E590)))
             runtime.replaceFunction(kFunc35E590, &func35E590);
-        if ((g_func35E620 = runtime.lookupFunction(kFunc35E620)))
-            runtime.replaceFunction(kFunc35E620, &func35E620);
-        if ((g_func3606C8 = runtime.lookupFunction(kFunc3606C8)))
-            runtime.replaceFunction(kFunc3606C8, &func3606C8);
+        if ((g_func35DEA8 = runtime.lookupFunction(kFunc35DEA8)))
+            runtime.replaceFunction(kFunc35DEA8, &func35DEA8);
         if ((g_pedPoolCtor = runtime.lookupFunction(kPedPoolCtor)))
             runtime.replaceFunction(kPedPoolCtor, &pedPoolCtor);
         if ((g_carPoolCtor = runtime.lookupFunction(kCarPoolCtor)))
