@@ -53,6 +53,7 @@ namespace vcs::world_hd
         constexpr uint32_t kCameraPos = 0x006F4500u;       // TheCamera position (matrix +0x30)
         constexpr uint32_t kCameraFront = 0x006F44E0u;     // TheCamera forward vector
         constexpr uint32_t kTimeStep = 0x004CD110u;        // CTimer::ms_fTimeStep
+        constexpr uint32_t kFrameCounter = 0x004CD124u;    // CTimer::m_FrameCounter
         constexpr uint32_t kPlayerVel = 0x004E4910u;       // player vehicle pointer
 
         // Player vehicle velocity offset (from decompiled FUN_0023C820: DAT_006f44e0 * 50.0 * 150.0)
@@ -282,10 +283,16 @@ namespace vcs::world_hd
 
                         if (!covered && slotIdx < kMaxHDAreas)
                         {
-                            // Request this area by scheduling it for the game's streaming system
-                            // We can't call FUN_002415B0 synchronously from here (causes deadlock)
-                            // Instead, we'll let the game's normal area request mechanism handle it
-                            // by ensuring the HD slots are available for the chooseArea/swapArea flow
+                            // Enqueue HD area request for async processing
+                            {
+                                std::lock_guard<std::mutex> lock(g_hdQueueMutex);
+                                g_hdRequestQueue.push_back({
+                                    gx, gy,
+                                    g_hdAreaSlots[slotIdx],
+                                    static_cast<uint32_t>(rd32(kFrameCounter)),
+                                    0 // pending
+                                });
+                            }
                             ++slotIdx;
                         }
 
