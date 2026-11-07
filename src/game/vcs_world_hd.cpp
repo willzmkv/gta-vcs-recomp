@@ -426,16 +426,6 @@ g_hdAreaCount.store(12, std::memory_order_relaxed);
                 return;
             }
 
-            // For HD, we need to merge sector lists from multiple areas
-            // The original walks: curArea = *(level+0x248), list = *(curArea+0x20)
-            // We'll run the original but with a modified sector list pointer
-            // This is complex - the sector list has 9 buckets of 0x50-byte records
-            // Low-detail sectors have bit 0x8000 set in the current cell's list
-
-            // Simpler approach: run original, then add HD sectors
-            // But the original does the frustum culling and draw setup
-            // Better: hook the sector list pointer temporarily
-
             const uint32_t level = rd32(kLevelPtr);
             if (!level)
             {
@@ -443,10 +433,28 @@ g_hdAreaCount.store(12, std::memory_order_relaxed);
                 return;
             }
 
-            // Save original current area
+            // Save original current area sector list
             const uint32_t origCurArea = rd32(level + 0x248u);
+            const uint32_t origSectorList = origCurArea ? rd32(origCurArea + 0x20u) : 0u;
 
-            // For now, just run original - full HD merge needs more work
+            // Collect loaded HD area sector lists
+            std::vector<uint32_t> hdSectorLists;
+            for (int i = 0; i < static_cast<int>(g_hdAreaCount.load()); ++i) {
+                uint32_t area = g_hdAreaSlots[i];
+                if (area && isAreaLoaded(area)) {
+                    uint32_t listPtr = rd32(area + 0x20u);
+                    if (listPtr)
+                        hdSectorLists.push_back(listPtr);
+                }
+            }
+
+            if (!hdSectorLists.empty()) {
+                // For now, we can't easily merge sector lists without hooking the sector list walker
+                // Full merge requires hooking ScanSectorList or the draw path
+                // This is a placeholder for future enhancement
+            }
+
+            // Run original draw
             g_origWorldDraw(rdram, ctx, runtime);
         }
 
