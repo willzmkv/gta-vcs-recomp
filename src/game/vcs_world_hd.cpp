@@ -530,9 +530,21 @@ g_hdAreaCount.store(12, std::memory_order_relaxed);
         ps2control::addCommand("hdworld", [](const std::string &args, ps2control::Reply reply) {
             if (args.empty())
             {
-                char buf[128];
-                std::snprintf(buf, sizeof(buf), "hdworld: radius=%d focus_ahead=%d focus_vel=%d areas=%u",
-                              g_hdRadius.load(), g_hdFocusAhead.load(), g_hdFocusVelocity.load(), g_hdAreaCount.load());
+                char buf[256];
+                size_t queueSize = 0, loading = 0, loaded = 0, failed = 0;
+                {
+                    std::lock_guard<std::mutex> lock(g_hdQueueMutex);
+                    queueSize = g_hdRequestQueue.size();
+                    for (const auto &req : g_hdRequestQueue) {
+                        if (req.state == 1) ++loading;
+                        else if (req.state == 2) ++loaded;
+                        else if (req.state == 3) ++failed;
+                    }
+                }
+                std::snprintf(buf, sizeof(buf),
+                    "hdworld: radius=%d focus_ahead=%d focus_vel=%d areas=%u queue=%zu loading=%zu loaded=%zu failed=%zu",
+                    g_hdRadius.load(), g_hdFocusAhead.load(), g_hdFocusVelocity.load(),
+                    g_hdAreaCount.load(), queueSize, loading, loaded, failed);
                 reply(buf);
                 return;
             }
