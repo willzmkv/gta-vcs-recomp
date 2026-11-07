@@ -11,11 +11,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <thread>
+#include <vector>
 
 namespace vcs::world_hd
 {
@@ -160,10 +163,94 @@ namespace vcs::world_hd
             g_hdAreaSlots[9] = level + 0x280u; // 13th
             g_hdAreaSlots[10] = level + 0x284u; // 14th
             g_hdAreaSlots[11] = level + 0x288u; // 15th
-            g_hdAreaCount.store(12, std::memory_order_relaxed);
+g_hdAreaCount.store(12, std::memory_order_relaxed);
+    }
+
+    // Helper to set a 32-bit register value
+    inline void setRegU32(R5900Context *ctx, int reg, uint32_t value)
+    {
+        ctx->r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(value));
+    }
+
+    // Async worker: processes HD request queue, calls RequestArea
+    void processHdRequestQueue(uint8_t *rdram, PS2Runtime *runtime)
+    {
+        if (g_hdLoadingCount.load(std::memory_order_relaxed) >= kMaxConcurrentHdLoads)
+            return;
+
+        std::vector<HdAreaRequest*> toProcess;
+        {
+            std::lock_guard<std::mutex> lock(g_hdQueueMutex);
+            for (auto &req : g_hdRequestQueue) {
+                if (req.state == 0 && g_hdLoadingCount.load() < kMaxConcurrentHdLoads) {
+                    req.state = 1; // loading
+                    toProcess.push_back(&req);
+                    ++g_hdLoadingCount;
+                }
+            }
         }
 
-        bool ensureInitialized(uint8_t *rdram)
+        for (auto req : toProcess) {
+            const uint32_t level = rd32(kLevelPtr);
+            if (!level) {
+                req->state = 3; // failed
+                --g_hdLoadingCount;
+                continue;
+            }
+
+            // Call RequestArea via runtime's function table
+            static PS2Runtime::RecompiledFunction s_requestAreaFunc = nullptr;
+            if (!s_requestAreaFunc) {
+                s_requestAreaFunc = runtime->lookupFunction(0x002415B0u);
+            }
+            if (s_requestAreaFunc) {
+                // Create minimal context for the call
+                R5900Context ctx{};
+                setRegU32(&ctx, 4, level);                    // $a0
+                setRegU32(&ctx, 5, static_cast<uint32_t>(req->gx)); // $a1
+                setRegU32(&ctx, 6, static_cast<uint32_t>(req->gy)); // $a2
+                ctx.pc = 0x002415B0u;                         // RequestArea entry
+
+                s_requestAreaFunc(rdram, &ctx, runtime);
+                uint32_t result = getRegU32(&ctx, 2);         // $v0
+                req->state = (result != 0) ? 2 : 3;           // loaded or failed
+            } else {
+                req->state = 3; // failed
+            }
+            --g_hdLoadingCount;
+        }
+    }
+
+    // HD worker thread
+    std::atomic<bool> g_hdWorkerRunning{false};
+    std::thread g_hdWorkerThread;
+
+    void startHdWorker(PS2Runtime *runtime)
+    {
+        if (g_hdWorkerRunning.exchange(true))
+            return;
+
+        g_hdWorkerThread = std::thread([runtime]() {
+            const auto interval = std::chrono::milliseconds(16); // ~60 Hz
+            while (g_hdWorkerRunning.load()) {
+                uint8_t *rdram = runtime->memory().getRDRAM();
+                if (rdram) {
+                    processHdRequestQueue(rdram, runtime);
+                }
+                std::this_thread::sleep_for(interval);
+            }
+        });
+    }
+
+    void stopHdWorker()
+    {
+        if (!g_hdWorkerRunning.exchange(false))
+            return;
+        if (g_hdWorkerThread.joinable())
+            g_hdWorkerThread.join();
+    }
+
+    bool ensureInitialized(uint8_t *rdram)
         {
             if (g_hdAreaCount.load(std::memory_order_relaxed) > 0)
                 return true;
@@ -427,6 +514,9 @@ namespace vcs::world_hd
 
         if ((g_origWorldDraw = runtime.lookupFunction(kWorldDraw)))
             runtime.replaceFunction(kWorldDraw, &worldDrawHook);
+
+        // Start HD async worker thread
+        startHdWorker(&runtime);
 
         // Debug command
         ps2control::addCommand("hdworld", [](const std::string &args, ps2control::Reply reply) {
