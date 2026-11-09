@@ -772,6 +772,17 @@ dropped on uploads (lazy render-target patching).
   follow camera FUN_0029dab0), DECISIONS.md. `tools/controls_check.py`: 36 checks, 0 failed (11 new: mouse heading /
   pitch / invert / off, the pause menu, lock-on, driving keys, lean rebind, W drives and Space stops the car, the mouse
   on the vehicle camera, mouse look after leaving the car).
+- **DualSense support and control presets** (2026-11-06, asked for by the user; game-internals.md 12e, docs/CONTROLS.md):
+  a PS5 pad's light bar (health / Vice theme / off, brightness) with a red-blue police flash on the wanted level
+  (m_pPed + 0x920, found by a changed-value scan); adaptive triggers driven from the game - resistance by vehicle mass
+  (vehicle +0xD0), coming alive with "Drive with the triggers" (throttle firms with acceleration and buzzes on a slide
+  from the velocity-vs-forward slip, brake firms with braking - no ABS, it is 1984) and a gun's trigger feel with
+  "Shoot with the triggers" (a wall that breaks per shot, a buzz for automatics); richer rumble (both actuators, the
+  game drives only the large one); optional game sound through the pad's speaker. Two control schemes as one-click
+  presets on the Gamepad page: Original (GTA III / VC / SA / VCS, face buttons) and Modern (GTA IV / V: R2/L2 drive,
+  R2 fire / L2 aim, free aim, look / weapon on the D-pad). All host-side, no new game hooks; a no-op on non-DualSense
+  pads (the light bar works on a DualShock 4; the trigger-drive / shoot schemes on any pad). New switch
+  `VCS_WANTED_OFF`; the `dualsense` control-channel command reports the reads.
 - **Mouse pitch as direct as the heading** (2026-10-31, reported by the user: up / down far more sluggish than left /
   right): on foot the mouse's pitch went through the stick, capped at its top speed (1.5 rad/s, the rest carried over,
   past 0.6 rad dropped) and then eased by the game (20% of the gap a 1/50 s step, 10% indoors). Now it is written in
@@ -1149,6 +1160,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_FOOT_WALL=0` | on foot the mouse's turn does not ask the camera's update for the pull-in at walls: the camera stands at a wall's edge while its heading turns on, as before 2026-11-11 |
 | `VCS_FREEAIM=0` | free aim's hooks not installed (CGame::Process, CCamera::Process, the weapons' line test): the game's aiming untouched, the setting does nothing |
 | `VCS_INPUT_MAP=0` | the runtime's fixed built-in key / gamepad mapping instead of the player's bindings (`ps2_pad.cpp`; the reference) |
+| `VCS_WANTED_OFF=<hex>` | the offset into the player ped the DualSense police flash reads the wanted level from (default 0x920; game-internals.md 12e). The `dualsense` channel command shows the live value |
 | `VCS_VSYNC=0\|1\|2` | Vertical sync for one run: off, on, off with tearing allowed |
 | `VCS_REFLECTIONS=0\|1\|2` | Car reflections for one run: Original, Smooth, Auto (Smooth above 1x; always used otherwise, no setting) - game-internals.md 6g |
 | `VCS_SCRIPT_TIMESTEP=0` | mission meters that count per frame stay on the frame rate (game-internals.md 11f; the reference) |

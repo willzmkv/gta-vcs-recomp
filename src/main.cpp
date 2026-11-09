@@ -27,6 +27,7 @@
 #include "game/vcs_movie.h"
 #include "game/vcs_hud.h"
 #include "game/vcs_input.h"
+#include "game/vcs_dualsense.h"
 #include "game/vcs_prompts.h"
 #include "game/vcs_volume.h"
 #include "game/vcs_fog.h"
@@ -773,6 +774,7 @@ namespace
         }
 
         vcs::input::registerSettings(); // the Keyboard & mouse and Gamepad pages (game/vcs_input.h)
+        vcs::dualsense::registerSettings(); // the Gamepad page's DualSense section (game/vcs_dualsense.h)
         vcs::mods::registerSettings(exeDirectory()); // the Mods page: modloader/ and texture packs (mods/modloader.h)
         vcs::prompts::registerSettings(); // the Enhancements page: button prompts by device (game/vcs_prompts.h)
         vcs::world::registerSettings();   // Enhancements > World: density, draw distance (game/vcs_world_detail.h)
@@ -973,6 +975,7 @@ int main(int argc, char *argv[])
                                         ui::drawTrainerMenu();
                                         ps2control::setGameInputBlocked(ui::settingsMenuBlocksInput() || ui::trainerMenuBlocksInput());
                                         vcs::input::onHostFrame(ui::settingsMenuOpen() || ui::trainerMenuBlocksInput());
+                                        vcs::dualsense::onHostFrame(ui::settingsMenuOpen() || ui::trainerMenuBlocksInput());
                                         vcs::volume::onHostFrame();
                                         vcs::mods::onHostFrame(); // mod / texture switches, live (mods/modloader.h)
                                         vcs::prompts::onHostFrame();
@@ -1000,6 +1003,7 @@ int main(int argc, char *argv[])
         vcs::rig::install(runtime); // control-channel automation commands (debug/rig.h)
         vcs::trainer::install(runtime); // the trainer's control-channel command (game/vcs_trainer.h)
         vcs::input::install(runtime);   // the player's bindings feed the pad (game/vcs_input.h)
+        vcs::dualsense::install(runtime); // the DualSense light bar / adaptive triggers (game/vcs_dualsense.h)
         vcs::volume::install(runtime);  // the game's music / effects levels follow the settings (game/vcs_volume.h)
         vcs::fog::install(runtime);     // the fog settings scale the game's fog range (game/vcs_fog.h)
         vcs::memory::install(runtime);  // the streaming heap in the upper 32 MB when asked (game/vcs_memory.h)
@@ -1039,6 +1043,7 @@ int main(int argc, char *argv[])
         vcs::startWatchdog(runtime);
         vcs::startProfiler(runtime);
         runtime.run();
+        vcs::dualsense::reset(); // dark light bar, triggers released (game/vcs_dualsense.h)
 #if defined(PS2X_PGO_GEN)
         __llvm_profile_write_file(); // instrumented build: _Exit skips the atexit handler that writes the profile
 #endif

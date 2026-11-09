@@ -3526,6 +3526,35 @@ probes in the game (rig, `worlddetail`).
   about 9-10 -> 10-13 - the spawn spots stay the limit. With peds at 300% the random cars standing there fell to 0-5
   in one probe (cause not found; the heap was not it).
 
+### 12e. DualSense extras (2026-11-05)
+
+- Host-side only (src/game/vcs_dualsense.cpp, docs/CONTROLS.md): the game asks for nothing but the DualShock 2's two
+  rumble motors (12a). The PS5 pad's light bar, adaptive triggers and finer haptics are driven from a little of the
+  game's state read each host frame (as the F3 panel reads it), so there are no new game hooks. SDL carries the light
+  bar (`SDL_SetGamepadLED`) and the triggers (`SDL_SendGamepadEffect`, a raw 47-byte `DS5EffectsState_t`; trigger
+  arrays at struct +10 / +21, the Nielk1 encoding, enable bits 0x04 / 0x08 in byte 0). A report only touches the fields
+  whose enable bits it sets, so the trigger reports, SDL's light-bar reports and the game's rumble do not clobber one
+  another.
+- **Player ped** CWorld::Players[0].m_pPed at **0x4E4910** (12/12b): +0x480 the vehicle (0 on foot), +0x8C4 state
+  (0x37 driving), +0x4E4 health (float, 100 full), **+0x920 the wanted level** (police stars, a 32-bit int). Pauses at
+  0x4CD2AC / 0x4CD11C (12b). The ped is heap-allocated (around 0x01D4_0000 in a run), so the wanted level has no fixed
+  address: read it as `*(m_pPed + 0x920)`.
+- **Wanted level** found 2026-11-05 by a changed-value memory scan (set the level 0..6 with the trainer's
+  `ALTER_WANTED_LEVEL_NO_DROP`, snapshot guest RAM at each, keep the word that equals the level): a 32-bit int at
+  **m_pPed + 0x920**, confirmed across two runs with different ped addresses. Early in the story the game caps the
+  wanted level at 4, so it reads 0,1,2,3,4 and holds (not a bug). The 2007 CodeBreaker address `0x3AAAFC` tried first
+  is **not** it (it never changed with the level - a cheat hook, not the variable). Override the offset with
+  `VCS_WANTED_OFF=<hex>` if a build disagrees; `tools/rig.py peek <m_pPed+0x920> 4` and the `dualsense` command show
+  the live value. (A separate copy tracks it at a lower heap address too - a HUD / CWanted mirror, not used.)
+- **Vehicle fields** on the driven vehicle (m_pPed + 0x480), for the adaptive triggers: velocity **+0x140** and forward
+  vector **+0x10** (3 floats each; 12a), **mass +0xD0** (float) and **type +0x354** (0 car, 1 boat, 4 heli, 6 bike).
+  Masses read with the trainer's vehicle spawn (2026-11-05): moped 350, bike 500, Cheetah 1400, Sentinel 1600,
+  Linerunner 3800, Fire Truck 10000, Rhino tank 25000, Dinghy / Maverick 5000. The trigger resistance scales with mass;
+  acceleration (speed change) firms the throttle, the sideways slide (velocity across the forward vector) buzzes it
+  (lost grip), and hard deceleration pulses the brake (ABS). On foot the gun in hand (slot m_pPed+0x789, weapon type at
+  +0x578 + slot*0x1C; 12c) picks the fire trigger's weapon effect: automatics (22, 24-29, 33-35) buzz while firing, the
+  rest give a wall that breaks at the shot.
+
 ## 13. Open questions / next research targets
 
 - Main loop, frame limiter, CTimer (section 4) - milestone 4 (60 fps).

@@ -118,14 +118,45 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
 
 ## Gamepad page
 
+- **Presets**: one click sets the driving / shooting scheme to match a GTA game (it moves only the two trigger options
+  and gamepad free aim; the button map and the rest stay, so "Custom" is whatever you set by hand afterwards):
+  - **Original (GTA III / VC / SA / VCS)** - the classic PS2 layout those games share: Cross / Square drive, Circle
+    fires, R1 locks on; the triggers look around and change weapon.
+  - **Modern (GTA IV / GTA V)** - R2 accelerates / fires, L2 brakes / aims, free aim on the right stick (no lock-on),
+    look and change-weapon on the D-pad. Best with a DualSense's adaptive triggers.
 - **Buttons**: the gamepad input for each PS2 button (any button, LT / RT, stick clicks, D-pad, or none); several PS2
   buttons may share one.
 - **Sticks and triggers**: deadzone per stick (12%; the range past it is stretched, so a small tilt beyond it still
   counts), **Camera speed** (the right stick's tilt scaled), **Trigger press point** (LT / RT are L2 / R2 buttons),
-  **Swap sticks**, **Invert camera** left / right and up / down, **Free aim** (above; to aim with the left trigger,
-  give R1 the LT and move L2 to another button).
+  **Swap sticks**, **Invert camera** left / right and up / down, **Drive with the triggers** / **Shoot with the
+  triggers** (below), **Free aim** (above).
+- **Drive with the triggers** (off by default): while you drive, **R2 accelerates and L2 brakes / reverses** (instead
+  of Cross / Square), and look left / right (R2 / L2 on the PS2) move to the **D-pad**. On foot the buttons are
+  unchanged. Works on any pad with triggers; it is what makes the DualSense's adaptive triggers (below) act as a live
+  throttle and brake.
+- **Shoot with the triggers** (off by default): on foot, **R2 fires and L2 aims** (instead of Circle / R1), and change
+  weapon moves to the **D-pad** - the modern GTA IV / V layout. In a vehicle the buttons are unchanged. Pairs with the
+  DualSense's weapon trigger feel (below).
 - **Vibration**: the DualShock 2's motors on the gamepad's rumble, 0-200% (100% as on the PS2, 0% off). The game
   drives them itself (crashes, explosions, gunfire; game-internals.md 12a).
+- **DualSense** (src/game/vcs_dualsense.cpp): extras a PS5 pad has, driven from the game's state, each off a no-op on
+  other pads (the light bar alone works on a DualShock 4). Like GTA V's DualSense support:
+  - **Light bar**: its colour during play - **Health** (green full, red hurt), **Vice theme** (a steady neon pink) or
+    **Off**. **Light bar brightness** scales it.
+  - **Police flash**: the light bar flashes red / blue while you have a wanted level, faster the more stars, back to
+    its colour when you lose them.
+  - **Adaptive triggers**: while you drive, R2 / L2 push back by the vehicle's weight - a moped barely, a sports car
+    more, a truck or a tank a lot - and judder on a crash or rough ground. With **Drive with the triggers** on (above)
+    they come alive like GT7 / GTA V: the throttle (R2) firms up the harder you accelerate and **buzzes when you lose
+    grip** (wheelspin or a slide), and the brake (L2) **pulses like ABS** under hard braking. On foot, with **Shoot
+    with the triggers** on (so R2 is the trigger you pull), the fire trigger feels the gun - a single-shot gun gives a
+    firm wall that breaks at the shot, an automatic rests on a light wall and buzzes while it fires.
+  - **Sound through the controller**: play the game's sound - the radio, the police scanner, everything - through the
+    DualSense's own speaker instead of your speakers or headphones. It is a small speaker, so it sounds thinner; turns
+    itself off when the pad is unplugged. (The game mixes all its sound together, so this cannot be the radio alone.)
+
+  (`VCS_WANTED_OFF=<hex>` overrides the ped offset the police flash reads the wanted level from; the control channel's
+  `dualsense` command shows the live value - game-internals.md 12e.)
 
 ## The game's pause menu
 
@@ -203,8 +234,9 @@ the game layer `setting <key> [value]` (a setting read or changed; an action set
 `menu scroll <0..1>` / `menu close` (the settings menu for screenshots), `padstate` (the last pad report the
 bindings made, and the pad reads so far), `mouse <dx> <dy>` (mouse motion in counts, y down, as the mouse sends it),
 `gamepad on|off`, `gamepad <a b x y lb rb back start ls rs up down left right> <0|1>`, `gamepad <lx ly rx ry lt rt>
-<value>` (a gamepad set from the channel in place of the real one while on) and `aimstate` (free aim on or not, and
-the shots sent down the camera line so far). `--control` (`PS2X_CONTROL=1`) opens the same channel with the window shown; `PS2X_INPUT=injected`
+<value>` (a gamepad set from the channel in place of the real one while on), `aimstate` (free aim on or not, and
+the shots sent down the camera line so far) and `dualsense` (the pad's light bar / adaptive-trigger support and the
+game reads that drive them - the wanted level, health, driving - for confirming the wanted-level address). `--control` (`PS2X_CONTROL=1`) opens the same channel with the window shown; `PS2X_INPUT=injected`
 ignores physical input with the window shown. Injected keys go through the bindings like physical ones:
 `tools/controls_check.py` checks them (also a `regress.py` step). `VCS_INPUT_MAP=0` falls back to the runtime's fixed
 built-in mapping (`ps2_pad.cpp`, the old defaults).

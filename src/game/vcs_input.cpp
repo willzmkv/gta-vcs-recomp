@@ -8,6 +8,7 @@
 
 #include "game/vcs_aim.h"
 #include "game/vcs_carcam.h"
+#include "game/vcs_dualsense.h"
 #include "game/vcs_freecam.h"
 #include "game/vcs_frontend.h"
 #include "platform/platform.h"
@@ -188,6 +189,8 @@ namespace vcs::input
             float deadzoneLeft = 0.12f, deadzoneRight = 0.12f, cameraScale = 1.0f, trigger = 0.3f;
             float vibration = 1.0f;
             float walk = 0.45f;
+            bool triggerDrive = false; // while driving: R2 accelerates, L2 brakes, the D-pad looks left / right
+            bool triggerShoot = false; // on foot: R2 fires, L2 aims, the D-pad changes weapon
         };
 
         std::mutex g_mapMutex;
@@ -228,6 +231,8 @@ namespace vcs::input
             m.cameraScale = settings::value("pad.camera_speed") / 100.0f;
             m.trigger = settings::value("pad.trigger") / 100.0f;
             m.vibration = settings::value("pad.vibration") / 100.0f;
+            m.triggerDrive = settings::value("pad.trigger_drive") != 0;
+            m.triggerShoot = settings::value("pad.trigger_shoot") != 0;
             m.walk = settings::value("keys.walk_speed") / 100.0f;
             std::lock_guard<std::mutex> lock(g_mapMutex);
             g_map = m;
@@ -401,6 +406,10 @@ namespace vcs::input
             // stick).
             const GameState game = gameState();
             const bool blocked = ps2control::gameInputBlocked() || freeCamera;
+            // "Shoot with the triggers": L2 is the aim button on foot, so free aim must key off it too (it reaches the
+            // report as R1 in the trigger-shoot block below). Set before the aim update reads padR1.
+            if (m.triggerShoot && !game.driving && !blocked && padAxis(AXIS_LEFT_TRIGGER) > m.trigger)
+                padR1 = true;
             const bool alt = !blocked && (ps2control::keyDown(KEY_LEFT_ALT) || ps2control::keyDown(KEY_RIGHT_ALT));
             auto drivingKey = [&](int key) {
                 for (size_t i = 0; i < kControlCount; ++i)
@@ -725,6 +734,45 @@ namespace vcs::input
                     buttons = static_cast<uint16_t>((buttons & ~(keyR1 ? 0 : kR1)) | kCircle);
             }
 
+            // "Driving with the triggers" (pad.trigger_drive): while the player drives, R2 accelerates (Cross) and L2
+            // brakes / reverses (Square), so the adaptive triggers (game/vcs_dualsense.cpp) have something to resist;
+            // look left / right (R2 / L2 on the PS2) move to the D-pad so nothing is lost.
+            if (m.triggerDrive && game.driving && !blocked)
+            {
+                buttons &= static_cast<uint16_t>(~(kL2 | kR2 | kLeft | kRight)); // triggers were look; D-pad L/R repurposed
+                if (padAxis(AXIS_RIGHT_TRIGGER) > m.trigger)
+                    buttons |= kCross;
+                if (padAxis(AXIS_LEFT_TRIGGER) > m.trigger)
+                    buttons |= kSquare;
+                if (padButton(GAMEPAD_DPAD_RIGHT))
+                    buttons |= kR2; // look right
+                if (padButton(GAMEPAD_DPAD_LEFT))
+                    buttons |= kL2; // look left
+            }
+
+            // "Shoot with the triggers" (pad.trigger_shoot): on foot R2 fires (Circle), L2 aims (R1), and weapon
+            // next / previous (R2 / L2 on the PS2) move to the D-pad - the modern GTA IV / V layout. On a vehicle it
+            // does nothing (driving has its own trigger scheme).
+            if (m.triggerShoot && !game.driving && !blocked)
+            {
+                buttons &= static_cast<uint16_t>(~(kL2 | kR2 | kLeft | kRight)); // triggers were weapon prev/next; D-pad L/R repurposed
+                // A gun fires only once the trigger is pushed PAST the adaptive wall (it resists up to ~zone 7,
+                // game/vcs_dualsense.cpp triggerWeapon), so the shot breaks on a firm press, not on first touch of
+                // the resistance. Fists / melee have no wall, so they keep the light threshold.
+                const float fireAt = aim::gunInHand() ? 0.82f : m.trigger;
+                if (padAxis(AXIS_RIGHT_TRIGGER) > fireAt)
+                    buttons |= kCircle; // fire / attack
+                if (padAxis(AXIS_LEFT_TRIGGER) > m.trigger)
+                    buttons |= kR1; // aim / target
+                if (padButton(GAMEPAD_DPAD_RIGHT))
+                    buttons |= kR2; // next weapon
+                if (padButton(GAMEPAD_DPAD_LEFT))
+                    buttons |= kL2; // previous weapon
+            }
+
+            // the DualSense's trigger recoil on foot (game/vcs_dualsense.cpp): a gun in hand and the attack button down
+            dualsense::onShooting(!game.driving && (buttons & kCircle) != 0 && aim::gunInHand());
+
             // the menu's keys and mouse buttons count too (Enter, Escape, clicks)
             if (!blocked)
                 for (int k : {KEY_ENTER, KEY_KP_ENTER, KEY_ESCAPE, KEY_MOUSE_LEFT, KEY_MOUSE_RIGHT})
@@ -763,7 +811,14 @@ namespace vcs::input
             }
             if (!ps2control::physicalInputOn())
                 strength = 0.0f;
-            gamepadRumble(std::min(1.0f, large / 255.0f * strength), small ? std::min(1.0f, strength) : 0.0f);
+            // The game only ever drives the large (slow) motor (game-internals.md 12a), so a modern pad shaken on its
+            // low-frequency actuator alone feels flat. Give the fast actuator a share of the same level too, for a
+            // fuller, punchier rumble (crashes, explosions), and the full fast motor on the rare small-motor ask.
+            const float lo = std::min(1.0f, large / 255.0f * strength);
+            const float hi = small ? std::min(1.0f, strength) : std::min(1.0f, large / 255.0f * strength * 0.5f);
+            gamepadRumble(lo, hi);
+            // the same rumble intent drives the DualSense's trigger buzz (game/vcs_dualsense.h)
+            dualsense::onActuators(small, large);
         }
 
         // Gamepad sources, labelled for both Xbox and PlayStation pads.
@@ -993,6 +1048,44 @@ namespace vcs::input
         settings::add(s);
 
         // ---- Gamepad ---------------------------------------------------------------------------------------------
+        // Control presets: one click sets the driving / shooting scheme (the trigger options and gamepad free aim) to
+        // match a GTA game. They only move those few settings; the button map, sticks and the rest stay as they are, so
+        // "Custom" is simply whatever you set by hand afterwards.
+        auto preset = [](int drive, int shoot, int freeAim) {
+            settings::set("pad.trigger_drive", drive);
+            settings::set("pad.trigger_shoot", shoot);
+            settings::set("pad.free_aim", freeAim);
+        };
+        struct Preset
+        {
+            const char *key, *label, *help;
+            int drive, shoot, freeAim;
+        };
+        const Preset presets[] = {
+            {"pad.preset_vcs", "Original (GTA III / VC / SA / VCS)",
+             "The classic PS2 layout, shared by Grand Theft Auto III, Vice City, San Andreas and Vice City Stories: "
+             "Cross accelerates and Square brakes, Circle fires and R1 locks on. The triggers look around in a car and "
+             "change weapon on foot.",
+             0, 0, 0},
+            {"pad.preset_modern", "Modern (GTA IV / GTA V)",
+             "The modern layout: R2 accelerates / fires and L2 brakes / aims, with free aim on the right stick (no "
+             "lock-on). Look around and change weapon move to the D-pad. Best with a DualSense's adaptive triggers.",
+             1, 1, 1},
+        };
+        for (const Preset &p : presets)
+        {
+            s = {};
+            s.key = p.key;
+            s.page = kPad;
+            s.section = "Presets";
+            s.label = p.label;
+            s.help = p.help;
+            s.type = Type::Action;
+            s.button = "Use this scheme";
+            s.onChange = [preset, p](int) { preset(p.drive, p.shoot, p.freeAim); };
+            settings::add(s);
+        }
+
         for (const Control &c : kControls)
         {
             if (c.target != Target::Button || c.driving)
@@ -1063,6 +1156,32 @@ namespace vcs::input
             s.onChange = onChange;
             settings::add(s);
         }
+
+        s = {};
+        s.key = "pad.trigger_drive";
+        s.page = kPad;
+        s.section = "Sticks and triggers";
+        s.label = "Drive with the triggers";
+        s.help = "An alternative driving scheme: while you drive, R2 accelerates and L2 brakes / reverses (instead of "
+                 "Cross / Square), and look left / right move to the D-pad. Pairs with the DualSense's adaptive triggers "
+                 "(below). Works on any pad with triggers; on foot the buttons are unchanged.";
+        s.type = Type::Toggle;
+        s.defaultValue = 0;
+        s.onChange = onChange;
+        settings::add(s);
+
+        s = {};
+        s.key = "pad.trigger_shoot";
+        s.page = kPad;
+        s.section = "Sticks and triggers";
+        s.label = "Shoot with the triggers";
+        s.help = "An alternative on-foot scheme (GTA IV / V): R2 fires and L2 aims (instead of Circle / R1), and change "
+                 "weapon moves to the D-pad. Pairs with the DualSense's weapon trigger feel (resistance and a break at "
+                 "each shot). Works on any pad with triggers; while driving the buttons are unchanged.";
+        s.type = Type::Toggle;
+        s.defaultValue = 0;
+        s.onChange = onChange;
+        settings::add(s);
 
         s = {};
         s.key = "pad.free_aim";

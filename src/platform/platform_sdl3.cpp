@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <atomic>
 #include <chrono>
@@ -17,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace platform
@@ -40,10 +42,16 @@ namespace platform
         std::atomic<bool> g_padConnected{false};
         std::atomic<int> g_padFamily{0}; // GamepadFamily
         SDL_Gamepad *g_gamepad = nullptr;
+        std::atomic<int> g_dsPadFamily{GAMEPAD_FAMILY_GENERIC}; // DsPadFamily: our PS5/PS4/generic split for LED + triggers
+        std::atomic<bool> g_padHasLED{false};                  // an RGB light bar
+        std::atomic<bool> g_padHasTriggerFx{false};            // DualSense adaptive triggers (effect packets)
 
         SDL_AudioStream *g_audio = nullptr;
         AudioFill g_audioFill = nullptr;
         std::vector<int16_t> g_audioScratch;
+        uint32_t g_audioRate = 0, g_audioBufferFrames = 0; // the last audioOpen's, so it can reopen on another device
+        std::string g_audioDeviceWant;                     // a playback device name to prefer (empty = the system default)
+        std::string g_audioDeviceName;                     // the device the stream is on now
 
         // window placement (setStartPlacement / onPlacementChanged); main thread
         WindowPlacement g_startPlacement;
@@ -132,6 +140,28 @@ namespace platform
             return keys;
         }
 
+        void noteGamepadCaps()
+        {
+            DsPadFamily family = GAMEPAD_FAMILY_GENERIC;
+            bool hasLED = false, hasTriggerFx = false;
+            if (g_gamepad)
+            {
+                switch (SDL_GetGamepadType(g_gamepad))
+                {
+                case SDL_GAMEPAD_TYPE_PS5: family = GAMEPAD_FAMILY_PS5; break;
+                case SDL_GAMEPAD_TYPE_PS4: family = GAMEPAD_FAMILY_PS4; break;
+                default: family = GAMEPAD_FAMILY_GENERIC; break;
+                }
+                const SDL_PropertiesID props = SDL_GetGamepadProperties(g_gamepad);
+                hasLED = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
+                // SDL exposes no "adaptive triggers" cap; the DualSense is the only pad it sends effect packets to.
+                hasTriggerFx = family == GAMEPAD_FAMILY_PS5;
+            }
+            g_dsPadFamily.store(family, std::memory_order_relaxed);
+            g_padHasLED.store(hasLED, std::memory_order_relaxed);
+            g_padHasTriggerFx.store(hasTriggerFx, std::memory_order_relaxed);
+        }
+
         GamepadFamily familyOf(SDL_GamepadType type)
         {
             switch (type)
@@ -159,7 +189,12 @@ namespace platform
                 return;
             g_gamepad = SDL_OpenGamepad(id);
             if (g_gamepad)
-                std::fprintf(stderr, "[platform] gamepad: %s\n", SDL_GetGamepadName(g_gamepad));
+            {
+                noteGamepadCaps();
+                std::fprintf(stderr, "[platform] gamepad: %s%s%s\n", SDL_GetGamepadName(g_gamepad),
+                             g_padHasLED.load(std::memory_order_relaxed) ? " [light bar]" : "",
+                             g_padHasTriggerFx.load(std::memory_order_relaxed) ? " [adaptive triggers]" : "");
+            }
         }
 
         void snapshotGamepad()
@@ -546,6 +581,7 @@ namespace platform
                 {
                     SDL_CloseGamepad(g_gamepad);
                     g_gamepad = nullptr;
+                    noteGamepadCaps(); // reset the light bar / trigger caps until another pad opens
                     int count = 0;
                     if (SDL_JoystickID *ids = SDL_GetGamepads(&count))
                     {
@@ -780,6 +816,20 @@ namespace platform
         g_rumbleWanted.store(level(low) << 16 | level(high), std::memory_order_relaxed);
     }
 
+    DsPadFamily dsPadFamily() { return static_cast<DsPadFamily>(g_dsPadFamily.load(std::memory_order_relaxed)); }
+    bool gamepadHasLED() { return g_padHasLED.load(std::memory_order_relaxed); }
+    bool gamepadHasTriggerEffects() { return g_padHasTriggerFx.load(std::memory_order_relaxed); }
+
+    bool gamepadSetLED(uint8_t red, uint8_t green, uint8_t blue)
+    {
+        return g_gamepad && SDL_SetGamepadLED(g_gamepad, red, green, blue);
+    }
+
+    bool gamepadSendEffect(const void *data, int size)
+    {
+        return g_gamepad && data && size > 0 && SDL_SendGamepadEffect(g_gamepad, data, size);
+    }
+
     void setMouseCaptured(bool on) { g_wantCapture = on && !g_hiddenWindow; }
     bool mouseCaptured() { return g_captured; }
 
@@ -854,23 +904,66 @@ namespace platform
 
     bool audioAvailable() { return (SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO) != 0; }
 
+    namespace
+    {
+        // The playback device whose name contains g_audioDeviceWant (case-insensitive), else the system default.
+        SDL_AudioDeviceID resolveAudioDevice(std::string &nameOut)
+        {
+            nameOut.clear();
+            if (g_audioDeviceWant.empty())
+                return SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+            auto lower = [](std::string s) { for (char &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; };
+            const std::string want = lower(g_audioDeviceWant);
+            int count = 0;
+            SDL_AudioDeviceID chosen = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+            if (SDL_AudioDeviceID *ids = SDL_GetAudioPlaybackDevices(&count))
+            {
+                for (int i = 0; i < count; ++i)
+                {
+                    const char *n = SDL_GetAudioDeviceName(ids[i]);
+                    if (n && lower(n).find(want) != std::string::npos)
+                    {
+                        chosen = ids[i];
+                        nameOut = n;
+                        break;
+                    }
+                }
+                SDL_free(ids);
+            }
+            return chosen;
+        }
+
+        // Opens g_audio on the resolved device with the stored format. The caller sets g_audioRate / BufferFrames / Fill.
+        bool openAudioStream()
+        {
+            if (g_audio || !audioAvailable() || !g_audioFill)
+                return false;
+            char frames[16];
+            std::snprintf(frames, sizeof(frames), "%u", g_audioBufferFrames);
+            SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, frames);
+            SDL_AudioSpec spec{SDL_AUDIO_S16, 2, static_cast<int>(g_audioRate)};
+            std::string name;
+            const SDL_AudioDeviceID device = resolveAudioDevice(name);
+            g_audio = SDL_OpenAudioDeviceStream(device, &spec, audioCallback, nullptr);
+            if (!g_audio)
+            {
+                std::fprintf(stderr, "[platform] audio device: %s\n", SDL_GetError());
+                return false;
+            }
+            g_audioDeviceName = name;
+            SDL_ResumeAudioStreamDevice(g_audio);
+            return true;
+        }
+    }
+
     bool audioOpen(uint32_t rate, uint32_t bufferFrames, AudioFill fill)
     {
         if (g_audio || !audioAvailable())
             return false;
-        char frames[16];
-        std::snprintf(frames, sizeof(frames), "%u", bufferFrames);
-        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, frames);
-        SDL_AudioSpec spec{SDL_AUDIO_S16, 2, static_cast<int>(rate)};
+        g_audioRate = rate;
+        g_audioBufferFrames = bufferFrames;
         g_audioFill = fill;
-        g_audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audioCallback, nullptr);
-        if (!g_audio)
-        {
-            std::fprintf(stderr, "[platform] audio device: %s\n", SDL_GetError());
-            return false;
-        }
-        SDL_ResumeAudioStreamDevice(g_audio);
-        return true;
+        return openAudioStream();
     }
 
     void audioClose()
@@ -879,6 +972,23 @@ namespace platform
             SDL_DestroyAudioStream(g_audio);
         g_audio = nullptr;
     }
+
+    bool audioUseDevice(const char *nameSubstr)
+    {
+        const std::string want = nameSubstr ? nameSubstr : "";
+        if (want == g_audioDeviceWant)
+            return g_audio != nullptr; // already on it
+        g_audioDeviceWant = want;
+        if (!g_audioFill) // audio not opened yet: openAudioStream will honour the wish later
+            return false;
+        const bool was = g_audio != nullptr;
+        audioClose();
+        const bool ok = openAudioStream();
+        std::fprintf(stderr, "[platform] audio -> %s\n", g_audioDeviceName.empty() ? "default device" : g_audioDeviceName.c_str());
+        return ok || !was;
+    }
+
+    const char *audioDeviceName() { return g_audioDeviceName.c_str(); }
 
     bool writePng(const char *path, const uint8_t *rgb, int width, int height)
     {
