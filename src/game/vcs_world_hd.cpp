@@ -213,6 +213,51 @@ void registerSettings()
         // Applied in vcs::world::chooseHook via g_preloadMinSpeed
     };
     settings::add(s);
+
+    // Option C: Native RSL Cells (Phase 3B - long-term)
+    s = {};
+    s.key = "world.rsl_cells_radius";
+    s.page = "Graphics";
+    s.section = "Distance and population (experimental)";
+    s.label = "RSL cells radius";
+    s.help = "Extra rings of native RSL cells beyond the guest's 3x3 cells (0 = guest only, 1-3). "
+             "Each ring adds ~125m radius. Requires native RSL cell streaming (Phase 3B).";
+    s.type = settings::Type::Integer;
+    s.min = 0;
+    s.max = 3;
+    s.format = "%d";
+    s.defaultValue = 0;
+    s.env = "VCS_RSL_CELLS_RADIUS";
+    s.onChange = [](int v) { /* Applied in HostCellManager */ };
+    settings::add(s);
+
+    s = {};
+    s.key = "world.rsl_stream_budget_mb";
+    s.page = "Graphics";
+    s.section = "Distance and population (experimental)";
+    s.label = "RSL stream budget";
+    s.help = "GPU memory budget for RSL cell streaming (vertex buffers, textures) in MB. "
+             "Higher = more cells streamed simultaneously.";
+    s.type = settings::Type::Integer;
+    s.min = 10;
+    s.max = 200;
+    s.format = "%d";
+    s.defaultValue = 50;
+    s.env = "VCS_RSL_STREAM_BUDGET_MB";
+    s.onChange = [](int v) { /* Applied in HostCellManager */ };
+    settings::add(s);
+
+    s = {};
+    s.key = "world.rsl_crossfade";
+    s.page = "Graphics";
+    s.section = "Distance and population (experimental)";
+    s.label = "RSL crossfade";
+    s.help = "Enable crossfade for RSL cells when they swap (matches guest crossfade behavior).";
+    s.type = settings::Type::Toggle;
+    s.defaultValue = true;
+    s.env = "VCS_RSL_CROSSFADE";
+    s.onChange = [](int v) { /* Applied in HostCellManager */ };
+    settings::add(s);
 }
 
     void install(PS2Runtime &runtime)

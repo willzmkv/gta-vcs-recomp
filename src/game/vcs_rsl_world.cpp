@@ -4,6 +4,8 @@
 #include "game/vcs_distant.h"
 #include "game/vcs_hle_world.h"
 #include "game/vcs_rsl_native.h"
+#include "game/vcs_ldm.h"
+#include "settings/settings.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_chain_observer.h"
 #include "runtime/gs/gs_hw.h"
@@ -47,6 +49,181 @@ namespace vcs::rslworld
 
         bool g_world = false, g_models = false, g_rasters = false, g_verify = false, g_log = false;
         PS2Runtime::RecompiledFunction g_worldOriginal = nullptr, g_modelOriginal = nullptr, g_modelBOriginal = nullptr;
+
+        // ---- Host Cell Manager (Phase 3B - Option C: Native RSL Cells) -----------------------------------
+        // Extends the detailed city radius by streaming extra cells via native RSL submission.
+        // Guest cells (3x3) remain the reference; host cells are drawn additively.
+        struct HostCellManager
+        {
+            struct Cell
+            {
+                int gx = 0, gy = 0;              // grid coordinates
+                bool loaded = false;             // geometry uploaded to GPU
+                bool loading = false;            // piece read in progress
+                std::vector<vcs::ldm::Decoder::GpuBuffers> gpuBuffers; // per-model GPU buffers
+                uint64_t lastUsedFrame = 0;      // for LRU eviction
+            };
+
+            // Settings
+            int radius = 0;                      // extra rings (0 = guest only)
+            int streamBudgetMB = 50;             // GPU memory budget
+            bool crossfadeEnabled = true;        // match guest crossfade
+
+            // Runtime state
+            std::unordered_map<uint64_t, Cell> cells; // key = (gy << 32) | (uint32_t)gx
+            std::atomic<uint64_t> currentFrame{0};
+            uint64_t currentBudgetBytes = 0;
+            uint64_t maxBudgetBytes = 50 * 1024 * 1024;
+
+            // Dependencies
+            const uint8_t *rdram = nullptr;
+            PS2Runtime *runtime = nullptr;
+
+            // Hex grid constants (from game-internals.md 9f)
+            static constexpr float kCellWidth = 125.0f;
+            static constexpr float kCellHeight = 108.25f;
+            static constexpr float kWorldMinX = -2400.0f;
+            static constexpr float kWorldMinY = -2000.0f;
+
+            void init(const uint8_t *rdram_, PS2Runtime *runtime_)
+            {
+                rdram = rdram_;
+                runtime = runtime_;
+                // Read settings using the global settings accessor
+                radius = settings::value("world.rsl_cells_radius");
+                streamBudgetMB = settings::value("world.rsl_stream_budget_mb");
+                crossfadeEnabled = settings::value("world.rsl_crossfade");
+                maxBudgetBytes = uint64_t(streamBudgetMB) * 1024 * 1024;
+            }
+
+            static uint64_t cellKey(int gx, int gy)
+            {
+                return (static_cast<uint64_t>(static_cast<uint32_t>(gy)) << 32) | static_cast<uint32_t>(gx);
+            }
+
+            void worldToGrid(float x, float y, int &gx, int &gy)
+            {
+                gy = static_cast<int>((y - kWorldMinY) / kCellHeight);
+                gx = static_cast<int>((x - kWorldMinX) / kCellWidth + (gy & 1) * 0.5f);
+            }
+
+            void gridToWorld(int gx, int gy, float &ox, float &oy)
+            {
+                ox = (gx + 0.5f - (gy & 1) * 0.5f) * kCellWidth + kWorldMinX;
+                oy = (gy + 0.5f) * kCellHeight + kWorldMinY;
+            }
+
+            // Compute visible cells around camera
+            void computeVisibleCells(int camGx, int camGy)
+            {
+                // Guest has 3x3 centered on camera
+                // Host adds extra rings
+                for (int ring = 0; ring <= radius; ++ring)
+                {
+                    if (ring == 0) continue; // guest handles center
+                    // Hex ring traversal
+                    int gx = camGx - ring;
+                    int gy = camGy;
+                    for (int side = 0; side < 6; ++side)
+                    {
+                        int steps = ring;
+                        static constexpr int dirGX[6] = {1, 1, 0, -1, -1, 0};
+                        static constexpr int dirGY[6] = {0, 1, 1, 0, -1, -1};
+                        for (int s = 0; s < steps; ++s)
+                        {
+                            uint64_t key = cellKey(gx, gy);
+                            auto &cell = cells[key];
+                            cell.gx = gx;
+                            cell.gy = gy;
+                            gx += dirGX[side];
+                            gy += dirGY[side];
+                        }
+                    }
+                }
+            }
+
+            // Update visible cells based on camera position
+            void update(float camX, float camY, float camZ, float fwdX, float fwdY, float fwdZ, float velX, float velY)
+            {
+                if (radius <= 0) return;
+
+                currentFrame++;
+
+                // Compute focus position (same as guest's chooseArea)
+                float focusAhead = 50.0f;
+                float focusVel = 150.0f;
+                float focusX = camX + fwdX * focusAhead + velX * focusVel;
+                float focusY = camY + fwdY * focusAhead + velY * focusVel;
+
+                int focusGx, focusGy;
+                worldToGrid(focusX, focusY, focusGx, focusGy);
+
+                computeVisibleCells(focusGx, focusGy);
+
+                // Evict old cells if over budget
+                evictOldCells();
+            }
+
+            void evictOldCells()
+            {
+                if (currentBudgetBytes <= maxBudgetBytes) return;
+
+                // Sort cells by last used frame
+                std::vector<std::pair<uint64_t, uint64_t>> cellFrames;
+                for (auto &kv : cells)
+                {
+                    if (kv.second.loaded)
+                        cellFrames.emplace_back(kv.second.lastUsedFrame, kv.first);
+                }
+                std::sort(cellFrames.begin(), cellFrames.end());
+
+                // Evict oldest cells until under budget
+                for (auto &p : cellFrames)
+                {
+                    if (currentBudgetBytes <= maxBudgetBytes) break;
+                    auto it = cells.find(p.second);
+                    if (it != cells.end() && it->second.loaded)
+                    {
+                        // TODO: free GPU buffers
+                        it->second.loaded = false;
+                        // currentBudgetBytes -= estimated size
+                    }
+                }
+            }
+
+            // Load a cell's geometry (async - would stream from ISO in real impl)
+            void loadCell(int gx, int gy)
+            {
+                uint64_t key = cellKey(gx, gy);
+                auto it = cells.find(key);
+                if (it == cells.end() || it->second.loading || it->second.loaded)
+                    return;
+
+                it->second.loading = true;
+
+                // TODO: In real implementation:
+                // 1. Read piece from ISO at cell's offset
+                // 2. Decode using vcs::ldm::Decoder
+                // 3. Upload vertex/index buffers to GPU
+                // 4. Upload textures
+                // 5. Mark loaded = true, loading = false
+            }
+
+            // Submit host cell draws via RSL
+            void submitDraws()
+            {
+                if (radius <= 0) return;
+
+                // TODO: Submit each loaded cell's geometry via RSL
+                // 1. Set cell's world origin (gridToWorld)
+                // 2. Submit vertex/index buffers for each mesh
+                // 3. Set texture bindings
+                // 4. Handle crossfade alpha if cell is in crossfade
+            }
+        };
+
+        static HostCellManager g_hostCells;
+        // ----------------------------------------------------------------------------------------------
 
         enum Kind : uint8_t
         {
@@ -2826,6 +3003,9 @@ namespace vcs::rslworld
         g_rdram = runtime.memory().getRDRAM();
         g_items = (g_world || g_models) && vcs::rslnative::enabled() && !off("VCS_RSL_ITEMS") && !std::getenv("VCS_RSL_SHADOW") &&
                   !std::getenv("VCS_TRACE_RSL");
+
+        // Initialize host cell manager (Phase 3B - Option C)
+        g_hostCells.init(g_rdram, &runtime);
         if (g_items && g_world && !hook(runtime, kSectorDraw, g_sectorOriginal, &sectorHook))
             g_items = false; // world items need to know when a sector is cached
         // step 5a: the state setters as ops (VCS_RSL_OPS=0: their packets)
@@ -2866,14 +3046,14 @@ namespace vcs::rslworld
                 ++g_opStats.caching;
             return false;
         }
-        thread_local std::vector<uint8_t> vif;
+thread_local std::vector<uint8_t> vif;
         vif.clear();
         tagsToVif(tags, bytes, vif);
         return vif.empty() || appendOp(rdram, vif.data(), static_cast<uint32_t>(vif.size()));
     }
 
     void onFrameKick()
-    {
+{
         if (!g_world && !g_models && !g_rasters)
             return;
         settleIm2D(const_cast<uint8_t *>(g_rdram), ~0u, 0u, 0u); // steps 5c / 5d: before the chain goes out (and before the
@@ -2901,5 +3081,40 @@ namespace vcs::rslworld
         g_refsCurrent.clear();
         takePooled(g_arenaPool, g_arenaCurrent);
         takePooled(g_itemPool, g_itemsCurrent);
+
+        // Update host cell manager (Phase 3B - Option C)
+        if (g_hostCells.radius > 0)
+        {
+            // Get camera position and forward vector
+            float camX = 0, camY = 0, camZ = 0;
+            float fwdX = 0, fwdY = 0, fwdZ = 0;
+            float velX = 0, velY = 0, velZ = 0;
+
+            // Read camera position from guest memory
+            constexpr uint32_t kCameraPos = 0x006F4500u;
+            constexpr uint32_t kCameraFront = 0x006F44E0u;
+            constexpr uint32_t kPlayerVel = 0x004E4910u;
+            constexpr uint32_t kVehicleVel = 0x140u;
+
+            if (g_rdram)
+            {
+                camX = *reinterpret_cast<const float*>(g_rdram + (kCameraPos & 0x1FFFFFFFu));
+                camY = *reinterpret_cast<const float*>(g_rdram + ((kCameraPos + 4) & 0x1FFFFFFFu));
+                camZ = *reinterpret_cast<const float*>(g_rdram + ((kCameraPos + 8) & 0x1FFFFFFFu));
+                fwdX = *reinterpret_cast<const float*>(g_rdram + (kCameraFront & 0x1FFFFFFFu));
+                fwdY = *reinterpret_cast<const float*>(g_rdram + ((kCameraFront + 4) & 0x1FFFFFFFu));
+                fwdZ = *reinterpret_cast<const float*>(g_rdram + ((kCameraFront + 8) & 0x1FFFFFFFu));
+
+                uint32_t playerVeh = *reinterpret_cast<const uint32_t*>(g_rdram + (kPlayerVel & 0x1FFFFFFFu));
+                if (playerVeh >= 0x00010000u && playerVeh < 0x02000000u)
+                {
+                    velX = *reinterpret_cast<const float*>(g_rdram + ((playerVeh + kVehicleVel) & 0x1FFFFFFFu));
+                    velY = *reinterpret_cast<const float*>(g_rdram + ((playerVeh + kVehicleVel + 4) & 0x1FFFFFFFu));
+                }
+            }
+
+            g_hostCells.update(camX, camY, camZ, fwdX, fwdY, fwdZ, velX, velY);
+            g_hostCells.submitDraws();
+        }
     }
 }
