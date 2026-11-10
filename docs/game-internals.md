@@ -1863,6 +1863,49 @@ its lists; `pokef` of the scale below with screenshots).
   (70 with the camera looking down, x 1.5 extended), in view past 160 x gen. Standing still, 86 % of the new cars went
   at once; driving about half (the offscreen ones behind).
 
+### 9i. HD world further - streaming issues and Phase 1 fix (2026-11-09)
+
+Per docs/HD_WORLD_STREAMING_HANDOFF.md and FORK.md T2: the attempt to extend the detailed city radius beyond
+the native 3x3 cell window (~260 m) had three P0 corruptions in src/game/vcs_world_hd.cpp:
+
+1. **P0 - Invalid area slots**: initHDAreaSlots() treated level+0x25C..0x288 as twelve additional
+   area slots. These are NOT area slots - they are level fields (+0x248/+0x250/+0x258 are active area
+   pointers, +0x24C/+0x254/+0x25C their pairs, +0x260 cross-fade timer, +0x264..+0x290 streaming state).
+   The real area slots are four 0xA0-byte structures at level+0x2C. Writing to the wrong offsets
+   corrupted the level object.
+
+2. **P0 - Host thread calling guest code**: processHdRequestQueue() ran in a std::thread, created a
+   synthetic R5900Context, and called FUN_002415B0 (RequestArea) directly. This violates the runtime:
+   guest RAM, streaming queue, and scheduler were accessed concurrently by game thread and worker;
+   recompiled functions may yield to the guest scheduler mid-body, so a direct host call does not
+   mean "run to completion". Consequence: corruption, races, intermittent hangs/crashes.
+
+3. **P0 - List splice in draw hook**: worldDrawHook() appended sector lists using +0x4C as next
+   pointer, without proving the list structure, deduplicating by id, limiting traversal against
+   cycles, or restoring lists after modifying nodes belonging to other areas. The merge logic from
+   FUN_0023E748 (cross-fade) was not reproduced.
+
+**P1 - Insufficient for props**: Even if the above were fixed, draw-time list merge does not
+guarantee model streaming for props. The model streaming path (ScanSectorList ->
+CStreaming::RequestModelFlags) must be observed explicitly; a high-detail atomic is only
+selectable if its model is resident.
+
+**Phase 1 fix (this commit)**: Removed all host-thread code (std::thread, g_hdWorkerThread,
+g_hdWorkerRunning, startHdWorker, stopHdWorker, processHdRequestQueue), the host request queue
+(g_hdRequestQueue, g_hdQueueMutex, HdAreaRequest), and initHDAreaSlots with invalid offsets.
+The hooks (chooseAreaHook, swapAreaHook, worldDrawHook) now always call the original functions.
+When world.hd_radius > 0, chooseAreaHook logs a warning once per ~600 frames and falls back to
+original behavior. The settings (world.hd_radius, world.hd_focus_ahead, world.hd_focus_velocity)
+and debug command (hdworld) remain for future work.
+
+**Next steps (Phase 2+)**: Requires Ghidra decompilation of FUN_0023C820, FUN_002415B0,
+FUN_002417D0, FUN_00241278, FUN_0023D740, FUN_0023E748, FUN_002409C8, FUN_00240ED8 to build a
+complete state machine for the four area slots (free -> requested -> reading piece N -> complete
+-> current/next -> cross-fade -> reusable). Then choose strategy: (A) extend guest window if
+slots/buffers/queue can grow safely, (B) preload ahead within fixed 4 slots, or (C) extra cells
+via native RSL submission with independent host lifecycle. Verification via
+tools/hd_world_verify.py (run in CI).
+
 ## 10. Memory card and saves
 
 ## 10. Memory card and saves
