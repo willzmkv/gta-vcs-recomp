@@ -5,12 +5,14 @@
 #include "game/vcs_hle_world.h"
 #include "game/vcs_rsl_native.h"
 #include "game/vcs_ldm.h"
+#include "game/vcs_memory.h"
 #include "settings/settings.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_chain_observer.h"
 #include "runtime/gs/gs_hw.h"
 #include "runtime/ps2_hle_survey.h"
 #include "runtime/ps2_write_watch.h"
+#include "disc/iso_image.h"
 
 #include <algorithm>
 #include <immintrin.h>
@@ -191,7 +193,7 @@ namespace vcs::rslworld
                 }
             }
 
-            // Load a cell's geometry (async - would stream from ISO in real impl)
+// Load a cell's geometry (async - would stream from ISO in real impl)
             void loadCell(int gx, int gy)
             {
                 uint64_t key = cellKey(gx, gy);
@@ -201,18 +203,21 @@ namespace vcs::rslworld
 
                 it->second.loading = true;
 
-                // 1. Read piece from ISO at cell's offset
-                // 2. Decode using vcs::ldm::Decoder
-                // 3. Upload vertex/index buffers to GPU via RHI
-                // 4. Upload textures (CLUT + mipmaps)
-                // 5. Mark loaded = true, loading = false
-                // For now, just mark as loaded for testing
+                // TODO: Implement actual piece loading:
+                // 1. Get ISO path from runtime->getIoPaths().cdImage
+                // 2. Open ISO using vcs::IsoImage
+                // 3. Find cell's piece in level's piece index table (level + 0x1C + 4 + gy * 8)
+                // 4. Read piece data from ISO at offset (piece + 0x18)
+                // 4. Decode using vcs::ldm::Decoder
+                // 5. Create GPU buffers via RHI
+                // 6. Store in cell->gpuBuffers
+                // 7. Mark loaded = true, loading = false
                 it->second.loading = false;
                 it->second.loaded = true;
                 it->second.lastUsedFrame = currentFrame.load();
             }
 
-            // Submit host cell draws via RSL
+// Submit host cell draws via RSL
             void submitDraws()
             {
                 if (radius <= 0) return;
