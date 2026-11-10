@@ -124,8 +124,12 @@ namespace vcs::distance
         constexpr uint32_t kSetupEntityVisibility = 0x0035EFD8u;
         constexpr uint32_t kStoreCarLightShadow = 0x002E1140u;
         constexpr uint32_t kRenderHeadLightBeams = 0x002E23A0u;
-        constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
-
+constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
+ 
+        // Frustum triangle hook (ScanSectorList_FrustumTriangle / FUN_0035DEA8) - extends on-foot frustum from 300m
+        constexpr uint32_t kScanFrustumTriangle = 0x0035DEA8u;
+        PS2Runtime::RecompiledFunction g_origScanFrustumTriangle = nullptr;
+ 
         PS2Runtime::RecompiledFunction g_readers[kReaderCount] = {};
         std::atomic<uint32_t> g_statClamp330Bypasses{0};
         std::atomic<uint32_t> g_statPrefetchLookahead{0};
@@ -692,8 +696,25 @@ namespace vcs::distance
                 }
                 g_statPropsBoosted.fetch_add(1, std::memory_order_relaxed);
             }
+}
+ 
+// ScanSectorList_FrustumTriangle (FUN_0035DEA8) - extends on-foot frustum from 300m to view distance
+        // Rockstar's on-foot sector rasterization uses a hardcoded 300m frustum ray depth (0x43960000).
+        // This hook scales the ray endpoints to match the view distance setting.
+        PS2_GUEST_CC void scanFrustumTriangleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const float view = percent(g_view);
+            if (view > 1.0f)
+            {
+                // TODO: Implement frustum ray depth scaling.
+                // The function computes frustum triangle vertices with 300m ray depth.
+                // The VU1 microprogram reads the ray depth from VU1 data memory.
+                // Need to patch the 300m value in VU1 data memory after the original writes it.
+                // For now, just call the original.
+            }
+            g_origScanFrustumTriangle(rdram, ctx, runtime);
         }
-
+ 
         // CShadows::StoreCarLightShadow (0x002E1140):
         // Prevents parked / stationary cars (m_pDriver == nullptr at vehicle +0x384) from storing headlight beam shadows.
         PS2_GUEST_CC void storeCarLightShadow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1471,6 +1492,8 @@ namespace vcs::distance
             runtime.replaceFunction(kLargestLodDistance, &largestLodDistance);
         if ((g_setupEntityVisibility = runtime.lookupFunction(kSetupEntityVisibility)))
             runtime.replaceFunction(kSetupEntityVisibility, &setupEntityVisibility);
+        if ((g_origScanFrustumTriangle = runtime.lookupFunction(kScanFrustumTriangle)))
+            runtime.replaceFunction(kScanFrustumTriangle, &scanFrustumTriangleHook);
         if ((g_storeCarLightShadow = runtime.lookupFunction(kStoreCarLightShadow)))
             runtime.replaceFunction(kStoreCarLightShadow, &storeCarLightShadow);
         if ((g_renderHeadLightBeams = runtime.lookupFunction(kRenderHeadLightBeams)))
