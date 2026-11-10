@@ -33,6 +33,7 @@
 #include "game/vcs_memory.h"
 #include "game/vcs_world.h"
 #include "game/vcs_world_hd.h"
+#include "game/vcs_streaming_trace.h"
 #include "mods/modloader.h"
 #include "mods/rwconv.h"
 #include "platform/platform.h"
@@ -684,6 +685,7 @@ namespace
         vcs::distant::registerSettings();  // decorative distant traffic (game/vcs_distant.h)
         vcs::memory::registerSettings(); // the streaming heap's size (game/vcs_memory.h)
         vcs::world_hd::registerSettings(); // HD world distance (experimental, game/vcs_world_hd.h)
+        vcs::streaming_trace::registerSettings(); // streaming pipeline trace (experimental, game/vcs_streaming_trace.h)
 
         // The graphics API, when the build has more than one (Windows: D3D11, D3D12, Vulkan with VCS_RHI_VULKAN);
         // VCS_RHI=d3d11|d3d12|vulkan|null chooses for one run (render/presenter.h).
@@ -933,6 +935,7 @@ int main(int argc, char *argv[])
         vcs::memory::install(runtime);  // the streaming heap in the upper 32 MB when asked (game/vcs_memory.h)
         vcs::world::install(runtime);   // the world's area streaming (game/vcs_world.h; VCS_TRACE_AREAS=1)
         vcs::world_hd::install(runtime); // HD world further (experimental, game/vcs_world_hd.h)
+        vcs::streaming_trace::install(runtime); // streaming pipeline trace (experimental, game/vcs_streaming_trace.h)
         vcs::gameinfo::install(runtime); // the F3 overlay's game-state panel, the `gameinfo` command (debug/game_info.h)
         // setting <key> [value] -> ok <value>: a setting read or changed (a hidden run never writes vcs.ini)
         ps2control::addCommand("setting", [](const std::string &args, ps2control::Reply reply) {
