@@ -66,6 +66,25 @@ quality - the user's report); a sphere rule that cut large ground sectors (dark 
 the island switch reloading the table under our entries (the world nearly empty, then the game spinning ~1 s a frame
 on the cruise route).
 
+## Status 2026-11-11 evening - NOT ready to play with the setting on
+
+The player's session (`build/run/jogo_hd.log`): full-screen textures, the world "unloading", under 10 fps at ~720 m.
+The log had 216k `[VU1 reserved lower]` lines - the VU1 executing garbage. The hidden cruise route reproduces it
+(it had some in every ~720 m run, none at Original; earlier runs were not checked for it - a miss). Measure now:
+`grep -c "VU1 reserved" build/run/<name>.log` after `tools/cruise.py run ... VCS_HD_RADIUS=3`.
+
+Found and fixed (each confirmed by the counts): stale game entries for textures (taken back), cached packets orphaned
+by the cross-fade swap (swept), the game's copies of the slot being read into (not trusted), the level reload handing
+back torn-down pointers, the translucent list overflowing inside the level object (moved). Bisection: cells read and
+entered without drawing - 0 in two runs; the game's records through our list - 0 in two runs; plus the extra detailed
+sectors - garbage. The copies are byte-identical to the game's (`hdcompare`), the microcode uploads all come from the
+executable (`PS2X_LOG_MPG_SOURCES=1`). Still: 0 / 2015 / 986087 / 2450 in the last four runs - something else that
+drawing extra detailed sectors overflows or leaves stale. Next: dump the VIF1 chain of the first garbage frame
+(`PS2X_DUMP_CHAIN`) to see which packet carries it.
+
+Debug switches (vcs_world_hd.cpp): `VCS_HD_NODRAW=1`, `VCS_HD_DRAWMODE=1|2|3`, `VCS_HD_FREE_DELAY=<frames>`; the
+`hdcompare` command; `[hdworld]` log line every 10 s; `GAME-list` / `built-list` lines for entries refused at the draw.
+
 ## Test spot
 
 `tools/spots.py` **avenue** (the user's spot): the police spot ~15 steps west, facing south - the whole avenue in view.

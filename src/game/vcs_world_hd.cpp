@@ -39,6 +39,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -77,7 +78,11 @@ namespace vcs::world_hd
         constexpr uint16_t kLodIds = 4000u;
         constexpr uint32_t kSynthBytes = 0x80000u; // one built list: header + up to ~6500 records
         constexpr int kSynthBuffers = 3;            // per slot: a list is rewritten two builds after it was drawn
-        constexpr uint64_t kFreeDelay = 8;          // frames before freed memory is reused (the GS may still read it)
+        // frames before freed memory is reused (the GS may still read it); VCS_HD_FREE_DELAY=<frames> for a test
+        const uint64_t kFreeDelay = [] {
+            const char *e = std::getenv("VCS_HD_FREE_DELAY");
+            return e && *e ? uint64_t(std::strtoull(e, nullptr, 10)) : uint64_t(8);
+        }();
 
         // the setting's rings: how far from the camera extra cells are kept
         constexpr float kReach[] = {0.0f, 190.0f, 320.0f, 460.0f};
@@ -276,7 +281,7 @@ namespace vcs::world_hd
         struct Built // a slot's last built list, kept while its inputs are the same
         {
             uint32_t slot = 0, original = 0, cellX = 0, cellY = 0, zBits = 0;
-            uint64_t version = 0, epoch = 0, frame = 0;
+            uint64_t version = 0, epoch = 0, frame = 0, slots = 0;
             uint32_t at = 0;
             int next = 0;
             std::array<uint32_t, kSynthBuffers> buffers{};
@@ -290,6 +295,8 @@ namespace vcs::world_hd
             uint32_t sectors = 0, skipped = 0, bufferPeak = 0;
             // the hooks' own time: the last frame's, and the most of the last 600 frames (microseconds)
             uint32_t costUs = 0, costPeakUs = 0;
+            // world draws without our list: level gone / forced cell / current cell not in / island data / build refused
+            std::array<uint64_t, 5> fallback{};
         };
 
         Arena g_arena;
@@ -299,6 +306,9 @@ namespace vcs::world_hd
         std::vector<Installed> g_installed;
         std::array<Built, 2> g_built{};
         uint64_t g_frame = 0, g_version = 1, g_epoch = 1;
+        // frames to wait after the level's data was read (boot, a save's load, the bridge): the game's slots go through
+        // states the extra lists must not be built from (VU1 fed garbage while a save loaded, 2026-11-11)
+        uint32_t g_hold = 300;
         uint32_t g_level = 0, g_info = 0, g_levelLoaded = 0;
         uint64_t g_imageBase = 0;
         bool g_arenaReady = false;
@@ -338,15 +348,88 @@ namespace vcs::world_hd
         }
 
         std::unordered_map<uint32_t, uint32_t> g_registered; // gid -> the geometry of ours its table entry holds
+        uint32_t g_maxGid = 0; // the highest gid any piece names (the table's used part)
 
+        // What the game's slots hold now: gid -> geometry, from the pairs of every piece of its three cell slots and its
+        // three area slots. An entry is good when it is ours or this; anything else is stale - the game never clears an
+        // area's entries (geometry and textures alike) when it unloads it, and reads the next area into that buffer.
+        // (A sector's meshes name their textures by gid too: a stale texture entry drew another area's raster, its size
+        // and format garbage - full-screen textures, the VU1 fed garbage; the player's report, 2026-11-11.)
+        std::unordered_map<uint32_t, uint32_t> g_game;
+        uint64_t g_gameState = 0;
+        uint64_t slotState();
+
+        void gatherGame()
+        {
+            g_game.clear();
+            // the current and the next slots only: the third (level + 0x258 / 0x25C) is the one being read into - its piece
+            // pointers are recorded before the asynchronous read lands, over what the buffer held before
+            for (uint32_t k = 0; k < 2; ++k)
+            {
+                const uint32_t cs = rd32(g_level + (k ? 0x250u : 0x248u)), n = valid(cs, 0xA0u) ? rd32(cs + 0x1Cu) : 0u;
+                for (uint32_t i = 0; i < n && i < 32u; ++i)
+                {
+                    const uint32_t p = rd32(cs + 0x20u + i * 4u);
+                    if (!valid(p, 8u))
+                        continue;
+                    const uint32_t pairs = rd32(p), count = rd16(p + 4u);
+                    if (!count || count > 0x4000u || !valid(pairs, count * 8u))
+                        continue;
+                    for (uint32_t j = 0; j < count; ++j)
+                    {
+                        const uint32_t gid = rd32(pairs + j * 8u);
+                        if (gid < kMaxGid)
+                            g_maxGid = std::max(g_maxGid, gid);
+                        g_game[gid] = rd32(pairs + j * 8u + 4u);
+                    }
+                }
+                const uint32_t as = rd32(g_level + (k ? 0x254u : 0x24Cu));
+                if (!valid(as, 0x14u) || !rd32(as))
+                    continue;
+                const uint32_t buf = rd32(as + 0x10u);
+                if (!valid(buf, 0x28u))
+                    continue;
+                const uint32_t count = rd32(buf + 0x20u), pairs = rd32(buf + 0x24u);
+                if (!count || count > 0x4000u || !valid(pairs, count * 8u))
+                    continue;
+                for (uint32_t j = 0; j < count; ++j)
+                    g_game[rd16(pairs + j * 8u)] = rd32(pairs + j * 8u + 4u);
+            }
+            g_gameState = slotState();
+        }
+
+        // the game's streamed pieces live in its slot buffers; resident level data below them (game-internals.md 9f)
+        bool inSlotBuffers(uint32_t p) { return p >= 0x00CB7A80u && p < 0x0112A660u; }
+        bool inArena(uint32_t p)
+        {
+            return p >= vcs::memory::kHdWorldBase && p < vcs::memory::kHdWorldBase + vcs::memory::kHdWorldSize;
+        }
+
+        bool good(uint32_t gid, uint32_t now)
+        {
+            if (!now)
+                return false;
+            const auto mine = g_registered.find(gid);
+            if (mine != g_registered.end() && mine->second == now)
+                return true;
+            const auto game = g_game.find(gid);
+            return game != g_game.end() && game->second == now;
+        }
+
+        uint64_t g_reclaimed = 0;
+
+        // our geometry into the entry when it is empty or stale (the game's current entries are never touched)
         void enter(const Piece &piece, uint32_t owner, Cell &cell)
         {
             for (const auto &[gid, geometry] : piece.pairs)
             {
+                g_maxGid = std::max(g_maxGid, gid);
                 cell.geometry[gid] = geometry;
-                const uint32_t e = tableEntry(gid);
-                if (rd32(e) != 0)
-                    continue; // the game's (or another extra cell's)
+                const uint32_t e = tableEntry(gid), now = rd32(e);
+                if (now && good(gid, now))
+                    continue; // the game's, or another extra cell's (the same data)
+                if (now)
+                    ++g_reclaimed;
                 g_registered[gid] = geometry;
                 if (const uint32_t packet = rd32(e + 4u))
                 {
@@ -358,6 +441,7 @@ namespace vcs::world_hd
             }
         }
 
+        // ours out of the entry: back to the game's copy when a slot of the game holds the gid, else empty
         void leave(const Piece &piece)
         {
             for (const auto &[gid, geometry] : piece.pairs)
@@ -368,7 +452,8 @@ namespace vcs::world_hd
                     g_registered.erase(mine);
                 if (rd32(e) != geometry)
                     continue; // the game took the entry over
-                wr32(e, 0);
+                const auto game = g_game.find(gid);
+                wr32(e, game != g_game.end() ? game->second : 0u);
                 if (const uint32_t packet = rd32(e + 4u))
                 {
                     freePacket(packet);
@@ -378,10 +463,73 @@ namespace vcs::world_hd
             }
         }
 
+        std::vector<std::pair<uint32_t, uint32_t>> g_freed; // pieces released since the last sweep: [from, to)
+        uint64_t g_sweptPackets = 0;
+
         void release(Piece &piece)
         {
+            if (piece.at)
+                g_freed.emplace_back(piece.at, piece.at + piece.bytes);
             g_arena.release(piece.at, piece.bytes, g_frame);
             piece = Piece{};
+        }
+
+        // does a cached packet (FUN_00240ED8 / FUN_002409C8: DMA tags, CNT data inline, REFs into the geometry, RET at
+        // the end) point into memory just released
+        bool packetPointsInto(uint32_t packet)
+        {
+            const bool heap = (packet >= vcs::memory::kPacketHeapBase &&
+                               packet < vcs::memory::kPacketHeapBase + vcs::memory::kPacketHeapSize) ||
+                              (packet >= 0x00100000u && packet < PS2_GUEST_RAM_SIZE);
+            if (!heap)
+                return false;
+            uint32_t p = packet;
+            for (int n = 0; n < 1024 && valid(p, 16u); ++n)
+            {
+                const uint32_t w0 = rd32(p), id = (w0 >> 28) & 7u, qwc = w0 & 0xFFFFu, addr = rd32(p + 4u) & 0x7FFFFFFFu;
+                if (id == 0u || id == 3u || id == 4u || id == 5u)
+                    for (const auto &[from, to] : g_freed)
+                        if (addr >= from && addr < to)
+                            return true;
+                if (id == 1u)
+                    p += 16u + qwc * 16u;
+                else if (id == 0u || id == 6u || id == 7u)
+                    return false;
+                else if (id == 2u)
+                    return false; // NEXT: not in these packets
+                else
+                    p += 16u;
+            }
+            return false;
+        }
+
+        // Cached packets built from our geometry outlive it when the game puts its own copy of the gid into the entry
+        // without freeing them (the cross-fade swap clears the previous cell's geometry and fills it again, the packet
+        // left as it was): released pieces leave no packet pointing into them - else, once the memory holds the next
+        // cell, every frame CALLs garbage (the VU1 fed garbage, full-screen textures; 2026-11-11).
+        void sweepPackets()
+        {
+            if (g_freed.empty() || !valid(g_info, 4u))
+                return;
+            const uint32_t table = rd32(g_info);
+            for (uint32_t gid = 1; gid <= g_maxGid && gid < kMaxGid; ++gid)
+            {
+                const uint32_t e = table + gid * 0xCu, packet = rd32(e + 4u), geometry = rd32(e);
+                for (const auto &[from, to] : g_freed)
+                    if (geometry >= from && geometry < to)
+                    {
+                        const auto game = g_game.find(gid);
+                        wr32(e, game != g_game.end() ? game->second : 0u);
+                        break;
+                    }
+                if (packet && packetPointsInto(packet))
+                {
+                    freePacket(packet);
+                    wr32(e + 4u, 0);
+                    ++g_sweptPackets;
+                }
+            }
+            g_freed.clear();
         }
 
         // ---- reading pieces (FUN_002417D0 / FUN_002414E8, then FUN_00324AC0 as FUN_00241278 / FUN_0023BF38 do) ----
@@ -561,13 +709,17 @@ namespace vcs::world_hd
         bool g_reenter = false;
         void reenterAll()
         {
+            gatherGame();
             for (auto &[k, cell] : g_cells)
                 enterCell(*cell);
             g_reenter = false;
+            ++g_version;
         }
 
         void forget(Cell &cell)
         {
+            if (slotState() != g_gameState)
+                gatherGame();
             leave(cell.list);
             for (Piece &p : cell.conditional)
                 leave(p);
@@ -657,6 +809,9 @@ namespace vcs::world_hd
             if (!tableValid)
                 for (auto &[k, a] : g_areas)
                     release(a.piece);
+            if (tableValid)
+                sweepPackets();
+            g_freed.clear();
             g_cells.clear();
             g_areas.clear();
             g_empty.clear();
@@ -687,6 +842,13 @@ namespace vcs::world_hd
                 ++g_stats.restores;
             }
             g_installed.clear();
+        }
+
+        // VCS_HD_DRAWMODE (bisecting): 1 the game's records only, 2 + the extra detailed ones, 3 everything (default)
+        int drawMode()
+        {
+            static const int mode = std::getenv("VCS_HD_DRAWMODE") ? std::atoi(std::getenv("VCS_HD_DRAWMODE")) : 3;
+            return mode;
         }
 
         // points on a 64 m grid: is one inside a circle (with a test on its tag)
@@ -733,6 +895,36 @@ namespace vcs::world_hd
             float dx, dy, dz;
             int hide; // -1 keep, 0 show, 1 hide
         };
+
+        // the slots' buffers (cells: level + 0x2C + k * 0xA0, + 0x10; areas: level + 0x20C + k * 0x14, + 0x10) share
+        // 0xCB7A80..0x112A660: a buffer ends where the next one starts
+        uint32_t bufferEnd(uint32_t from)
+        {
+            uint32_t end = 0x0112A660u;
+            for (int k = 0; k < 3; ++k)
+                for (const uint32_t b : {rd32(g_level + 0x3Cu + uint32_t(k) * 0xA0u), rd32(g_level + 0x21Cu + uint32_t(k) * 0x14u)})
+                    if (b > from && b < end)
+                        end = b;
+            return std::min(end, from + 0x200000u);
+        }
+
+        // what the game's six slots hold (a list built for one state is wrong for another: entries the game left stale)
+        uint64_t slotState()
+        {
+            uint64_t h = 0xCBF29CE484222325ull;
+            auto mix = [&](uint32_t v) { h = (h ^ v) * 0x100000001B3ull; };
+            for (int k = 0; k < 3; ++k)
+            {
+                const uint32_t cs = g_level + 0x2Cu + uint32_t(k) * 0xA0u, as = g_level + 0x20Cu + uint32_t(k) * 0x14u;
+                for (const uint32_t o : {0x0u, 0x8u, 0xCu, 0x10u, 0x18u, 0x1Cu})
+                    mix(rd32(cs + o));
+                for (const uint32_t o : {0x0u, 0x8u, 0xCu, 0x10u})
+                    mix(rd32(as + o));
+            }
+            for (const uint32_t o : {0x248u, 0x24Cu, 0x250u, 0x254u, 0x258u, 0x25Cu, 0x270u, 0x27Cu})
+                mix(rd32(g_level + o));
+            return h;
+        }
 
         // the switched sectors (FUN_0023D740): the last entry naming the id decides
         int switched(uint16_t id)
@@ -801,31 +993,13 @@ namespace vcs::world_hd
             };
             // a gid's table entry holds geometry we know is there: resident (no piece of the list has it), ours, or the
             // game's copy while the slot that entered it still holds its cell / area
+            // a gid's entry holds geometry we know is there: resident (no piece of the list has it), ours, or what a slot of
+            // the game holds now (the stale ones were taken back before the build: reenterAll)
             auto drawable = [&](const Cell *c, uint16_t gid) {
-                const uint32_t e = table + gid * 0xCu, geometry = rd32(e);
-                if (!geometry)
-                    return false;
-                if (!c->geometry.count(gid))
-                    return true;
-                if (const auto mine = g_registered.find(gid); mine != g_registered.end() && mine->second == geometry)
-                    return true;
-                const uint32_t owner = rd32(e + 8u);
-                for (int k = 0; k < 3; ++k)
-                {
-                    if ((owner >> 28) == 4u)
-                    {
-                        const uint32_t cs = g_level + 0x2Cu + uint32_t(k) * 0xA0u;
-                        if (rd32(cs + 0x18u) && (rd32(cs + 0xCu) << 16 | rd32(cs + 8u)) == (owner & 0x0FFFFFFFu))
-                            return true;
-                    }
-                    else if ((owner >> 28) == 8u)
-                    {
-                        const uint32_t as = g_level + 0x20Cu + uint32_t(k) * 0x14u;
-                        if (rd32(as) && (rd32(as + 0xCu) << 16 | rd32(as + 8u)) == (owner & 0x0FFFFFFFu))
-                            return true;
-                    }
-                }
-                return false;
+                const uint32_t now = rd32(table + gid * 0xCu);
+                if (!c->geometry.count(gid) && !inSlotBuffers(now))
+                    return now != 0; // the level's resident data
+                return good(gid, now);
             };
 
             std::array<std::vector<Rec>, 8> out;
@@ -834,7 +1008,7 @@ namespace vcs::world_hd
                 for (uint32_t r = bucket[k]; r < bucket[k + 1]; r += kRecord)
                 {
                     Rec rec{uint16_t(rd16(r) & 0x7FFFu), r, 0.0f, 0.0f, 0.0f, -1};
-                    if (rec.id >= kLodIds && !(rd16(r) & 0x8000u) && rd32(r + 0xCu) == 0 && replaced(rec.id, r))
+                    if (drawMode() >= 3 && rec.id >= kLodIds && !(rd16(r) & 0x8000u) && rd32(r + 0xCu) == 0 && replaced(rec.id, r))
                     {
                         rec.hide = 1;
                         ++hiddenLod;
@@ -846,6 +1020,8 @@ namespace vcs::world_hd
             uint32_t total = (b8 - b0) / kRecord;
             for (const Cell *c : extra)
             {
+                if (drawMode() < 2)
+                    break;
                 const uint32_t list = c->list.at;
                 for (int k = 0; k < 8; ++k)
                 {
@@ -856,6 +1032,8 @@ namespace vcs::world_hd
                     {
                         const uint16_t id = rd16(r) & 0x7FFFu, gid = rd16(r + 2u);
                         if (id < 0x20u || taken.test(id) || rd32(r + 0xCu) || !drawable(c, gid))
+                            continue;
+                        if (id >= kLodIds && drawMode() < 3)
                             continue;
                         if (id >= kLodIds && replaced(id, r))
                         {
@@ -948,22 +1126,28 @@ namespace vcs::world_hd
             if (!levelUsable())
                 return;
             const uint32_t current = rd32(g_level + 0x248u);
-            // nothing extra while a cell is forced (level + 0x260: interiors, cutscenes) or the current cell is not in
-            if (radius == 0 || rd32(g_level + 0x260u) != 0 || !valid(current, 0x40u) || rd32(current + 0x18u) == 0)
+            if (radius == 0)
             {
                 if (!g_cells.empty())
                     dropAll(true);
                 return;
             }
+            if (g_hold)
+            {
+                --g_hold;
+                return;
+            }
+            // nothing new while a cell is forced (level + 0x260: interiors, cutscenes) or the current cell is not in yet:
+            // the cells stay (dropping them there made the world fall back to the game's and come back one cell a frame)
+            if (rd32(g_level + 0x260u) != 0 || !valid(current, 0x40u) || rd32(current + 0x18u) == 0)
+                return;
             const float camX = rdf(kCameraPos), camY = rdf(kCameraPos + 4u);
             if (!std::isfinite(camX) || !std::isfinite(camY))
                 return;
             const float reach = kReach[radius];
-            if (g_reenter)
-            {
+            // entries the game left stale (or emptied) since: ours again - every change of its slots, and once a second
+            if (g_reenter || slotState() != g_gameState || g_frame % 60u == 0u)
                 reenterAll();
-                ++g_version;
-            }
             // too far now: dropped
             for (auto it = g_cells.begin(); it != g_cells.end();)
             {
@@ -978,6 +1162,7 @@ namespace vcs::world_hd
                 else
                     ++it;
             }
+            sweepPackets();
             // the nearest wanted one not in yet (one a frame: ~0.2-0.7 MB copied from the mapped disc image)
             const int cy0 = int((camY + 2000.0f) * 0.009237875f);
             const int cx0 = int((camX + 2400.0f) * 0.008f + float(cy0 & 1) * 0.5f);
@@ -1011,9 +1196,28 @@ namespace vcs::world_hd
         // at the world draw: our lists in the current slot (and the previous one while they cross-fade)
         void install()
         {
-            if (g_cells.empty() || !valid(g_level, 0x600u) || rd32(kLevelPtr) != g_level || rd32(g_level + 0x260u) != 0 ||
-                rd32(g_level + 0x18u) != g_levelLoaded || g_levelLoaded != rd32(kLevelId))
+            static const bool noDraw = std::getenv("VCS_HD_NODRAW") && *std::getenv("VCS_HD_NODRAW") == '1'; // bisecting
+            if (g_cells.empty() || noDraw)
                 return;
+            // the frames drawn with the game's own list only (the extra detail gone for them), by why
+            int why = -1;
+            if (!valid(g_level, 0x600u) || rd32(kLevelPtr) != g_level)
+                why = 0;
+            else if (rd32(g_level + 0x260u) != 0)
+                why = 1;
+            else if (!valid(rd32(g_level + 0x248u), 0x40u) || rd32(rd32(g_level + 0x248u) + 0x18u) == 0)
+                why = 2;
+            else if (rd32(g_level + 0x18u) != g_levelLoaded || g_levelLoaded != rd32(kLevelId) || g_hold)
+                why = 3;
+            if (why >= 0)
+            {
+                ++g_stats.fallback[why];
+                return;
+            }
+            // the game's slots changed since the entries were checked (this frame's chooser started a load into a buffer
+            // whose old entries are now stale): checked again before anything is drawn from them
+            if (slotState() != g_gameState)
+                reenterAll();
             const uint32_t current = rd32(g_level + 0x248u), previous = rd32(g_level + 0x250u);
             const bool fading = int32_t(rd32(g_level + 0x264u)) >= 1 && valid(previous, 0x40u) && int32_t(rd32(previous + 8u)) >= 1;
             const std::pair<uint32_t, uint32_t> slots[2] = {{current, rd32(g_level + 0x24Cu)},
@@ -1031,8 +1235,9 @@ namespace vcs::world_hd
                     continue;
                 Built &b = g_built[i];
                 const uint32_t zBits = rd32(slot + 0x14u);
+                const uint64_t slots = slotState();
                 if (!(b.at && b.slot == slot && b.original == piece && b.cellX == rd32(slot + 8u) && b.cellY == rd32(slot + 0xCu) &&
-                      b.zBits == zBits && b.version == g_version && b.epoch == g_epoch && g_frame < b.frame + 30u))
+                      b.zBits == zBits && b.version == g_version && b.epoch == g_epoch && b.slots == slots && g_frame < b.frame + 30u))
                 {
                     b.at = build(b, slot, piece);
                     b.slot = slot;
@@ -1042,10 +1247,14 @@ namespace vcs::world_hd
                     b.zBits = zBits;
                     b.version = g_version;
                     b.epoch = g_epoch;
+                    b.slots = slots;
                     b.frame = g_frame;
                 }
                 if (!b.at)
+                {
+                    ++g_stats.fallback[4];
                     continue;
+                }
                 wr32(slot + 0x20u, b.at);
                 g_installed.push_back({slot, piece, b.at, zBits});
                 ++g_stats.installs;
@@ -1061,6 +1270,87 @@ namespace vcs::world_hd
         }
 
         // counts only (FUN_00240ED8 returns at once when fewer than 0x12C00 bytes are free)
+        bool fromBuiltList(uint32_t record)
+        {
+            for (const Built &b : g_built)
+                for (const uint32_t at : b.buffers)
+                    if (at && record >= at && record < at + kSynthBytes)
+                        return true;
+            return false;
+        }
+
+        // A gid whose entry must be checked: one a slot of the game or one of ours streams (the resident ones are the
+        // level's own, set at its load)
+        bool entryOk(uint32_t gid, uint32_t now)
+        {
+            if (!now)
+                return true; // nothing drawn from it
+            if (!g_registered.count(gid) && !g_game.count(gid) && !inSlotBuffers(now) && !inArena(now))
+                return now >= 0x00100000u && now < PS2_GUEST_RAM_SIZE;
+            return good(gid, now);
+        }
+
+        uint64_t g_refused = 0;
+
+        // at the draw, for a record of a built list: its geometry and every mesh's texture entry still good - whatever
+        // changed since the list was built, nothing stale goes to the GS (FUN_002409C8's mesh walk: count at +0, the
+        // meshes 0x18 each from +4, the texture gid at mesh + 4)
+        // where a pointer is: one of our live pieces, our memory not in a live piece (freed), the game's slot buffers
+        const char *whereIs(uint32_t p)
+        {
+            if (p < vcs::memory::kHdWorldBase || p >= vcs::memory::kHdWorldBase + vcs::memory::kHdWorldSize)
+                return p >= 0x00CB7A80u && p < 0x0112A660u ? "game slot buffers" : "elsewhere";
+            for (const auto &[k, c] : g_cells)
+            {
+                if (p >= c->list.at && p < c->list.at + c->list.bytes)
+                    return "our cell piece";
+                for (const Piece &q : c->conditional)
+                    if (p >= q.at && p < q.at + q.bytes)
+                        return "our conditional piece";
+            }
+            for (const auto &[k, a] : g_areas)
+                if (p >= a.piece.at && p < a.piece.at + a.piece.bytes)
+                    return "our area piece";
+            return "OUR FREED MEMORY";
+        }
+
+        bool drawableNow(uint32_t record, bool ours)
+        {
+            const uint32_t table = rd32(g_info);
+            const uint32_t gid = rd16(record + 2u);
+            if (gid == 0 || gid >= kMaxGid)
+                return true;
+            const uint32_t geometry = rd32(table + gid * 0xCu);
+            const char *why = nullptr;
+            uint32_t bad = gid, value = geometry;
+            if (!entryOk(gid, geometry))
+                why = "geometry";
+            else if (geometry)
+            {
+                const uint32_t meshes = rd16(geometry);
+                if (!valid(geometry, 4u + meshes * 0x18u) || meshes > 512u)
+                    why = "mesh table";
+                for (uint32_t i = 0; !why && i < meshes; ++i)
+                {
+                    const uint32_t tex = rd16(geometry + 4u + i * 0x18u + 4u);
+                    if (tex == 0xFFFFu || tex >= kMaxGid)
+                        continue;
+                    const uint32_t raster = rd32(table + tex * 0xCu);
+                    if (!entryOk(tex, raster))
+                        why = "texture", bad = tex, value = raster;
+                }
+            }
+            if (!why)
+                return true;
+            if (g_refused++ < 60)
+                std::fprintf(stderr, "[hdworld] %s record %u (gid %u) bad: %s gid %u entry 0x%08x (%s) packet 0x%08x owner 0x%08x "
+                             "(ours 0x%08x, game 0x%08x)\n",
+                             ours ? "built-list" : "GAME-list", rd16(record) & 0x7FFFu, gid, why, bad, value, whereIs(value),
+                             rd32(table + bad * 0xCu + 4u), rd32(table + bad * 0xCu + 8u),
+                             g_registered.count(bad) ? g_registered[bad] : 0u, g_game.count(bad) ? g_game[bad] : 0u);
+            return !ours; // ours not drawn; the game's own drawn as it would be (logged: is it ours that broke it?)
+        }
+
         PS2_GUEST_CC void sectorHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_ram = rdram;
@@ -1070,6 +1360,12 @@ namespace vcs::world_hd
                 g_sectorSkips.fetch_add(1, std::memory_order_relaxed);
             if (used > g_bufferPeak.load(std::memory_order_relaxed))
                 g_bufferPeak.store(used, std::memory_order_relaxed);
+            const uint32_t record = getRegU32(ctx, 5);
+            if (!g_cells.empty() && valid(record, kRecord) && !drawableNow(record, fromBuiltList(record)))
+            {
+                ctx->pc = getRegU32(ctx, 31); // not drawn (FUN_00240ED8 returns nothing)
+                return;
+            }
             g_sector(rdram, ctx, runtime);
         }
 
@@ -1092,6 +1388,25 @@ namespace vcs::world_hd
                 Cost cost;
                 restore();
                 update();
+                // every ~10 s with the setting on: what the log needs for a player's report
+                static auto lastLog = std::chrono::steady_clock::now();
+                const auto now = std::chrono::steady_clock::now();
+                if ((g_radius.load(std::memory_order_relaxed) > 0 || !g_cells.empty()) && now - lastLog > std::chrono::seconds(10))
+                {
+                    lastLog = now;
+                    std::fprintf(stderr,
+                                 "[hdworld] radius %d: %zu cells, %zu areas, %u KB; drawn %u sectors (+%u extra, %u low detail "
+                                 "hidden), skipped %u; cost %u us (peak %u); reclaimed %llu, refused %llu, packets swept %llu; loads %llu unloads %llu failures %llu builds %llu; "
+                                 "fallback frames %llu/%llu/%llu/%llu/%llu\n",
+                                 g_radius.load(), g_cells.size(), g_areas.size(), g_arena.used / 1024u, g_stats.sectors,
+                                 g_stats.added, g_stats.hiddenLod, g_stats.skipped, g_stats.costUs, g_stats.costPeakUs,
+                                 (unsigned long long)g_reclaimed, (unsigned long long)g_refused, (unsigned long long)g_sweptPackets,
+                                 (unsigned long long)g_stats.loads, (unsigned long long)g_stats.unloads,
+                                 (unsigned long long)g_stats.failures, (unsigned long long)g_stats.builds,
+                                 (unsigned long long)g_stats.fallback[0], (unsigned long long)g_stats.fallback[1],
+                                 (unsigned long long)g_stats.fallback[2], (unsigned long long)g_stats.fallback[3],
+                                 (unsigned long long)g_stats.fallback[4]);
+                }
             }
             g_choose(rdram, ctx, runtime);
         }
@@ -1116,20 +1431,56 @@ namespace vcs::world_hd
                 restore();
                 if (!g_cells.empty() && valid(g_level, 0x600u) && rd32(g_level + 0x1Cu) == g_info &&
                     rd32(g_level + 0x18u) == g_levelLoaded)
+                {
+                    // the level's data is read again: our entries emptied, not handed back to the slots being torn down
+                    g_game.clear();
+                    g_gameState = slotState();
                     dropAll(true);
+                }
                 else if (!g_cells.empty())
                     dropAll(false);
                 g_levelLoaded = ~0u; // read again at the next frame
+                g_hold = 90;
             }
             g_levelLoad(rdram, ctx, runtime);
         }
 
+        // The world draw's list of translucent sectors and objects (12 bytes each: distance, record, flags; sorted and
+        // drawn at the end of FUN_0023E748) is an array inside the level object (level + 0x3300, start + 0x32B4, cursor
+        // + 0x32B8) that FUN_0023E548 appends to with no bound: ~40 entries in the game's own frame, hundreds with the
+        // extra cells - it ran over the level object's next fields (the garbage the VU1 was fed, 2026-11-11). Moved to
+        // a buffer of ours while the extra cells are on, at the first pass (where the draw resets the cursor to it).
+        constexpr uint32_t kTranslucentEntries = 8192u;
+        uint32_t g_translucent = 0, g_translucentGame = 0;
+
+        void moveTranslucentList(uint32_t pass)
+        {
+            const uint32_t level = rd32(kLevelPtr);
+            if (pass != 0u || !valid(level, 0x3400u) || !g_arenaReady)
+                return;
+            const bool want = g_radius.load(std::memory_order_relaxed) > 0 || !g_cells.empty();
+            const uint32_t now = rd32(level + 0x32B4u);
+            if (want)
+            {
+                if (!g_translucent)
+                    g_translucent = g_arena.alloc(kTranslucentEntries * 12u);
+                if (g_translucent && now != g_translucent)
+                {
+                    g_translucentGame = now;
+                    wr32(level + 0x32B4u, g_translucent);
+                }
+            }
+            else if (g_translucent && now == g_translucent && g_translucentGame)
+                wr32(level + 0x32B4u, g_translucentGame);
+        }
+
         PS2_GUEST_CC void drawHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            if (g_radius.load(std::memory_order_relaxed) > 0 || !g_installed.empty())
+            if (g_radius.load(std::memory_order_relaxed) > 0 || !g_installed.empty() || g_translucent)
             {
                 std::lock_guard<std::recursive_mutex> lock(g_mutex);
                 g_ram = rdram;
+                moveTranslucentList(getRegU32(ctx, 5));
                 Cost cost;
                 install();
             }
@@ -1181,6 +1532,53 @@ namespace vcs::world_hd
             runtime.replaceFunction(h.at, h.hook);
 
         // hdworld -> ok radius=<n> cells=<n> areas=<n> mem=<KB> added=<records> hidden=<low detail> own=<records> ...
+        // hdcompare -> ok ...: our copy of the game's current cell piece and area piece read and relocated as for an
+        // extra cell, compared word by word with the game's (a relocated word may differ by the two bases only); the
+        // first differences go to the log ([hdcompare])
+        ps2control::addCommand("hdcompare", [](const std::string &, ps2control::Reply reply) {
+            std::lock_guard<std::recursive_mutex> lock(g_mutex);
+            if (!g_ram || !levelUsable())
+                return reply("error no level");
+            const uint32_t slot = rd32(g_level + 0x248u), area = rd32(g_level + 0x24Cu);
+            std::string out = "ok";
+            auto compare = [&](const char *name, uint32_t game, const Piece &ours, uint32_t length, uint32_t gameBase, uint32_t oursBase) {
+                uint32_t same = 0, moved = 0, differ = 0;
+                for (uint32_t o = 0; o + 4u <= length; o += 4u)
+                {
+                    const uint32_t g = rd32(game + o), m = rd32(ours.at + o);
+                    if (g == m)
+                        ++same;
+                    else if (m - oursBase == g - gameBase)
+                        ++moved;
+                    else if (differ++ < 24)
+                        std::fprintf(stderr, "[hdcompare] %s +0x%05x: game 0x%08x ours 0x%08x\n", name, o, g, m);
+                }
+                char t[160];
+                std::snprintf(t, sizeof(t), " %s: %u bytes, same %u, relocated %u, differ %u;", name, length, same, moved, differ);
+                out += t;
+            };
+            Piece cell, ar;
+            const int x = int(rd32(slot + 8u)), y = int(rd32(slot + 0xCu));
+            if (loadIndexed(cellEntry(x, y), cell))
+            {
+                compare("cell", rd32(slot + 0x20u), cell, rd32(cellEntry(x, y) + 0xCu) & ~3u, rd32(slot + 0x20u) - 0x20u, cell.at - 0x20u);
+                g_arena.release(cell.at, cell.bytes, 0);
+            }
+            else
+                out += " cell: not read;";
+            if (valid(area, 0x14u) && rd32(area))
+            {
+                if (const uint32_t ae = areaEntry(int(rd32(area + 8u)), int(rd32(area + 0xCu))); ae && loadArea(ae, ar))
+                {
+                    compare("area", rd32(area + 0x10u), ar, ar.bytes, rd32(area + 0x10u), ar.at);
+                    g_arena.release(ar.at, ar.bytes, 0);
+                }
+                else
+                    out += " area: not read;";
+            }
+            reply(out);
+        });
+
         ps2control::addCommand("hdworld", [](const std::string &, ps2control::Reply reply) {
             std::lock_guard<std::recursive_mutex> lock(g_mutex);
             char text[512];

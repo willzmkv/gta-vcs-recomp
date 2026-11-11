@@ -1958,6 +1958,23 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   (pictures in build/analysis/hd_world/shots): treating every sector with streamed geometry as detail drew the
   neighbours' far low-detail sectors over the near city ("near buildings in low quality", the user); dropping any
   sector with finer ones inside cut the large detailed ground sectors (dark holes).
+- **What broke drawing more lists, and why** (found 2026-11-11 from the player's reports - full-screen textures, the
+  world unloading, under 10 fps - with `[VU1 reserved lower]` in the log as the measure: 216k lines in the player's
+  session; every hidden cruise at ~720 m had some, none at Original):
+  1. **The translucent list** (buckets 6-7 and the cross-fade): `FUN_0023E548` appends {distance², record, flags}
+     (12 bytes) at `level + 0x32B8`, reset to `level + 0x32B4` at pass 0 and sorted / drawn at the end of the world
+     draw - an array **inside the level object** (`level + 0x3300`), never bounds-checked: ~40 entries at the avenue
+     spot. Hundreds of extra sectors ran over the level object's following fields. Moved to a buffer of 8192 entries
+     while the setting is on (`level + 0x32B4` pointed there at pass 0). Found by bisecting: cells read and entered
+     without drawing - clean; the game's own records through our list - clean; plus the extra detailed ones - garbage.
+  2. **Stale entries**: the game never clears an area's table entries (geometry and textures) when it unloads it, and
+     reads the next area into that buffer; a sector's meshes name their textures by gid. Entries are good only when
+     they hold our copy or what the game's current / next slots hold (their pieces' pairs); stale ones are taken back
+     with our copy, checked again whenever the slots change. The slot being read into (`level + 0x258` / `0x25C`) does
+     not count: its piece pointers are set before the asynchronous read lands.
+  3. **Orphaned cached packets**: the cross-fade swap clears the previous cell's entries and fills them again without
+     freeing the cached packet - one built from our copy then outlives it. Released pieces are swept: every table
+     entry whose cached packet's DMA tags point into them loses it (the game builds it again).
 - **The sector packet heap** `0x6F3DB8` (built by `FUN_002BB768` at boot, called from `0x369384`; 0x7CFC8 bytes at
   `0xD93AC0` in the main heap): the cached packets of the sectors' geometry. With Streaming memory above the PS2's it is
   built at `0x7000000` with 8 MB (src/game/vcs_memory.cpp). **The frame's packet buffer** `0x520F90` (two halves of
