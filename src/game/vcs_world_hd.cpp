@@ -45,6 +45,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace vcs::world_hd
@@ -337,9 +338,61 @@ namespace vcs::world_hd
         // ---- the geometry table ----
         uint32_t tableEntry(uint32_t gid) { return rd32(g_info) + gid * 0xCu; }
 
-        // FUN_0023B830: a cached packet onto the level's deferred free ring
-        void freePacket(uint32_t packet)
+        // VCS_HD_PKTDEBUG=1: every cached packet put on the free ring (by the game: its caller; by us: 0xF000000n, the
+        // site) and every free from the packet heap, checked: a packet put on twice before it is freed, a packet freed
+        // while a table entry still holds it ([hdworld-pkt] lines)
+        const bool g_pktDebug = std::getenv("VCS_HD_PKTDEBUG") != nullptr;
+        constexpr uint32_t kRingPush = 0x0023B830u, kHeapFree = 0x002BC9F8u, kPacketHeapObject = 0x006F3DB8u;
+        PS2Runtime::RecompiledFunction g_ringPush = nullptr, g_heapFree = nullptr;
+        struct Pending
         {
+            uint32_t by;
+            uint64_t frame;
+        };
+        std::unordered_map<uint32_t, Pending> g_pending;
+        struct History
+        {
+            uint32_t by = 0, gid = 0;
+            uint64_t pushed = 0, freed = 0;
+        };
+        std::unordered_map<uint32_t, History> g_history; // packet -> its last push / free
+        std::mutex g_pendingMutex;
+        int g_pktLogged = 0;
+
+        void notePush(uint32_t packet, uint32_t by)
+        {
+            if (!g_pktDebug || !packet)
+                return;
+            uint32_t holder = 0;
+            if (g_ram && valid(g_info, 4u))
+                for (uint32_t gid = 1, table = rd32(g_info); gid < kMaxGid && !holder; ++gid)
+                    if (valid(table + gid * 0xCu, 0xCu) && rd32(table + gid * 0xCu + 4u) == packet)
+                        holder = gid;
+            std::lock_guard<std::mutex> lock(g_pendingMutex);
+            g_history[packet] = History{by, holder, g_frame, 0};
+            const auto [it, added] = g_pending.try_emplace(packet, Pending{by, g_frame});
+            if (!added && g_pktLogged < 300)
+            {
+                ++g_pktLogged;
+                std::fprintf(stderr, "[hdworld-pkt] 0x%08x on the ring twice: by 0x%08x frame %llu, again by 0x%08x frame %llu\n", packet,
+                             it->second.by, (unsigned long long)it->second.frame, by, (unsigned long long)g_frame);
+            }
+        }
+
+        // Cached packets put on the free ring since the last world draw, the game's (FUN_0023B830) and ours: a sector's
+        // cached packet CALLs the cached packets of other entries (its textures', the same table), and the game frees
+        // those with the area that holds them - for its own sectors, which go with that area too. A sector of ours
+        // outlives them: its packet goes as well, before the next draw (sweepDependents).
+        std::vector<uint32_t> g_pushed;
+        bool g_collect = false; // the setting on, or entries of ours left
+        uint64_t g_dependents = 0;
+
+        // FUN_0023B830: a cached packet onto the level's deferred free ring
+        void freePacket(uint32_t packet, uint32_t site)
+        {
+            notePush(packet, 0xF0000000u | site);
+            if (g_collect)
+                g_pushed.push_back(packet);
             const uint32_t ring = rd32(g_level + 0x5ACu), index = rd32(g_level + 0x5BCu), size = rd32(g_level + 0x5C0u);
             if (!valid(ring) || size == 0 || (size & (size - 1u)) || !valid(ring + index * 4u))
                 return;
@@ -433,7 +486,7 @@ namespace vcs::world_hd
                 g_registered[gid] = geometry;
                 if (const uint32_t packet = rd32(e + 4u))
                 {
-                    freePacket(packet);
+                    freePacket(packet, 1u);
                     wr32(e + 4u, 0);
                 }
                 wr32(e, geometry);
@@ -456,7 +509,7 @@ namespace vcs::world_hd
                 wr32(e, game != g_game.end() ? game->second : 0u);
                 if (const uint32_t packet = rd32(e + 4u))
                 {
-                    freePacket(packet);
+                    freePacket(packet, 2u);
                     wr32(e + 4u, 0);
                 }
                 wr32(e + 8u, 0);
@@ -524,12 +577,60 @@ namespace vcs::world_hd
                     }
                 if (packet && packetPointsInto(packet))
                 {
-                    freePacket(packet);
+                    freePacket(packet, 3u);
                     wr32(e + 4u, 0);
                     ++g_sweptPackets;
                 }
             }
             g_freed.clear();
+        }
+
+        // does a cached packet CALL one of these
+        bool callsInto(uint32_t packet, const std::unordered_set<uint32_t> &targets)
+        {
+            uint32_t p = packet;
+            for (int n = 0; n < 1024 && valid(p, 16u); ++n)
+            {
+                const uint32_t w0 = rd32(p), id = (w0 >> 28) & 7u, qwc = w0 & 0xFFFFu;
+                if (id == 5u && targets.count(rd32(p + 4u) & 0x7FFFFFFFu))
+                    return true;
+                if (id == 1u)
+                    p += 16u + qwc * 16u;
+                else if (id == 0u || id == 2u || id == 6u || id == 7u)
+                    return false;
+                else
+                    p += 16u;
+            }
+            return false;
+        }
+
+        // every cached packet that CALLs a packet put on the ring since the last draw goes too (the ring frees two
+        // frames later: what the frame already holds is sent by then), and so on for the ones that CALL those
+        void sweepDependents()
+        {
+            if (g_pushed.empty())
+                return;
+            std::unordered_set<uint32_t> gone(g_pushed.begin(), g_pushed.end());
+            g_pushed.clear();
+            if (!valid(g_info, 4u))
+                return;
+            const uint32_t table = rd32(g_info);
+            for (bool more = true; more;)
+            {
+                more = false;
+                for (uint32_t gid = 1; gid <= g_maxGid && gid < kMaxGid; ++gid)
+                {
+                    const uint32_t e = table + gid * 0xCu, packet = rd32(e + 4u);
+                    if (!packet || gone.count(packet) || !callsInto(packet, gone))
+                        continue;
+                    freePacket(packet, 4u);
+                    wr32(e + 4u, 0);
+                    gone.insert(packet);
+                    more = true;
+                    ++g_dependents;
+                }
+            }
+            g_pushed.clear();
         }
 
         // ---- reading pieces (FUN_002417D0 / FUN_002414E8, then FUN_00324AC0 as FUN_00241278 / FUN_0023BF38 do) ----
@@ -1351,9 +1452,53 @@ namespace vcs::world_hd
             return !ours; // ours not drawn; the game's own drawn as it would be (logged: is it ours that broke it?)
         }
 
+        // VCS_HD_PKTDEBUG: the packets a sector's cached packet CALLs, checked before it is drawn (a DMA tag's bits 16-27
+        // are zero; a freed block's first words are the heap's links)
+        void checkCalls(uint32_t record)
+        {
+            const uint32_t gid = rd16(record + 2u);
+            if (!valid(g_info, 4u) || gid == 0 || gid >= kMaxGid)
+                return;
+            const uint32_t e = rd32(g_info) + gid * 0xCu, packet = valid(e, 0xCu) ? rd32(e + 4u) : 0u;
+            uint32_t p = packet;
+            for (int n = 0; packet && n < 1024 && valid(p, 16u); ++n)
+            {
+                const uint32_t w0 = rd32(p), id = (w0 >> 28) & 7u, qwc = w0 & 0xFFFFu, addr = rd32(p + 4u) & 0x7FFFFFFFu;
+                if (id == 5u)
+                {
+                    const uint32_t t = valid(addr, 16u) ? rd32(addr) : 0xFFFFFFFFu;
+                    static std::unordered_map<uint32_t, uint64_t> told;
+                    if ((t & 0x0FFF0000u) != 0u && g_pktLogged < 300 && !told.count(addr))
+                    {
+                        told[addr] = g_frame;
+                        ++g_pktLogged;
+                        History h;
+                        {
+                            std::lock_guard<std::mutex> lock(g_pendingMutex);
+                            if (const auto it = g_history.find(addr); it != g_history.end())
+                                h = it->second;
+                        }
+                        const auto mine = g_registered.find(gid);
+                        std::fprintf(stderr, "[hdworld-pkt] frame %llu: gid %u (record id %u, owner 0x%08x, ours %d) packet 0x%08x CALLs 0x%08x = %08x %08x: "
+                                     "last put on the ring by 0x%08x frame %llu (held by gid %u), freed frame %llu\n",
+                                     (unsigned long long)g_frame, gid, rd16(record) & 0x7FFFu, rd32(e + 8u), mine != g_registered.end() ? 1 : 0, packet, addr, t,
+                                     rd32(addr + 4u), h.by, (unsigned long long)h.pushed, h.gid, (unsigned long long)h.freed);
+                    }
+                }
+                if (id == 1u)
+                    p += 16u + qwc * 16u;
+                else if (id == 0u || id == 6u || id == 7u || id == 2u)
+                    return;
+                else
+                    p += 16u;
+            }
+        }
+
         PS2_GUEST_CC void sectorHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_ram = rdram;
+            if (g_pktDebug && valid(getRegU32(ctx, 5), kRecord))
+                checkCalls(getRegU32(ctx, 5));
             const uint32_t used = bufferUsed();
             g_sectorCalls.fetch_add(1, std::memory_order_relaxed);
             if (0xE6670u - used < 0x12C00u)
@@ -1367,6 +1512,57 @@ namespace vcs::world_hd
                 return;
             }
             g_sector(rdram, ctx, runtime);
+        }
+
+        // FUN_0023B830(level, packet): what goes on the ring, for sweepDependents
+        PS2_GUEST_CC void ringPushHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            notePush(getRegU32(ctx, 5), getRegU32(ctx, 31));
+            if (g_collect && getRegU32(ctx, 5))
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_mutex);
+                g_pushed.push_back(getRegU32(ctx, 5));
+            }
+            g_ringPush(rdram, ctx, runtime);
+        }
+
+        // VCS_HD_PKTDEBUG: FUN_002BC9F8(heap, block) for the packet heap
+        PS2_GUEST_CC void heapFreeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t packet = getRegU32(ctx, 5);
+            if (getRegU32(ctx, 4) == kPacketHeapObject && packet)
+            {
+                Pending was{0, 0};
+                {
+                    std::lock_guard<std::mutex> lock(g_pendingMutex);
+                    if (const auto it = g_pending.find(packet); it != g_pending.end())
+                    {
+                        was = it->second;
+                        g_pending.erase(it);
+                    }
+                    g_history[packet].freed = g_frame;
+                }
+                // (FUN_0023BAF0's own loop frees every entry's packet before it clears the table: not a finding)
+                if (g_ram && valid(g_info, 4u) && g_pktLogged < 300 && getRegU32(ctx, 31) != 0x0023BBFCu)
+                {
+                    const uint32_t table = rd32(g_info);
+                    for (uint32_t gid = 1; gid <= g_maxGid && gid < kMaxGid; ++gid)
+                    {
+                        const uint32_t e = table + gid * 0xCu;
+                        if (!valid(e, 0xCu) || rd32(e + 4u) != packet)
+                            continue;
+                        ++g_pktLogged;
+                        const auto mine = g_registered.find(gid);
+                        const auto game = g_game.find(gid);
+                        std::fprintf(stderr, "[hdworld-pkt] 0x%08x freed (ra 0x%08x frame %llu) while gid %u holds it: geometry 0x%08x owner 0x%08x "
+                                     "ours 0x%08x game 0x%08x; put on the ring by 0x%08x frame %llu\n",
+                                     packet, getRegU32(ctx, 31), (unsigned long long)g_frame, gid, rd32(e), rd32(e + 8u),
+                                     mine != g_registered.end() ? mine->second : 0u, game != g_game.end() ? game->second : 0u, was.by,
+                                     (unsigned long long)was.frame);
+                    }
+                }
+            }
+            g_heapFree(rdram, ctx, runtime);
         }
 
         PS2_GUEST_CC void chooseHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1396,11 +1592,11 @@ namespace vcs::world_hd
                     lastLog = now;
                     std::fprintf(stderr,
                                  "[hdworld] radius %d: %zu cells, %zu areas, %u KB; drawn %u sectors (+%u extra, %u low detail "
-                                 "hidden), skipped %u; cost %u us (peak %u); reclaimed %llu, refused %llu, packets swept %llu; loads %llu unloads %llu failures %llu builds %llu; "
+                                 "hidden), skipped %u; cost %u us (peak %u); reclaimed %llu, refused %llu, packets swept %llu + %llu callers; loads %llu unloads %llu failures %llu builds %llu; "
                                  "fallback frames %llu/%llu/%llu/%llu/%llu\n",
                                  g_radius.load(), g_cells.size(), g_areas.size(), g_arena.used / 1024u, g_stats.sectors,
                                  g_stats.added, g_stats.hiddenLod, g_stats.skipped, g_stats.costUs, g_stats.costPeakUs,
-                                 (unsigned long long)g_reclaimed, (unsigned long long)g_refused, (unsigned long long)g_sweptPackets,
+                                 (unsigned long long)g_reclaimed, (unsigned long long)g_refused, (unsigned long long)g_sweptPackets, (unsigned long long)g_dependents,
                                  (unsigned long long)g_stats.loads, (unsigned long long)g_stats.unloads,
                                  (unsigned long long)g_stats.failures, (unsigned long long)g_stats.builds,
                                  (unsigned long long)g_stats.fallback[0], (unsigned long long)g_stats.fallback[1],
@@ -1476,12 +1672,19 @@ namespace vcs::world_hd
 
         PS2_GUEST_CC void drawHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_mutex);
+                g_collect = g_radius.load(std::memory_order_relaxed) > 0 || !g_registered.empty();
+                if (!g_collect)
+                    g_pushed.clear();
+            }
             if (g_radius.load(std::memory_order_relaxed) > 0 || !g_installed.empty() || g_translucent)
             {
                 std::lock_guard<std::recursive_mutex> lock(g_mutex);
                 g_ram = rdram;
                 moveTranslucentList(getRegU32(ctx, 5));
                 Cost cost;
+                sweepDependents();
                 install();
             }
             g_draw(rdram, ctx, runtime);
@@ -1530,6 +1733,10 @@ namespace vcs::world_hd
             }
         for (const Hook &h : hooks)
             runtime.replaceFunction(h.at, h.hook);
+        if ((g_ringPush = runtime.lookupFunction(kRingPush)))
+            runtime.replaceFunction(kRingPush, &ringPushHook);
+        if (g_pktDebug && (g_heapFree = runtime.lookupFunction(kHeapFree)))
+            runtime.replaceFunction(kHeapFree, &heapFreeHook);
 
         // hdworld -> ok radius=<n> cells=<n> areas=<n> mem=<KB> added=<records> hidden=<low detail> own=<records> ...
         // hdcompare -> ok ...: our copy of the game's current cell piece and area piece read and relocated as for an

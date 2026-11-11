@@ -1975,6 +1975,22 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   3. **Orphaned cached packets**: the cross-fade swap clears the previous cell's entries and fills them again without
      freeing the cached packet - one built from our copy then outlives it. Released pieces are swept: every table
      entry whose cached packet's DMA tags point into them loses it (the game builds it again).
+  4. **Packets that CALL other entries' packets** (the last one; the 720 m route clean in four runs after it): a
+     sector's cached packet (`FUN_00240ED8` records what `FUN_002409C8` wrote into the frame buffer and copies it into
+     the heap) holds DMA CALLs to the cached packets of **other table entries** - its textures' (measured: gid 433 ->
+     435's, 2794 -> 2796's). The game frees an entry's packet through the ring when its area / cell goes
+     (`FUN_0023C018` at `0x23C07C`, `0x23C140`, the swap at `0x23DA70`) - for its own sectors their callers go with
+     it; a sector of ours (or one whose stale texture entry we took back) kept CALLing the freed block, whose first
+     words are then the heap's links: the VIF read floats as VIFcodes, MSCALs landed in the middle of data - the VU1
+     "garbage", full-screen textures. Every packet put on the ring (the game's, hooked at `FUN_0023B830`, and ours) is
+     collected; before the next world draw every cached packet that CALLs one of them goes too (and those that CALL
+     those). Found with `PS2X_VIF_CHECK=1` (the walker's VIFcode parser: a bad VIFcode with the tags before it - a CALL
+     into `0x0707xxxx` whose "tag" was `07063e38 07070178`) and `VCS_HD_PKTDEBUG=1` (each CALL target checked before a
+     sector is drawn, with who put it on the ring).
+  The ring (`FUN_0023B830` writes `level + 0x5AC`[`+0x5BC`]) is freed by `FUN_0023C5B0` once a frame: the entries
+  between `+0x5B0` and `+0x5B4` (the indices two frames back) go to `FUN_002BC9F8(0x6F3DB8, block)`, then
+  `+0x5B0 = +0x5B4`, `+0x5B4 = +0x5B8`, `+0x5B8 = +0x5BC`; nothing while `level + 0x264` is set. The level load
+  (`FUN_0023BAF0`, return `0x23BBFC`) frees every entry's packet directly before it clears the table.
 - **The sector packet heap** `0x6F3DB8` (built by `FUN_002BB768` at boot, called from `0x369384`; 0x7CFC8 bytes at
   `0xD93AC0` in the main heap): the cached packets of the sectors' geometry. With Streaming memory above the PS2's it is
   built at `0x7000000` with 8 MB (src/game/vcs_memory.cpp). **The frame's packet buffer** `0x520F90` (two halves of

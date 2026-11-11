@@ -66,24 +66,31 @@ quality - the user's report); a sphere rule that cut large ground sectors (dark 
 the island switch reloading the table under our entries (the world nearly empty, then the game spinning ~1 s a frame
 on the cruise route).
 
-## Status 2026-11-11 evening - NOT ready to play with the setting on
+## Status 2026-11-11 night - the VU1 garbage found and fixed; the player's check next
 
 The player's session (`build/run/jogo_hd.log`): full-screen textures, the world "unloading", under 10 fps at ~720 m.
-The log had 216k `[VU1 reserved lower]` lines - the VU1 executing garbage. The hidden cruise route reproduces it
-(it had some in every ~720 m run, none at Original; earlier runs were not checked for it - a miss). Measure now:
-`grep -c "VU1 reserved" build/run/<name>.log` after `tools/cruise.py run ... VCS_HD_RADIUS=3`.
+The log had 216k `[VU1 reserved lower]` lines - the VU1 executing garbage. The hidden cruise route reproduces it;
+measure: `grep -c "VU1 reserved" build/run/<name>.log` after `tools/cruise.py run --name N build/cruise/N VCS_HD_RADIUS=3`.
 
-Found and fixed (each confirmed by the counts): stale game entries for textures (taken back), cached packets orphaned
-by the cross-fade swap (swept), the game's copies of the slot being read into (not trusted), the level reload handing
-back torn-down pointers, the translucent list overflowing inside the level object (moved). Bisection: cells read and
-entered without drawing - 0 in two runs; the game's records through our list - 0 in two runs; plus the extra detailed
-sectors - garbage. The copies are byte-identical to the game's (`hdcompare`), the microcode uploads all come from the
-executable (`PS2X_LOG_MPG_SOURCES=1`). Still: 0 / 2015 / 986087 / 2450 in the last four runs - something else that
-drawing extra detailed sectors overflows or leaves stale. Next: dump the VIF1 chain of the first garbage frame
-(`PS2X_DUMP_CHAIN`) to see which packet carries it.
+Causes, each confirmed by the counts (docs/game-internals.md 9j, "What broke drawing more lists"): stale game entries
+for textures (taken back), cached packets orphaned by the cross-fade swap (swept), the slot being read into (not
+trusted), the level reload handing back torn-down pointers, the translucent list overflowing inside the level object
+(moved), and the last one: **a sector's cached packet CALLs its textures' cached packets** - the game freed those with
+their area while a sector of ours kept CALLing the freed block (found with `PS2X_VIF_CHECK=1`: a CALL into a block
+whose first words were the heap's links). Every packet put on the free ring is now collected, and every cached packet
+that CALLs one goes too before the next draw.
 
-Debug switches (vcs_world_hd.cpp): `VCS_HD_NODRAW=1`, `VCS_HD_DRAWMODE=1|2|3`, `VCS_HD_FREE_DELAY=<frames>`; the
-`hdcompare` command; `[hdworld]` log line every 10 s; `GAME-list` / `built-list` lines for entries refused at the draw.
+| ~720 m, cruise route (165 s) | VU1 garbage | fps |
+|---|---|---|
+| before (4 runs) | 0 / 2015 / 986087 / 2450 | - |
+| after, 60 fps cap (3 runs) | 0 / 0 / 0 | 59.4, p99 17.0 ms |
+| after, uncapped | 0 | 144.9, p99 14.6 ms (Original: 144.2, p99 15.4) |
+
+Debug switches (vcs_world_hd.cpp): `VCS_HD_NODRAW=1`, `VCS_HD_DRAWMODE=1|2|3`, `VCS_HD_FREE_DELAY=<frames>`,
+`VCS_HD_PKTDEBUG=1`; runtime `PS2X_VIF_CHECK=1`; the `hdcompare` command; `[hdworld]` log line every 10 s (with
+"packets swept N + M callers"); `GAME-list` / `built-list` lines for entries refused at the draw.
+
+Next: the player's session at ~720 m (the setting's default stays Original until it passes).
 
 ## Test spot
 

@@ -418,6 +418,32 @@ namespace
     {
         uint32_t remain = 0;     // data bytes the current command is still owed
         uint32_t cycle = 0x0101; // STCYCL, for UNPACK sizes (carried from chain to chain)
+        // [gta-recomp] PS2X_VIF_CHECK=1 (VIF1 only): VIFcodes the VIF has no such command for, and each MSCAL address the first time,
+        // with the tags around them (the bytes parsed by one sync belong to the previous tag's payload or this tag)
+        bool check = false;
+        uint32_t tagPrev = 0, tagNow = 0;
+
+        uint32_t badCount = 0;
+        bool dumped = false;
+
+        void checkCommand(uint32_t cmd)
+        {
+            const uint32_t opcode = (cmd >> 24) & 0x7Fu, imm = cmd & 0xFFFFu;
+            static std::set<uint32_t> calls;
+            static int bad = 0;
+            const bool known = opcode <= 0x07u || opcode == 0x10u || opcode == 0x11u || opcode == 0x13u || opcode == 0x14u ||
+                               opcode == 0x15u || opcode == 0x17u || opcode == 0x20u || opcode == 0x30u || opcode == 0x31u ||
+                               opcode == 0x4Au || opcode == 0x50u || opcode == 0x51u || (opcode & 0x60u) == 0x60u;
+            if (!known)
+                ++badCount;
+            if (!known && bad < 400)
+            {
+                ++bad;
+                std::fprintf(stderr, "[vif-check] bad vifcode %08x tags 0x%08x 0x%08x\n", cmd, tagPrev, tagNow);
+            }
+            if ((opcode == 0x14u || opcode == 0x15u) && calls.insert(imm).second)
+                std::fprintf(stderr, "[vif-check] mscal 0x%04x tags 0x%08x 0x%08x\n", imm * 8u, tagPrev, tagNow);
+        }
 
         static uint32_t unpackBytes(uint32_t cmd, uint32_t cycle)
         {
@@ -455,6 +481,8 @@ namespace
                 p += 4;
                 n -= 4;
                 const uint32_t opcode = (cmd >> 24) & 0x7Fu, imm = cmd & 0xFFFFu, num = (cmd >> 16) & 0xFFu;
+                if (check)
+                    checkCommand(cmd);
                 if ((opcode & 0x60u) == 0x60u)
                     remain = unpackBytes(cmd, cycle);
                 else if (opcode == 0x01u)
@@ -471,6 +499,38 @@ namespace
         }
     };
     uint32_t g_chainCycle = 0x0101; // VifBoundaries::cycle at the end of the last VIF1 chain
+
+    // [gta-recomp] PS2X_VIF_CHECK: the last tags of the chain being walked, printed before its first bad VIFcode
+    struct VifCheckSeen
+    {
+        uint32_t at, data, qwc;
+        uint64_t tag, upper;
+    };
+    VifCheckSeen g_vifCheckRing[12];
+    unsigned g_vifCheckAt = 0;
+
+    void vifCheckSeen(uint32_t at, uint32_t data, uint32_t qwc, uint64_t tag, uint64_t upper, bool first)
+    {
+        if (first)
+            g_vifCheckAt = 0;
+        g_vifCheckRing[g_vifCheckAt++ % 12u] = {at, data, qwc, tag, upper};
+    }
+
+    void vifCheckDump(VifBoundaries &vif, int tags)
+    {
+        static int dumps = 0;
+        if (vif.badCount == 0u || vif.dumped || dumps >= 40)
+            return;
+        ++dumps;
+        vif.dumped = true;
+        std::fprintf(stderr, "[vif-check] chain from 0x%08x, %d tags; last tags:\n", g_vifCheckRing[0].at, tags);
+        for (unsigned i = g_vifCheckAt > 12u ? g_vifCheckAt - 12u : 0u; i < g_vifCheckAt; ++i)
+        {
+            const VifCheckSeen &e = g_vifCheckRing[i % 12u];
+            std::fprintf(stderr, "[vif-check]   tag@0x%08x %016llx %016llx data=0x%08x qwc=%u\n", e.at,
+                         static_cast<unsigned long long>(e.tag), static_cast<unsigned long long>(e.upper), e.data, e.qwc);
+        }
+    }
 }
 
 uint32_t ps2chain::notifyMark(PS2Memory &memory, uint32_t imm, const uint8_t *next, uint32_t avail) // [gta-recomp]
@@ -1724,6 +1784,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     } openMark;
                     VifBoundaries vifAt;       // [gta-recomp] command boundaries in what is copied so far
                     vifAt.cycle = g_chainCycle;
+                    static const bool vifCheck = std::getenv("PS2X_VIF_CHECK") != nullptr;
+                    vifAt.check = vifCheck && channelBase == 0x10009000u;
                     size_t vifParsed = 0;
                     auto vifSync = [&]() {
                         vifAt.feed(chainBuf.data() + vifParsed, chainBuf.size() - vifParsed);
@@ -1867,7 +1929,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                                           loadScalar<uint64_t>(tp, 8, 16, "dma tag hi", currentTagAddr), flatOffset,
                                                           tagsProcessed == 1);
                         // [gta-recomp] a MARK only where the interpreter runs it: at a VIF command boundary (VifBoundaries)
+                        vifAt.tagNow = currentTagAddr;
                         const bool atBoundary = vifSync();
+                        vifAt.tagPrev = currentTagAddr;
+                        if (vifAt.check)
+                        {
+                            vifCheckSeen(currentTagAddr, hasPayload ? dataAddr : 0u, tagQwc, tag,
+                                         loadScalar<uint64_t>(tp, 8, 16, "dma tag hi", currentTagAddr), tagsProcessed == 1);
+                            vifCheckDump(vifAt, tagsProcessed);
+                        }
                         { // PS2X_CHAIN_LOG_REFUSED=<n>: marks the observer asked for and the walker did not make
                             static const long logRefused = std::getenv("PS2X_CHAIN_LOG_REFUSED") ? std::atol(std::getenv("PS2X_CHAIN_LOG_REFUSED")) : 0;
                             static long refusedLogged = 0;
@@ -2010,6 +2080,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     if (channelBase == 0x10009000u) // [gta-recomp] the write cycle the next chain starts with
                     {
                         vifSync();
+                        if (vifAt.check)
+                            vifCheckDump(vifAt, tagsProcessed);
                         g_chainCycle = vifAt.cycle;
                     }
                     static const bool dmaHist = std::getenv("PS2X_DMA_HIST") != nullptr; // [gta-recomp] once, not per chain
