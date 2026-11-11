@@ -1991,6 +1991,15 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   between `+0x5B0` and `+0x5B4` (the indices two frames back) go to `FUN_002BC9F8(0x6F3DB8, block)`, then
   `+0x5B0 = +0x5B4`, `+0x5B4 = +0x5B8`, `+0x5B8 = +0x5BC`; nothing while `level + 0x264` is set. The level load
   (`FUN_0023BAF0`, return `0x23BBFC`) frees every entry's packet directly before it clears the table.
+- **Fades** (2026-11-11, the player's wish: no popping on the horizon). The game's own cross-fade (`FUN_0023E748`,
+  `level + 0x264` the alpha) puts the incoming list's records on the translucent list (`FUN_0023E548(level, record,
+  bucket, alpha, list)`: entry `+8` high nibble the bucket, `+9` the alpha, `+0xA` which list's matrices) and draws them
+  sorted far to near with `FUN_001CEDF8(alpha)` per entry. An extra cell's added sectors use the same way: the sector
+  draw called from the plain walk (return `0x23F4BC`; `0x24068C` is the translucent list's own call) becomes a tail
+  call to `FUN_0023E548` with the bucket and the fade's alpha; the low-detail sectors they replace are left out only a
+  fade later; a cell out of reach fades out before it is dropped. ~4 % of the frame on the cruise route.
+- **Two copies of a gid**: a gid can be in pieces of the current and the next slot at two addresses, either one in the
+  entry - every copy counts as the game's (`[hdworld] built-list record ... bad` for 4 records per route before).
 - **The sector packet heap** `0x6F3DB8` (built by `FUN_002BB768` at boot, called from `0x369384`; 0x7CFC8 bytes at
   `0xD93AC0` in the main heap): the cached packets of the sectors' geometry. With Streaming memory above the PS2's it is
   built at `0x7000000` with 8 MB (src/game/vcs_memory.cpp). **The frame's packet buffer** `0x520F90` (two halves of

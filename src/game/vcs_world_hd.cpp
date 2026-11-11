@@ -272,6 +272,7 @@ namespace vcs::world_hd
             std::bitset<0x8000> ids;                  // the sector ids in its list
             uint32_t owner = 0, areaOwner = 0;         // the table entries' owner tags of ours
             std::vector<std::array<float, 2>> hd;      // the centres of its list's detailed sectors (id < kLodIds)
+            double leaving = 0.0;                      // out of reach since (seconds): fading out, then dropped
         };
 
         struct Installed
@@ -292,6 +293,9 @@ namespace vcs::world_hd
         {
             uint64_t loads = 0, unloads = 0, failures = 0, builds = 0, installs = 0, restores = 0;
             uint32_t added = 0, hiddenLod = 0, ownRecords = 0, coarser = 0;
+            // the last frame's sectors drawn fading (through the translucent list), low-detail ones kept while detail
+            // fades in over them (the last build)
+            uint32_t fading = 0, lodHeld = 0;
             // the last frame's sector draws (FUN_00240ED8): calls, those the full packet buffer skipped, its most used
             uint32_t sectors = 0, skipped = 0, bufferPeak = 0;
             // the hooks' own time: the last frame's, and the most of the last 600 frames (microseconds)
@@ -303,10 +307,51 @@ namespace vcs::world_hd
         Arena g_arena;
         std::map<uint64_t, std::unique_ptr<Cell>> g_cells; // key: y << 32 | x
         std::map<uint64_t, Area> g_areas;
-        std::map<uint64_t, bool> g_empty; // cells without a piece (none on the disc, or a failed load)
+        std::map<uint64_t, bool> g_empty;      // cells without a piece on the disc (the sea)
+        std::map<uint64_t, uint64_t> g_retry;  // cells whose load failed (the arena, the disc): not before this frame
         std::vector<Installed> g_installed;
         std::array<Built, 2> g_built{};
         uint64_t g_frame = 0, g_version = 1, g_epoch = 1;
+
+        // Fades (the player's wish, 2026-11-11: the detail coming and going on the horizon without popping). An extra
+        // cell's detailed sectors come in through the game's translucent list - FUN_0023E548, the way its own cross-fade
+        // draws the incoming list - their alpha rising over kFadeSeconds; the low-detail sectors they replace stay until
+        // then. A cell out of reach fades out the same way before it is dropped, the low detail back behind it at once.
+        // VCS_HD_FADE=<seconds> for a test (0: none).
+        const double kFadeSeconds = [] {
+            const char *e = std::getenv("VCS_HD_FADE");
+            return e && *e ? std::max(0.0, std::strtod(e, nullptr)) : 1.0;
+        }();
+        constexpr double kRecentlyDrawn = 2.0; // seconds: a sector drawn this recently comes back without a fade
+        constexpr uint32_t kAppendTranslucent = 0x0023E548u; // FUN_0023E548(level, record, bucket, alpha, list)
+        constexpr uint32_t kMainWalkReturn = 0x0023F4BCu;     // FUN_0023E748's sector draw outside a cross-fade
+        enum : uint8_t { kNoFade, kFadeIn, kFadeOut };
+        struct Fade
+        {
+            double start = 0.0;
+            uint8_t kind = kNoFade;
+        };
+        std::array<Fade, 0x8000> g_fades{};          // by sector id
+        std::array<double, 0x8000> g_drawnAt{};      // by sector id: when a built list last drew it
+        std::array<double, 0x8000> g_replacedSince{}; // by low-detail id: since when detail replaces it (0: not)
+        PS2Runtime::RecompiledFunction g_append = nullptr;
+        std::atomic<uint32_t> g_fadeDraws{0};
+
+        double seconds()
+        {
+            static const auto start = std::chrono::steady_clock::now();
+            return 1.0 + std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        }
+
+        // 0..1, the sector's opacity now
+        double opacity(uint16_t id, double t)
+        {
+            const Fade &f = g_fades[id & 0x7FFFu];
+            if (f.kind == kNoFade || kFadeSeconds <= 0.0)
+                return 1.0;
+            const double a = std::clamp((t - f.start) / kFadeSeconds, 0.0, 1.0);
+            return f.kind == kFadeIn ? a : 1.0 - a;
+        }
         // frames to wait after the level's data was read (boot, a save's load, the bridge): the game's slots go through
         // states the extra lists must not be built from (VU1 fed garbage while a save loaded, 2026-11-11)
         uint32_t g_hold = 300;
@@ -408,13 +453,17 @@ namespace vcs::world_hd
         // area's entries (geometry and textures alike) when it unloads it, and reads the next area into that buffer.
         // (A sector's meshes name their textures by gid too: a stale texture entry drew another area's raster, its size
         // and format garbage - full-screen textures, the VU1 fed garbage; the player's report, 2026-11-11.)
+        // A gid can be in pieces of both slots (current and next) at two addresses, either one in the entry: every copy
+        // is good (g_gameCopies: gid << 32 | geometry); g_game keeps the current slot's, the one handed back.
         std::unordered_map<uint32_t, uint32_t> g_game;
+        std::unordered_set<uint64_t> g_gameCopies;
         uint64_t g_gameState = 0;
         uint64_t slotState();
 
         void gatherGame()
         {
             g_game.clear();
+            g_gameCopies.clear();
             // the current and the next slots only: the third (level + 0x258 / 0x25C) is the one being read into - its piece
             // pointers are recorded before the asynchronous read lands, over what the buffer held before
             for (uint32_t k = 0; k < 2; ++k)
@@ -433,7 +482,8 @@ namespace vcs::world_hd
                         const uint32_t gid = rd32(pairs + j * 8u);
                         if (gid < kMaxGid)
                             g_maxGid = std::max(g_maxGid, gid);
-                        g_game[gid] = rd32(pairs + j * 8u + 4u);
+                        g_game.try_emplace(gid, rd32(pairs + j * 8u + 4u));
+                        g_gameCopies.insert(uint64_t(gid) << 32 | rd32(pairs + j * 8u + 4u));
                     }
                 }
                 const uint32_t as = rd32(g_level + (k ? 0x254u : 0x24Cu));
@@ -446,7 +496,10 @@ namespace vcs::world_hd
                 if (!count || count > 0x4000u || !valid(pairs, count * 8u))
                     continue;
                 for (uint32_t j = 0; j < count; ++j)
-                    g_game[rd16(pairs + j * 8u)] = rd32(pairs + j * 8u + 4u);
+                {
+                    g_game.try_emplace(rd16(pairs + j * 8u), rd32(pairs + j * 8u + 4u));
+                    g_gameCopies.insert(uint64_t(rd16(pairs + j * 8u)) << 32 | rd32(pairs + j * 8u + 4u));
+                }
             }
             g_gameState = slotState();
         }
@@ -465,8 +518,7 @@ namespace vcs::world_hd
             const auto mine = g_registered.find(gid);
             if (mine != g_registered.end() && mine->second == now)
                 return true;
-            const auto game = g_game.find(gid);
-            return game != g_game.end() && game->second == now;
+            return g_gameCopies.count(uint64_t(gid) << 32 | now) != 0;
         }
 
         uint64_t g_reclaimed = 0;
@@ -916,6 +968,7 @@ namespace vcs::world_hd
             g_cells.clear();
             g_areas.clear();
             g_empty.clear();
+            g_retry.clear();
             g_registered.clear();
             ++g_version;
         }
@@ -1073,9 +1126,13 @@ namespace vcs::world_hd
             for (auto &[k, c] : g_cells)
                 if (!(c->x == sx && c->y == sy))
                     extra.push_back(c.get());
+            // (the ones fading out last: a sector another cell also lists stays that cell's)
             std::sort(extra.begin(), extra.end(), [&](const Cell *a, const Cell *c) {
+                if ((a->leaving != 0.0) != (c->leaving != 0.0))
+                    return a->leaving == 0.0;
                 return std::hypot(a->cx - camX, a->cy - camY) < std::hypot(c->cx - camX, c->cy - camY);
             });
+            const double t = seconds();
 
             // Sector ids are the world's (one centre each, whichever list names them). Detailed sectors (id < kLodIds) of
             // every list are drawn, once each. A low-detail sector is left out where a list leaves it out for its own
@@ -1088,9 +1145,28 @@ namespace vcs::world_hd
             for (size_t i = 0; i < extra.size(); ++i)
                 for (const auto &p : extra[i]->hd)
                     hd.add(p[0], p[1], int(i + 1));
+            // (a cell fading out replaces nothing: the low detail is back behind it at once)
+            std::bitset<0x8000> replacedNow;
+            uint32_t lodHeld = 0;
             auto replaced = [&](uint16_t id, uint32_t r) {
                 const float x = half(rd16(r + 4u)), y = half(rd16(r + 6u)), radius = half(rd16(r + 0xAu));
-                return hd.any(x, y, radius, [&](int tag) { return tag == 0 ? !ids.test(id) : !extra[size_t(tag - 1)]->ids.test(id); });
+                const bool is = hd.any(x, y, radius, [&](int tag) {
+                    if (tag == 0)
+                        return !ids.test(id);
+                    const Cell *c = extra[size_t(tag - 1)];
+                    return c->leaving == 0.0 && !c->ids.test(id);
+                });
+                if (!is)
+                    return false;
+                // replaced, but left out only once the detail over it has faded in
+                replacedNow.set(id);
+                double &since = g_replacedSince[id];
+                if (since == 0.0)
+                    since = t;
+                if (t - since >= kFadeSeconds)
+                    return true;
+                ++lodHeld;
+                return false;
             };
             // a gid's table entry holds geometry we know is there: resident (no piece of the list has it), ours, or the
             // game's copy while the slot that entered it still holds its cell / area
@@ -1117,6 +1193,7 @@ namespace vcs::world_hd
                     out[k].push_back(rec);
                 }
             std::bitset<0x8000> taken = ids;
+            std::bitset<0x8000> fading; // the added sectors: the only ones with a fade
             const uint32_t room = (kSynthBytes - 0x40u) / kRecord;
             uint32_t total = (b8 - b0) / kRecord;
             for (const Cell *c : extra)
@@ -1148,6 +1225,19 @@ namespace vcs::world_hd
                         out[k].push_back({id, r, c->cx - scx, c->cy - scy, -zShift, hide});
                         ++added;
                         ++total;
+                        // its fade: in when it was not drawn lately, out while its cell leaves (from where it is now)
+                        Fade &f = g_fades[id];
+                        const double a = opacity(id, t);
+                        if (c->leaving != 0.0)
+                        {
+                            if (f.kind != kFadeOut)
+                                f = {t - (1.0 - a) * kFadeSeconds, kFadeOut};
+                        }
+                        else if (f.kind == kFadeOut)
+                            f = {t - a * kFadeSeconds, kFadeIn};
+                        else if (f.kind == kNoFade && t - g_drawnAt[id] > kRecentlyDrawn)
+                            f = {t, kFadeIn};
+                        fading.set(id);
                     }
                 }
             }
@@ -1177,8 +1267,21 @@ namespace vcs::world_hd
                 }
             }
             wr32(at + 0x28u, cursor);
+            for (int k = 0; k < 8; ++k)
+                for (const Rec &rec : out[k])
+                    if (rec.hide != 1)
+                        g_drawnAt[rec.id] = t;
+            for (uint32_t id = 0; &b == &g_built[0] && id < 0x8000u; ++id) // (the current slot's list decides)
+            {
+                if (!fading.test(id) || (g_fades[id].kind == kFadeIn && t - g_fades[id].start >= kFadeSeconds))
+                    g_fades[id] = {};
+                if (!replacedNow.test(id))
+                    g_replacedSince[id] = 0.0;
+            }
             g_stats.added = added;
             g_stats.hiddenLod = hiddenLod;
+            if (&b == &g_built[0])
+                g_stats.lodHeld = lodHeld;
             g_stats.ownRecords = (b8 - b0) / kRecord;
             ++g_stats.builds;
             return at;
@@ -1214,6 +1317,7 @@ namespace vcs::world_hd
         void update()
         {
             ++g_frame;
+            g_stats.fading = g_fadeDraws.exchange(0, std::memory_order_relaxed);
             if (!g_arenaReady)
             {
                 g_arena.reset();
@@ -1250,9 +1354,22 @@ namespace vcs::world_hd
             if (g_reenter || slotState() != g_gameState || g_frame % 60u == 0u)
                 reenterAll();
             // too far now: dropped
+            const double t = seconds();
             for (auto it = g_cells.begin(); it != g_cells.end();)
             {
-                if (std::hypot(it->second->cx - camX, it->second->cy - camY) > reach + kKeepMargin)
+                Cell &c = *it->second;
+                const bool far = std::hypot(c.cx - camX, c.cy - camY) > reach + kKeepMargin;
+                if (!far && c.leaving != 0.0)
+                {
+                    c.leaving = 0.0; // back in reach while fading out
+                    ++g_version;
+                }
+                if (far && c.leaving == 0.0 && kFadeSeconds > 0.0)
+                {
+                    c.leaving = t;
+                    ++g_version;
+                }
+                if (far && t - c.leaving >= kFadeSeconds)
                 {
                     forget(*it->second);
                     it = g_cells.erase(it);
@@ -1280,6 +1397,8 @@ namespace vcs::world_hd
                     const uint64_t k = key(x, y);
                     if (g_cells.count(k) || g_empty.count(k))
                         continue;
+                    if (const auto r = g_retry.find(k); r != g_retry.end() && g_frame < r->second)
+                        continue;
                     float cx, cy;
                     centre(x, y, cx, cy);
                     const float d = std::hypot(cx - camX, cy - camY);
@@ -1287,10 +1406,19 @@ namespace vcs::world_hd
                         best = d, bx = x, by = y;
                 }
             // (a full arena waits for frees: the largest pieces are ~0.9 MB)
-            if (best < 1e9f && g_arena.largest() >= 0x180000u && !load(bx, by))
+            if (best < 1e9f && g_arena.largest() >= 0x180000u)
             {
-                g_empty[key(bx, by)] = true;
-                ++g_stats.failures;
+                const uint32_t entry = cellEntry(bx, by);
+                if (!entry || rd32(entry) != kDlrw || rd32(entry + 8u) == 0)
+                    g_empty[key(bx, by)] = true;
+                else if (!load(bx, by))
+                {
+                    // tried again in ~5 s (marking it empty for good left a hole in the detailed city, 2026-11-11)
+                    g_retry[key(bx, by)] = g_frame + 300u;
+                    if (++g_stats.failures <= 50u)
+                        std::fprintf(stderr, "[hdworld] cell %d,%d not read (arena %u KB used, largest free %u KB): again later\n", bx, by,
+                                     g_arena.used / 1024u, g_arena.largest() / 1024u);
+                }
             }
         }
 
@@ -1494,6 +1622,33 @@ namespace vcs::world_hd
             }
         }
 
+        // the bucket (0-7) of a record of a built list, -1 for any other
+        int bucketOf(uint32_t record)
+        {
+            for (const Built &b : g_built)
+                for (const uint32_t at : b.buffers)
+                    if (at && record >= at && record < at + kSynthBytes)
+                        for (int k = 0; k < 8; ++k)
+                            if (record >= rd32(at + 8u + k * 4u) && record < rd32(at + 0xCu + k * 4u))
+                                return k;
+            return -1;
+        }
+
+        // FUN_0023E548(level, record, bucket, alpha, list): a fading sector of ours no more opaque than its fade (the
+        // translucent buckets 6-7 come here straight from the world draw)
+        PS2_GUEST_CC void appendHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t record = getRegU32(ctx, 5);
+            if (g_ram && kFadeSeconds > 0.0 && valid(record, kRecord) && g_fades[rd16(record) & 0x7FFFu].kind != kNoFade &&
+                fromBuiltList(record))
+            {
+                const uint32_t alpha = uint32_t(opacity(rd16(record), seconds()) * 255.0);
+                if (alpha < 0xFFu)
+                    SET_GPR_U32(ctx, 7, std::min(getRegU32(ctx, 7) & 0xFFu, alpha));
+            }
+            g_append(rdram, ctx, runtime);
+        }
+
         PS2_GUEST_CC void sectorHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_ram = rdram;
@@ -1510,6 +1665,28 @@ namespace vcs::world_hd
             {
                 ctx->pc = getRegU32(ctx, 31); // not drawn (FUN_00240ED8 returns nothing)
                 return;
+            }
+            // a fading sector of ours, outside the game's own cross-fade: into the translucent list with its alpha
+            // (drawn there, sorted far to near, through this function again from another caller)
+            if (kFadeSeconds > 0.0 && g_append && getRegU32(ctx, 31) == kMainWalkReturn && valid(record, kRecord) &&
+                g_fades[rd16(record) & 0x7FFFu].kind != kNoFade)
+            {
+                const double a = opacity(rd16(record), seconds());
+                const int k = a < 1.0 ? bucketOf(record) : -1;
+                if (k >= 0)
+                {
+                    if (a < 0.04)
+                    {
+                        ctx->pc = getRegU32(ctx, 31); // not yet / no more
+                        return;
+                    }
+                    g_fadeDraws.fetch_add(1, std::memory_order_relaxed);
+                    SET_GPR_U32(ctx, 6, uint32_t(k));
+                    SET_GPR_U32(ctx, 7, uint32_t(a * 255.0));
+                    SET_GPR_U32(ctx, 8, 0u); // the current slot's list
+                    ctx->pc = kAppendTranslucent; // a guest tail call: it returns to our caller
+                    return;
+                }
             }
             g_sector(rdram, ctx, runtime);
         }
@@ -1630,6 +1807,7 @@ namespace vcs::world_hd
                 {
                     // the level's data is read again: our entries emptied, not handed back to the slots being torn down
                     g_game.clear();
+                    g_gameCopies.clear();
                     g_gameState = slotState();
                     dropAll(true);
                 }
@@ -1724,6 +1902,7 @@ namespace vcs::world_hd
             {kLevelLoad, &g_levelLoad, &levelLoadHook},
             {kWorldDraw, &g_draw, &drawHook},
             {kSectorDraw, &g_sector, &sectorHook},
+            {kAppendTranslucent, &g_append, &appendHook},
         };
         for (const Hook &h : hooks)
             if (!(*h.original = runtime.lookupFunction(h.at)))
@@ -1791,13 +1970,14 @@ namespace vcs::world_hd
             char text[512];
             std::snprintf(text, sizeof(text),
                           "ok radius=%d cells=%zu areas=%zu empty=%zu mem=%u added=%u coarser=%u hidden=%u own=%u sectors=%u skipped=%u "
-                          "buffer_peak=%u cost_us=%u cost_peak_us=%u loads=%llu unloads=%llu failures=%llu builds=%llu installs=%llu restores=%llu",
+                          "buffer_peak=%u cost_us=%u cost_peak_us=%u loads=%llu unloads=%llu failures=%llu builds=%llu installs=%llu restores=%llu "
+                          "fading=%u lod_held=%u",
                           g_radius.load(), g_cells.size(), g_areas.size(), g_empty.size(), g_arena.used / 1024u, g_stats.added,
                           g_stats.coarser, g_stats.hiddenLod, g_stats.ownRecords, g_stats.sectors, g_stats.skipped,
                           g_stats.bufferPeak, g_stats.costUs, g_stats.costPeakUs, (unsigned long long)g_stats.loads,
                           (unsigned long long)g_stats.unloads, (unsigned long long)g_stats.failures,
                           (unsigned long long)g_stats.builds, (unsigned long long)g_stats.installs,
-                          (unsigned long long)g_stats.restores);
+                          (unsigned long long)g_stats.restores, g_stats.fading, g_stats.lodHeld);
             reply(text);
         });
     }
