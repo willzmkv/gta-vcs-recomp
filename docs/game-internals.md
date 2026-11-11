@@ -1906,7 +1906,64 @@ slots/buffers/queue can grow safely, (B) preload ahead within fixed 4 slots, or 
 via native RSL submission with independent host lifecycle. Verification via
 tools/hd_world_verify.py (run in CI).
 
-## 10. Memory card and saves
+### 9j. The cell slots, the geometry table and the detailed city further (2026-11-11)
+
+Read from the decompiled `FUN_0023C188` / `FUN_0023C820` / `FUN_002415B0` / `FUN_002417D0` / `FUN_00241278` /
+`FUN_0023D600` / `FUN_0023D740` / `FUN_0023CED0` / `FUN_0023E748` / `FUN_00240ED8` / `FUN_00324AC0`
+(build/analysis/decomp in the main checkout), a RAM probe at the police spot and an offline pass over every cell piece
+on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are three cell slots and three area slots.
+
+- **Slots.** Cell slots at `level + 0x2C / 0xCC / 0x16C` (0xA0 each), pointed to by `+0x248` (current), `+0x250`
+  (previous / next), `+0x258` (being loaded); the pointers rotate. A cell slot: `+0` in use, `+4` 3 while drawn, `+8 / +0xC`
+  cell x / y, `+0x10` its buffer, `+0x14` the z its records are shifted by, `+0x18` complete, `+0x1C` piece count,
+  `+0x20..` the pieces: the first is the cell's piece (its sector list), the others its conditional pieces (police cell
+  14,25: 11 pieces). Area slots (0x14 each at `level + 0x20C`, pointed to by `+0x24C / 0x254 / 0x25C`): `+0` loaded,
+  `+8 / +0xC` area x / y (cell / 3), `+0x10` buffer.
+- **Pieces.** Index entry (`*(info + 4) + i * 0x20`; per row `info + 4 + y * 8` = {first entry, first x}): `+0` 'DLRW'
+  (`0x57524C44`), `+8` bytes read, `+0xC` bytes kept (the cursor's advance; the relocation table is in the tail), `+0x10`
+  relocation table, `+0x14` its count, `+0x18` file offset in the level's image (`level + 0x278` = CdStream file, its first
+  sector at `0x5058A8 + file * 0x14 + 4`). Relocation (`FUN_00324AC0`): base = piece - 0x20, every listed word += base.
+  The cell piece's header: `+0` pairs, `+4` pair count (u16), `+8..+0x28` nine bucket pointers (eight buckets of 0x50-byte
+  records, contiguous), `+0x2C` conditional pieces (u16) at `+0x30`: {kind, value, piece index} - kind 0xFF always, bit 7
+  clear: `level + 0x418 + kind * 4` == value, else the hour in [value, kind & 0x7F) (`FUN_002287E8`, hour `0x4CD148`).
+  Area pieces (`info + 0x2D4`, `info + 0x2D0` of them, 0x10 each: u16 x, u16 y, `+4` file offset, `+8` size): the piece's
+  own first 0x20 bytes are its header (base = the piece), then class fixups (`0x6EE048`) and globals (`0x6EE0C8`); pairs
+  at `+0x20` {count, pointer}, u16 gids.
+- **The geometry table** `**(level + 0x1C)`, 0xC per gid: geometry, cached DMA packet (built on the first draw into the
+  heap `0x6F3DB8`, 512 KB, 345 KB in use at the police spot), owner. The swap enters the current slot's pairs (owner
+  `0x40000000 | y << 16 | x`) and its area's (`FUN_0023C018`, `0x80000000 | ...`), and marks each record of the new list
+  hidden (`0x8000`) when its entry has no geometry (and the switch table `info + 0x2BC`, count `+0x2B8`, decides some);
+  `FUN_0023CED0` clears the previous slot's entries that still hold its geometry. Packets are freed through a ring
+  (`FUN_0023B830`: `level + 0x5AC` base, `+0x5BC` index, `+0x5C0` size 8192).
+- **A cell's list names only its own cell's, its own area's and the resident low-detail geometry.** Offline over all 601
+  cells (`cellsrc.py`): police cell 14,25 = 47 records with the cell's geometry, 53 with the area's, 386 resident; Little
+  Havana 11,13 = 28 / 78 / 556; no record of any cell's list uses another cell's pieces. Loading more pieces therefore
+  shows nothing by itself; the detailed band is the current list's (and, during the cross-fade, the previous one's).
+- **Sector ids are the world's**: over all 601 lists each of the 3939 ids has one centre and radius, whichever list
+  names it. Detailed sectors are ids below 3500 (median radius 3-61 m), low-detail ones from 5500 (median 75-88 m; none
+  between) - whatever piece holds their geometry: cell pieces carry low-detail sectors too (ids 5578 r 412 m, 5737
+  r 494 m in cells 3-7 cells away), for what the cell sees far off. A cell's geometry (a gid) is in 1-5+ cell pieces
+  (each cell piece carries what its list needs). Two lists never name one place with two detailed sectors; they differ
+  in which low-detail sectors they keep: a list leaves out those its own detailed sectors lie inside.
+- **Who reads the list pointer** (`VCS_RWATCH` on the current slot's `+0x20`, two spots): only `FUN_00241278`,
+  `FUN_0023D600`, `FUN_0023D740`, `FUN_0023CED0` and the world draw `FUN_0023E748`.
+- **The draw's z shift**: at its start `FUN_0023E748` compares slot `+0x14` with minus the origin's z (`0x6FE988`) and
+  adds the difference to every record's `+0x48` (matrix z), then stores it: records hold `z_disc - slot[+0x14]`.
+- **The detailed city further** (src/game/vcs_world_hd.cpp, Graphics > Detailed city distance): extra cells' pieces in
+  the port's memory at `0x4000000` (host EE RAM 128 MB), pairs entered only into empty entries; the current (and, while
+  cross-fading, the previous) slot's first piece pointed to a list built from the game's records and the extra cells'
+  (moved from their cell's centre to the slot's): every detailed sector once, a low-detail one left out (hidden in the
+  game's records) where a loaded list leaves it out and has detailed sectors inside it; the game's pointer put back at
+  the entry of the chooser, `FUN_0023C188`, the swap, `FUN_0023CED0` and `FUN_002418F0`. Two wrong rules came first
+  (pictures in build/analysis/hd_world/shots): treating every sector with streamed geometry as detail drew the
+  neighbours' far low-detail sectors over the near city ("near buildings in low quality", the user); dropping any
+  sector with finer ones inside cut the large detailed ground sectors (dark holes).
+- **The sector packet heap** `0x6F3DB8` (built by `FUN_002BB768` at boot, called from `0x369384`; 0x7CFC8 bytes at
+  `0xD93AC0` in the main heap): the cached packets of the sectors' geometry. With Streaming memory above the PS2's it is
+  built at `0x7000000` with 8 MB (src/game/vcs_memory.cpp). **The frame's packet buffer** `0x520F90` (two halves of
+  0xE6670 bytes filled from both ends, `+0x14` which, `+0x18` / `+0x1C` the cursors; `FUN_00476770` its use): the
+  sector draw returns at once with less than 0x12C00 free. Measured at the avenue spot: 57 KB used at the peak, 89 KB
+  with the detailed city at ~720 m - far from it.
 
 ## 10. Memory card and saves
 

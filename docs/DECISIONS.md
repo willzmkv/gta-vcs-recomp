@@ -1291,3 +1291,26 @@ Added settings `world.preload_ahead` (0-100) and `world.preload_min_speed` (m/s)
 
 **Next**: Host cell manager in `vcs_hle_world.cpp` (cell indexing, async streaming, GPU upload, RSL submission).
 
+
+## 2026-11-11 - HD world further (T2): the earlier phases corrected; the extra cells through the game's own draw
+
+**Correction.** The 2026-11-09 entries above do not hold: `world.preload_ahead` only logged ("bias would be"), so the
+three cruise runs compared the same code - their 548 / 37 ms maxima are run-to-run noise (a first run's cold disc
+cache), not an effect. The LDM decoder decodes models, not the world's cell pieces; the "host cell manager" and the
+uncommitted piece-cache hook never drew anything (the hook compared the index magic with "ldm", the entries are
+'DLRW'). Their eight menu settings did nothing. Removed; the hook kept as build/analysis/hd_world/
+optionD_piececache_abandoned.patch.
+
+**Decision.** The detailed city further by the game's own lists and draw, not a native decode: a cell's list only
+names its own cell's, its area's and resident geometry (all 601 cells on the disc), so more detail needs more lists;
+the world draw already merges two (the cross-fade). Extra cells' pieces in the port's memory, their pairs entered
+only into empty table entries, one list built from the loaded lists by the rule the game's lists follow (every
+detailed sector, id < 3500, once; a low-detail sector, id >= 5500, out where a loaded list leaves it out for its own
+detail inside it), put in the current slot only for the world draw (game-internals.md 9j). Why not native: the game's
+path already has the textures, lighting, fog, cross-fade and packet caching of these sectors; a native path would
+reproduce all of it before showing a single building. Reference kept: Original (0) installs nothing.
+
+**Memory.** Host EE RAM 64 -> 128 MB (the game still sees 32): the cells at 0x4000000 (48 MB; ~24-33 MB used at
+~720 m) and the sector packet heap at 0x7000000 (8 MB instead of 512 KB in the main heap). The model streaming heap
+(30 MB, Game > Memory) is a different budget: models and textures of cars, peds and props; the city's sectors never
+used it.

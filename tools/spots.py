@@ -10,6 +10,7 @@ The spots:
   police  Downtown, ten steps out from the police station's doors (the game's "you will be taken to the local police
           station" help shows at them, -657.4 762.3), facing the street and the busy pavement across it
   havana  Little Havana, on the pavement facing along the street (people far down it: crowds, distant walkers)
+  avenue  the police spot ~15 steps to the right, facing south: the whole avenue in view (the detailed city's reach)
 
 The camera is the rig's free camera (`campose`) 6 m behind the player and 2.5 m up, looking along his heading 6 degrees
 down: the game's own camera does not turn with a teleport's heading. A save loaded by the rig puts the player back at
@@ -23,6 +24,9 @@ import time
 SPOTS = {
     "police": (-655.5, 755.6, 196.0),
     "havana": (-979.9, -571.2, 7.0),
+    # the player's spot for the far city (2026-11-11): police, ~15 steps to his right (west), facing south - the whole
+    # avenue in view, for the detailed city's reach (HD world)
+    "avenue": (-667.0, 755.6, 180.0),
 }
 
 
