@@ -1157,6 +1157,22 @@ frames they stand for. Police station, sliders 50, three alternating rounds:
 
 About 1.1 ms off the game thread. Past 180 m a ped moves ~10 times a second at 60 fps, a few pixels tall there.
 
+### 45. Far peds as proxies skip their PreRender too (2026-11-12)
+
+The proxy decision moved from CEntity::Render to the random ped's PreRender (vtable 0x490840 +0x40 `FUN_00200660`,
+read from the vtable in the game): a far ped whose model already has a template this frame skips its PreRender (the
+bones' pose, its shadow, a gun's flash) and its whole Render (+0x44 `FUN_00201300`), not only CEntity::Render; the
+first of each model (or a nearer one) is drawn by the game, so a template's pose is always the frame's. Police
+station, sliders 50, distant traffic / crowds off, three alternating rounds (`VCS_PED_PROXY=0` against the default):
+
+| | game thread | render worker | GS stage | fps | peds |
+|---|---|---|---|---|---|
+| proxies | 13.7 ms | 14.6 ms | 12.2 ms | 60.9 | ~129 |
+| the game's draw | 14.6 ms | 15.8 ms | 12.2 ms | 59.7 | ~121 |
+
+Modest: a proxy is still a native draw per part. The single-spot measurement varies ±1-2 ms with the random
+population (one round each in Little Havana showed nothing either way); three rounds or more per side.
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker

@@ -146,7 +146,7 @@ namespace vcs::distant
         // its packets, the worker's skinning and copies) - not drawing them past 110 m took the render worker from 16.8
         // to 11.2 ms and the game thread 1.6 ms lower. A random ped farther than this is drawn as a template's posed mesh
         // at its own place instead (the distant crowds' way): the first one of each model a frame draws as the game does
-        // and becomes the template, the others skip CEntity::Render and join its proxies. They stay real peds (AI,
+        // and becomes the template, the others skip their PreRender and Render and join its proxies (decideProxy). They stay real peds (AI,
         // physics, paths); only their draw is cheap. VCS_PED_PROXY=<m> moves the distance, 0 turns it off. Only while
         // the population is raised: the game draws peds to ~70 m otherwise.
         float pedProxyDistance()
@@ -457,55 +457,95 @@ namespace vcs::distant
             g_group = static_cast<uint16_t>(g_rendered.size());
         }
 
-        // a random ped past pedProxyDistance() whose model the game has drawn this frame: a proxy, not drawn here
-        bool proxyRealPed(uint32_t entity)
+        // A random ped past pedProxyDistance() becomes a proxy at its PreRender (vtable 0x490840 +0x40, FUN_00200660):
+        // the first one of each model a frame (or a nearer one) is drawn by the game and is the template, so a template's
+        // pose is always this frame's; the others skip PreRender (their bones' pose, shadow, a gun's flash: nothing the
+        // proxy uses) and, at their Render (+0x44, FUN_00201300), the whole of it - they join the template's proxies.
+        // Marked per ped pool slot with the game frame.
+        constexpr uint32_t kPedPreRender = 0x00200660u, kPedRender = 0x00201300u;
+        PS2Runtime::RecompiledFunction g_pedPreRender = nullptr, g_pedRender = nullptr;
+        int32_t g_proxyFrame = -1;
+        int32_t g_proxySlot[512];
+        uint32_t pedSlot(uint32_t entity) { return (entity - rd32(rd32(kPedPool))) / kPedSize; }
+        bool decideProxy(uint32_t entity)
         {
             if (!realPedProxies() || !isRandomPed(entity))
                 return false;
-            const float x = rdf(entity + 0x30u), y = rdf(entity + 0x34u), z = rdf(entity + 0x38u);
-            const float dx = x - rdf(kCameraPos), dy = y - rdf(kCameraPos + 4u), dz = z - rdf(kCameraPos + 8u);
-            const float d = std::sqrt(dx * dx + dy * dy + dz * dz), far = pedProxyDistance();
-            if (d <= far)
-                return false;
+            const int32_t frame = static_cast<int32_t>(rd32(kFrameCounter));
+            if (frame != g_proxyFrame)
+            {
+                g_proxyFrame = frame;
+                g_realPedModels.clear();
+            }
             uint16_t model;
             std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
-            if (std::find(g_realPedModels.begin(), g_realPedModels.end(), model) == g_realPedModels.end())
+            const bool known = std::find(g_realPedModels.begin(), g_realPedModels.end(), model) != g_realPedModels.end();
+            const float dx = rdf(entity + 0x30u) - rdf(kCameraPos), dy = rdf(entity + 0x34u) - rdf(kCameraPos + 4u);
+            const float dz = rdf(entity + 0x38u) - rdf(kCameraPos + 8u);
+            if (dx * dx + dy * dy + dz * dz <= pedProxyDistance() * pedProxyDistance() || !known)
             {
-                g_realPedModels.push_back(model); // the first of its model: drawn, the template
-                g_statRealDrawn.fetch_add(1, std::memory_order_relaxed);
+                if (!known)
+                {
+                    g_realPedModels.push_back(model); // drawn by the game: this model's template this frame
+                    g_statRealDrawn.fetch_add(1, std::memory_order_relaxed);
+                }
                 return false;
             }
-            Proxy p{};
-            readMatrix(entity, p.m);
-            p.distance = d;
-            p.id = (entity >> 4) & 0xFFFFu;
-            p.model = model;
-            g_realPedProxies.push_back(p);
-            g_statRealProxied.fetch_add(1, std::memory_order_relaxed);
+            const uint32_t slot = pedSlot(entity);
+            if (slot >= 512u)
+                return false;
+            g_proxySlot[slot] = frame;
             return true;
+        }
+        bool markedProxy(uint32_t entity)
+        {
+            if (!realPedProxies() || !isRandomPed(entity))
+                return false;
+            const uint32_t slot = pedSlot(entity);
+            return slot < 512u && g_proxySlot[slot] == static_cast<int32_t>(rd32(kFrameCounter)) && g_proxyFrame >= 0;
+        }
+
+        PS2_GUEST_CC void pedPreRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_rdram = rdram;
+            if (ctx->pc == kPedPreRender && decideProxy(GPR_U32(ctx, 4)))
+            {
+                ctx->pc = GPR_U32(ctx, 31); // replaced entirely (the hook rule)
+                return;
+            }
+            g_pedPreRender(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void pedRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_rdram = rdram;
+            if (ctx->pc == kPedRender)
+            {
+                const uint32_t entity = GPR_U32(ctx, 4);
+                if (markedProxy(entity))
+                {
+                    Proxy p{};
+                    readMatrix(entity, p.m);
+                    const float dx = p.m[12] - rdf(kCameraPos), dy = p.m[13] - rdf(kCameraPos + 4u), dz = p.m[14] - rdf(kCameraPos + 8u);
+                    p.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    p.id = (entity >> 4) & 0xFFFFu;
+                    uint16_t model;
+                    std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
+                    p.model = model;
+                    g_realPedProxies.push_back(p);
+                    g_statRealProxied.fetch_add(1, std::memory_order_relaxed);
+                    ctx->pc = GPR_U32(ctx, 31);
+                    return;
+                }
+            }
+            g_pedRender(rdram, ctx, runtime);
         }
 
         PS2_GUEST_CC void entityRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_rdram = rdram;
             if (ctx->pc == kEntityRender)
-            {
-                const uint32_t entity = GPR_U32(ctx, 4);
-                if (proxyRealPed(entity))
-                {
-                    ctx->pc = GPR_U32(ctx, 31); // replaced entirely (the hook rule): the proxy draws it
-                    return;
-                }
-                openGroup(entity);
-                // a near ped of a model counts as its template too
-                if (realPedProxies() && isRandomPed(entity))
-                {
-                    uint16_t model;
-                    std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
-                    if (std::find(g_realPedModels.begin(), g_realPedModels.end(), model) == g_realPedModels.end())
-                        g_realPedModels.push_back(model);
-                }
-            }
+                openGroup(GPR_U32(ctx, 4));
             g_entityRender(rdram, ctx, runtime);
         }
 
@@ -760,7 +800,6 @@ namespace vcs::distant
         g_group = 0;
         std::vector<Proxy> realPeds;
         realPeds.swap(g_realPedProxies);
-        g_realPedModels.clear();
         if (g_rendered.empty())
         {
             if (g_frames[itemFrame & 7u])
@@ -932,6 +971,12 @@ namespace vcs::distant
             runtime.replaceFunction(kWorldProcess, &worldProcess);
         if ((g_entityRender = runtime.lookupFunction(kEntityRender)))
             runtime.replaceFunction(kEntityRender, &entityRender);
+        std::fill(std::begin(g_proxySlot), std::end(g_proxySlot), -1);
+        if ((g_pedPreRender = runtime.lookupFunction(kPedPreRender)) && (g_pedRender = runtime.lookupFunction(kPedRender)))
+        {
+            runtime.replaceFunction(kPedPreRender, &pedPreRender);
+            runtime.replaceFunction(kPedRender, &pedRender);
+        }
         if ((g_preRenderLists = runtime.lookupFunction(kPreRenderLists)))
             runtime.replaceFunction(kPreRenderLists, &preRenderLists);
         // Do not hook RegisterCorona: allow authentic game corona registration without stride/scaling corruption.
