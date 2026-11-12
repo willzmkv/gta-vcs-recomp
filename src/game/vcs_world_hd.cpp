@@ -333,7 +333,15 @@ namespace vcs::world_hd
         constexpr float kFadeFrom = 250.0f;
         constexpr uint32_t kAppendTranslucent = 0x0023E548u; // FUN_0023E548(level, record, bucket, alpha, list)
         constexpr uint32_t kMainWalkReturn = 0x0023F4BCu;     // FUN_0023E748's sector draw outside a cross-fade
-        enum : uint8_t { kNoFade, kFadeIn, kFadeOut };
+        constexpr uint32_t kLodWalkReturn = 0x00240030u;      // its walk of the low-detail buckets 0-2 (VCS_HD_GLOW)
+        enum : uint8_t { kNoFade, kFadeIn, kFadeOut, kGlow };
+        // Night lights of the low-detail city (VCS_HD_GLOW=1, experimental): a building's low-detail model carries its
+        // night lights brighter than its detailed one (game-internals.md 9j, "Lit low-detail models"). At night a
+        // low-detail sector the detail replaces is drawn anyway, through the translucent list with alpha kGlowAlpha -
+        // the renderer draws a sector with that alpha as its lights alone (vcs_hle_world / gs_draw.hlsl). Fades stay
+        // below it.
+        const bool g_glow = std::getenv("VCS_HD_GLOW") && *std::getenv("VCS_HD_GLOW") == '1';
+        constexpr uint32_t kGlowAlpha = 252u, kFadeAlphaMax = 250u;
         struct Fade
         {
             double start = 0.0;
@@ -1285,6 +1293,8 @@ namespace vcs::world_hd
 
             std::array<std::vector<Rec>, 8> out;
             uint32_t hiddenLod = 0, added = 0, coarser = 0;
+            std::bitset<0x8000> fading; // the sectors with a fade (or the night glow): the added ones, glowing low detail
+            const bool glowNow = g_glow && hourWindow(20, 7);
             const bool probing = g_probe.on && &b == &g_built[0] && t - g_probeAt > 5.0 && g_probeLogs < 400u;
             auto probeNear = [&](uint32_t r) {
                 return std::hypot(half(rd16(r + 4u)) - g_probe.x, half(rd16(r + 6u)) - g_probe.y) - half(rd16(r + 0xAu)) < g_probe.r;
@@ -1303,8 +1313,16 @@ namespace vcs::world_hd
                         rec.hide = 0; // (shown even where the game's own list hides it)
                     if (drawMode() >= 3 && rec.id >= kLodIds && !(rd16(r) & 0x8000u) && rd32(r + 0xCu) == 0 && replaced(rec.id, r))
                     {
-                        rec.hide = 1;
-                        ++hiddenLod;
+                        if (glowNow)
+                        {
+                            g_fades[rec.id] = {t, kGlow};
+                            fading.set(rec.id);
+                        }
+                        else
+                        {
+                            rec.hide = 1;
+                            ++hiddenLod;
+                        }
                     }
                     if (probing && probeNear(r))
                         std::fprintf(stderr, "[hdprobe]   game  id %5u gid %5u at %.0f,%.0f r %.0f mat 0x%08x flag %u -> %s\n", rec.id,
@@ -1323,7 +1341,6 @@ namespace vcs::world_hd
             static std::array<const Cell *, 0x8000> takenBy;
             takenBy.fill(nullptr);
             auto takenElsewhere = [&](uint16_t id, const Cell *c) { return taken.test(id) && takenBy[id] != c; };
-            std::bitset<0x8000> fading; // the added sectors: the only ones with a fade
             const uint32_t room = (kSynthBytes - 0x40u) / kRecord;
             uint32_t total = (b8 - b0) / kRecord;
             for (const Cell *c : extra)
@@ -1362,7 +1379,8 @@ namespace vcs::world_hd
                         const float near = std::hypot(half(rd16(r + 4u)) - camX, half(rd16(r + 6u)) - camY); // (its centre)
                         if (id >= kLodIds && drawMode() < 3)
                             continue;
-                        if (id >= kLodIds && replaced(id, r))
+                        const bool glowing = id >= kLodIds && replaced(id, r);
+                        if (glowing && !glowNow)
                         {
                             ++coarser;
                             continue;
@@ -1379,6 +1397,12 @@ namespace vcs::world_hd
                         ++total;
                         // its fade: in when it was not drawn lately, out while its cell leaves (from where it is now)
                         Fade &f = g_fades[id];
+                        if (glowing)
+                        {
+                            f = {t, kGlow};
+                            fading.set(id);
+                            continue;
+                        }
                         const double a = opacity(id, t);
                         if (near < kFadeFrom)
                             f = {}; // (not on the horizon: as it is)
@@ -2028,12 +2052,33 @@ namespace vcs::world_hd
                 ctx->pc = getRegU32(ctx, 31); // not drawn (FUN_00240ED8 returns nothing)
                 return;
             }
+            if (g_glow && valid(record, kRecord) && g_fades[rd16(record) & 0x7FFFu].kind == kGlow)
+            {
+                // (VCS_HD_GLOW: where the glowing low-detail sectors are drawn from, every ~5 s)
+                static std::map<uint64_t, uint32_t> seen;
+                static auto at = std::chrono::steady_clock::now();
+                ++seen[uint64_t(getRegU32(ctx, 31)) << 8 | uint32_t(bucketOf(record) & 0xFF)];
+                static const int watch = std::getenv("VCS_HD_GLOWID") ? std::atoi(std::getenv("VCS_HD_GLOWID")) : -1;
+                if (int(rd16(record) & 0x7FFFu) == watch)
+                    ++seen[uint64_t(0xFF0000u | (getRegU32(ctx, 31) & 0xFFFFu)) << 8 | uint32_t(bucketOf(record) & 0xFF)];
+                if (std::chrono::steady_clock::now() - at > std::chrono::seconds(5))
+                {
+                    at = std::chrono::steady_clock::now();
+                    std::fprintf(stderr, "[hdglow]");
+                    for (const auto &[k, c] : seen)
+                        std::fprintf(stderr, " ra 0x%06llx bucket %d x%u", (unsigned long long)(k >> 8), int(int8_t(k & 0xFF)), c);
+                    std::fprintf(stderr, "\n");
+                    seen.clear();
+                }
+            }
             // a fading sector of ours, outside the game's own cross-fade: into the translucent list with its alpha
             // (drawn there, sorted far to near, through this function again from another caller)
-            if (kFadeSeconds > 0.0 && getRegU32(ctx, 31) == kMainWalkReturn && valid(record, kRecord) &&
-                g_fades[rd16(record) & 0x7FFFu].kind != kNoFade)
+            if (kFadeSeconds > 0.0 && valid(record, kRecord) && g_fades[rd16(record) & 0x7FFFu].kind != kNoFade &&
+                (getRegU32(ctx, 31) == kMainWalkReturn ||
+                 (getRegU32(ctx, 31) == kLodWalkReturn && g_fades[rd16(record) & 0x7FFFu].kind == kGlow)))
             {
-                const double a = opacity(rd16(record), seconds());
+                const bool glow = g_fades[rd16(record) & 0x7FFFu].kind == kGlow;
+                const double a = glow ? double(kGlowAlpha) / 255.0 : opacity(rd16(record), seconds());
                 const int k = a < 1.0 ? bucketOf(record) : -1;
                 if (k >= 0)
                 {
@@ -2050,7 +2095,7 @@ namespace vcs::world_hd
                                      rd16(record) & 0x7FFFu, a, k);
                     }
                     SET_GPR_U32(ctx, 6, uint32_t(k));
-                    SET_GPR_U32(ctx, 7, uint32_t(a * 255.0));
+                    SET_GPR_U32(ctx, 7, glow ? kGlowAlpha : std::min(uint32_t(a * 255.0), kFadeAlphaMax));
                     SET_GPR_U32(ctx, 8, 0u); // the current slot's list
                     ctx->pc = kAppendTranslucent; // a guest tail call: it returns to our caller
                     return;
