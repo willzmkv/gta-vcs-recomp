@@ -48,7 +48,9 @@ machine (runs while the player compiled shaders elsewhere showed 77-93 fps - not
    autodrive each, `tools/soak.py`): radius 3 and radius 0 both 120/120 samples ok, no crash / hang / falling, 30 fps
    held. Private memory 1.17 -> 3.06 GB at radius 3, 1.10 -> 2.75 GB at radius 0: the same climb (the renderer's
    texture / mesh caches filling at each new place, PERFORMANCE.md 14 - bounded by count, 3000 textures / 12000
-   meshes), the far city ~0.3-0.8 GB on top. Not a leak of ours; worth a 3-hour run with repeated spots to see it level.
+   meshes), the far city ~0.3-0.8 GB on top. Correction the same day: the climb was the RSL recordings, never dropped
+   (1172efa caps them; PERFORMANCE.md 14). A 3-hour soak at radius 3 then: 360/360 samples ok, no crash / hang /
+   falling, 1.2 -> 2.3 GB, +88 MB/h after 20 minutes (it was +1000 MB/h, and 6.3 GB with a hang at 1.6 h, before).
 6. Clean-up: done 2026-11-12 (the previous agent's scripts and old test output here and in D:\Games\VCS Recomp; its
    two old agent worktrees removed). The previous agent's settings `world.hd_focus_*`, `world.preload_*`,
    `world.rsl_*` (still in vcs.ini) do nothing.
