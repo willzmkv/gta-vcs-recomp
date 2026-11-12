@@ -1180,6 +1180,16 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         constexpr uint32_t kAnimUpdate = 0x00154D10u; // RpAnimBlendClumpUpdateAnimations(dt $f12, clump $a0, all $a1)
         constexpr uint32_t kFrameCounter = 0x004CD124u;
         constexpr float kLodDistance = 70.0f, kLodFar = 110.0f; // every second frame past the first, every third past this
+        // (2026-11-12) every fourth past 110 m and every sixth past 180 m: the crowd there is drawn as proxies (vcs_distant)
+        // and is most of the population's simulation cost (CWorld::Process 2.1 -> 5.4 ms at sliders 50, PERFORMANCE.md 44).
+        // VCS_CROWD_LOD_TIERS=a,b: the every-N past 110 / 180 m (3,3: as before)
+        const std::pair<int, int> kLodTiers = [] {
+            int far = 4, farther = 6;
+            if (const char *e = std::getenv("VCS_CROWD_LOD_TIERS"))
+                std::sscanf(e, "%d,%d", &far, &farther);
+            return std::make_pair(std::clamp(far, 1, 30), std::clamp(farther, 1, 30));
+        }();
+        constexpr float kLodFarther = 180.0f;
         PS2Runtime::RecompiledFunction g_updateAnim = nullptr, g_randomPedControl = nullptr, g_processCollision = nullptr,
                                        g_animUpdate = nullptr;
         struct LodState
@@ -1224,7 +1234,11 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 const float dx = rdf(ent + 0x30u) - rdf(kCameraPos), dy = rdf(ent + 0x34u) - rdf(kCameraPos + 4u);
                 const float dz = rdf(ent + 0x38u) - rdf(kCameraPos + 8u);
                 const float d2 = dx * dx + dy * dy;
-                s.every = !random ? 1 : d2 > kLodFar * kLodFar ? 3 : d2 > kLodDistance * kLodDistance ? 2 : 1;
+                s.every = !random                         ? 1
+                          : d2 > kLodFarther * kLodFarther ? static_cast<uint8_t>(kLodTiers.second)
+                          : d2 > kLodFar * kLodFar         ? static_cast<uint8_t>(kLodTiers.first)
+                          : d2 > kLodDistance * kLodDistance ? 2
+                                                             : 1;
                 s.skip = (static_cast<uint32_t>(frame) + slot) % s.every != 0;
                 // outside a cone of acos(0.2) = 78 degrees around the camera's direction (wider than any field of view)
                 const float along = dx * rdf(kCameraFront) + dy * rdf(kCameraFront + 4u) + dz * rdf(kCameraFront + 8u);

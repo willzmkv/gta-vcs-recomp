@@ -1143,6 +1143,20 @@ The GS stage gains ~2.5 ms; the frame rate does not move here - the three thread
 is still one native draw per part. With distant traffic / crowds at 100 (now drawn) the GS stage rises to 17-20 ms in
 Little Havana. Next for the far crowd: one draw for all of a template's proxies (instancing).
 
+### 44. The crowd LOD's farther tiers (2026-11-12)
+
+The population's simulation (CWorld::Process 2.1 -> 5.4 ms at sliders 50) is mostly the far crowd's. Its random peds
+on foot are now processed every fourth frame past 110 m and every sixth past 180 m (were every third past 110 m;
+`VCS_CROWD_LOD_TIERS=3,3` as before) - drawn as proxies there (section 43), their animation still advanced by the
+frames they stand for. Police station, sliders 50, three alternating rounds:
+
+| | CWorld::Process | game thread | fps |
+|---|---|---|---|
+| every 4 / 6 | 3.99 / 4.37 / 4.12 ms | 12.0 / 12.9 / 12.2 ms | 59.7 / 59.9 / 60.0 |
+| every 3 (before) | 4.69 / 5.49 / 5.56 ms | 13.0 / 14.1 / 13.5 ms | 62.7 / 55.9 / 53.5 |
+
+About 1.1 ms off the game thread. Past 180 m a ped moves ~10 times a second at 60 fps, a few pixels tall there.
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker
