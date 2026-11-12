@@ -1,5 +1,9 @@
 # GTA: Vice City Stories — Native PC port (PS2 static recompilation)
 
+> [!WARNING]
+> **Extremely experimental — do not use this fork yet.**
+> This fork is **extremely experimental** and it is **not recommended for anyone to use it at the moment**. If you want to build or play the game, please use the original repository instead: **[gothamor/gta-vcs-recomp](https://github.com/gothamor/gta-vcs-recomp)**.
+
 > **This is a fork** of [gothamor/gta-vcs-recomp](https://github.com/gothamor/gta-vcs-recomp) that brings the effects of
 > PC mods (Proper Shaders, SkyGFX, Project2DFX, texture packs) to the native port as settings, authentic by default,
 > and runs PC Vice City (and San Andreas weapon) mods through a mod loader. What it adds is listed in
