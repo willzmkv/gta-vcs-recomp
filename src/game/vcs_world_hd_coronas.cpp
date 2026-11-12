@@ -41,7 +41,11 @@ namespace vcs::world_hd_coronas
         constexpr uint32_t kCoronaRender = 0x0027C418u;  // CCoronas::Render
         constexpr uint32_t kIm2DRender = 0x002FBE08u;    // RwIm2DRenderPrimitive(prim, vertices, count)
         constexpr uint32_t kRenderStateSet = 0x00175198u; // RwRenderStateSet(state, value): 1 = the texture
-        constexpr uint32_t kSpriteReturn = 0x003A07A8u;  // FUN_003A03A8's return from Im2D (jal at 0x3A07A0)
+        // The lamps' sprites: a corona whose texture is not the default one (0x487778) goes through FUN_003A0D08, which
+        // draws with the depth test on (its Im2D call returns at 0x3A1260); FUN_003A03A8 (return 0x3A07A8) is the
+        // default texture's and the flares', drawn without it. The far lamps ride the first (2026-11-12: riding the second,
+        // they were not depth tested - and not seen at all, their vertex alpha 0).
+        constexpr uint32_t kSpriteReturn = 0x003A1260u;
         constexpr uint32_t kCoronaTable = 0x00512560u, kCoronaSlots = 56u, kCoronaStride = 0x90u;
         constexpr uint32_t kDummyPool = 0x00487AACu; // CPool {entries, flags, size}: 0x60-byte dummies (bit 7: free)
         constexpr uint32_t kDummySize = 0x60u;
@@ -59,6 +63,10 @@ namespace vcs::world_hd_coronas
         // how far the lamps reach per setting (the detailed city's), and the fade at the edge
         constexpr float kReach[] = {0.0f, 450.0f, 580.0f, 720.0f};
         constexpr float kEdgeFade = 80.0f;
+        // A lamp's corona projected at its real size is 2 pixels wide (of 640) at 600 m, its colour scaled down by the
+        // alpha: invisible - the player saw the coronas appear only close (2026-11-12). Far lamps keep at least this half
+        // height on screen (as PC mods such as Project2DFX do for their far lamps), their width following the aspect.
+        constexpr float kMinHalf = 3.0f;
 
         PS2Runtime::RecompiledFunction g_render = nullptr, g_im2d = nullptr, g_stateSet = nullptr;
         uint8_t *g_ram = nullptr;
@@ -79,6 +87,7 @@ namespace vcs::world_hd_coronas
         // counters (the farcoronas command)
         std::atomic<uint32_t> g_statLights{0}, g_statDrawn{0}, g_statInjected{0}, g_statFrames{0};
         uint32_t g_dummiesLit = 0;
+        uint32_t g_otherTexture = 0; // lights within reach left out: another corona texture than the first lamp's
         float g_maxDistance = 0.0f;
         uint32_t g_debugLogged = 0;
 
@@ -169,6 +178,7 @@ namespace vcs::world_hd_coronas
             g_lights.clear();
             g_lampTexture = 0;
             g_dummiesLit = 0;
+            g_otherTexture = 0;
             g_maxDistance = 0.0f;
             const uint32_t pool = rd32(kDummyPool);
             if (!valid(pool, 0xCu))
@@ -203,7 +213,10 @@ namespace vcs::world_hd_coronas
                     if (!g_lampTexture)
                         g_lampTexture = f.texture;
                     if (f.texture != g_lampTexture)
+                    {
+                        ++g_otherTexture;
                         continue;
+                    }
                     g_maxDistance = std::max(g_maxDistance, d);
                     g_lights.push_back({x, y, z, f.size, f.show, f.r, f.g, f.b});
                 }
@@ -218,7 +231,9 @@ namespace vcs::world_hd_coronas
             return -1;
         }
 
-        // the slot that makes the pass draw one (empty) lamp sprite a frame: 3 m ahead of the camera, size 0
+        // the slot that makes the pass draw one (empty) lamp sprite a frame: kFakeAhead ahead of the camera, size 0 (at 3 m
+        // it fell short of the near plane - CCoronas::Render skips a corona nearer than 0x4CD130 - and nothing far was
+        // drawn whenever no lamp of the game's own was near; 2026-11-12)
         void keepFakeSlot()
         {
             int i = findSlot(kFakeId);
@@ -229,9 +244,10 @@ namespace vcs::world_hd_coronas
                 return;
             const uint32_t s = kCoronaTable + uint32_t(i) * kCoronaStride;
             std::memset(g_ram + (s & PS2_RAM_MASK), 0, kCoronaStride);
-            wrf(s + 0x10u, rdf(kCameraPos) + rdf(kCameraFwd) * 3.0f);
-            wrf(s + 0x14u, rdf(kCameraPos + 4u) + rdf(kCameraFwd + 4u) * 3.0f);
-            wrf(s + 0x18u, rdf(kCameraPos + 8u) + rdf(kCameraFwd + 8u) * 3.0f);
+            constexpr float kFakeAhead = 20.0f;
+            wrf(s + 0x10u, rdf(kCameraPos) + rdf(kCameraFwd) * kFakeAhead);
+            wrf(s + 0x14u, rdf(kCameraPos + 4u) + rdf(kCameraFwd + 4u) * kFakeAhead);
+            wrf(s + 0x18u, rdf(kCameraPos + 8u) + rdf(kCameraFwd + 8u) * kFakeAhead);
             wrf(s + 0x1Cu, 1.0f);
             wr32(s + 0x20u, kFakeId);
             wr32(s + 0x24u, rd32(kClock)); // the line-of-sight timer (not checked: flag bit 3 clear)
@@ -284,7 +300,7 @@ namespace vcs::world_hd_coronas
             wr8(at + 4u, r);
             wr8(at + 5u, g);
             wr8(at + 6u, b);
-            wr8(at + 7u, 0u);
+            wr8(at + 7u, 0xFFu); // (0: the renderer drops the pixels)
             wr16(at + 8u, uint16_t(int16_t(int(x))));
             wr16(at + 0xAu, uint16_t(int16_t(int(y))));
             wr32(at + 0xCu, z);
@@ -328,12 +344,19 @@ namespace vcs::world_hd_coronas
                 const float f = 1.0f + grow * std::min(w, 40.0f) * 0.025f;
                 const float h = 448.0f / w, ws = h * 1.4285715f / aspect;
                 const float size = l.size * scale * (g_debugLevel >= 2 ? 6.0f : 1.0f); // (=2: big, for a picture)
-                const float hw = size * ws * f, hh = size * h * f;
+                float hw = size * ws * f, hh = size * h * f;
+                if (hh > 0.0f && hh < kMinHalf)
+                {
+                    hw *= kMinHalf / hh;
+                    hh = kMinHalf;
+                }
                 if (!(hw > 0.0f) || !(hh > 0.0f) || sx + hw < 0.0f || sx - hw > 640.0f || sy + hh < 0.0f || sy - hh > 448.0f)
                     continue;
                 const float depth = w - kBias;
                 const float z24 = (zA * depth + zB) / (zC * depth);
-                const uint32_t z = z24 > 0.0f ? uint32_t(int32_t(z24)) >> 4 : 0u;
+                uint32_t z = z24 > 0.0f ? uint32_t(int32_t(z24)) >> 4 : 0u;
+                if (g_debugLevel >= 3)
+                    z = 60000u; // (=3: in front of everything, to see where they land)
                 const int ir = int(float(l.r) / f) & 0xFF, ig = int(float(l.g) / f) & 0xFF, ib = int(float(l.b) / f) & 0xFF;
                 const uint8_t r = uint8_t((ir * alpha) >> 8), g = uint8_t((ig * alpha) >> 8), b = uint8_t((ib * alpha) >> 8);
                 // the corners as FUN_003A03A8 lays them (x - w, y - h), (x - w, y + h), (x + w, y + h), (x + w, y - h), clamped
@@ -502,11 +525,55 @@ namespace vcs::world_hd_coronas
 
         // farcoronas -> ok lights=<far lamps this frame> drawn=<quads> injected=<frames with a draw> dummies=<lit dummies
         // within reach> maxdist=<m> slot=<the empty corona's slot> frames=<n>
+        // lightcensus -> ok ...: every 2D effect of the used dummies within 720 m by kind / light type / flags
+        // (which lights the far coronas take and which they leave)
+        ps2control::addCommand("lightcensus", [](const std::string &, ps2control::Reply reply) {
+            if (!g_ram)
+                return reply("error not yet");
+            const uint32_t pool = rd32(kDummyPool);
+            if (!valid(pool, 0xCu))
+                return reply("error no pool");
+            const uint32_t entries = rd32(pool), flags = rd32(pool + 4u), size = rd32(pool + 8u);
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            std::unordered_map<uint32_t, uint32_t> census; // kind << 16 | type << 8 | flags
+            uint32_t dummies = 0;
+            for (uint32_t i = 0; i < size && i < 0x10000u; ++i)
+            {
+                if (rd8(flags + i) & 0x80u)
+                    continue;
+                const uint32_t e = entries + i * kDummySize;
+                if (std::fabs(rdf(e + 0x30u) - cx) > 720.0f || std::fabs(rdf(e + 0x34u) - cy) > 720.0f)
+                    continue;
+                const uint32_t table = rd32(kModelTable), model = rd16(e + 0x56u);
+                const uint32_t mi = model < rd32(kModelCount) && valid(table + model * 4u) ? rd32(table + model * 4u) : 0;
+                if (!valid(mi, 0x40u))
+                    continue;
+                const uint32_t n = rd8(mi + 0x11u);
+                const int16_t first = static_cast<int16_t>(rd16(mi + 0x18u));
+                if (!n || first < 0)
+                    continue;
+                ++dummies;
+                for (uint32_t k = 0; k < n; ++k)
+                {
+                    const uint32_t fx = rd32(kEffects) + (uint32_t(first) + k) * 0x40u;
+                    ++census[uint32_t(rd8(fx + 0x14u)) << 16 | uint32_t(rd8(fx + 0x28u)) << 8 | rd8(fx + 0x2Cu)];
+                }
+            }
+            std::string out = "ok dummies=" + std::to_string(dummies);
+            for (const auto &[key, count] : census)
+            {
+                char t[64];
+                std::snprintf(t, sizeof(t), " kind%u/type%u/flags%02x=%u", key >> 16, (key >> 8) & 0xFFu, key & 0xFFu, count);
+                out += t;
+            }
+            reply(out);
+        });
+
         ps2control::addCommand("farcoronas", [](const std::string &, ps2control::Reply reply) {
             char text[256];
-            std::snprintf(text, sizeof(text), "ok lights=%u drawn=%u injected=%u dummies=%u maxdist=%.0f slot=%d frames=%u texture=0x%08x lamptex=0x%08x pending=%d",
+            std::snprintf(text, sizeof(text), "ok lights=%u drawn=%u injected=%u dummies=%u maxdist=%.0f slot=%d frames=%u texture=0x%08x lamptex=0x%08x pending=%d other=%u",
                           g_statLights.load(), g_statDrawn.load(), g_statInjected.load(), g_dummiesLit, g_maxDistance, g_fakeSlot,
-                          g_statFrames.load(), g_texture, g_lampTexture, int(g_pending));
+                          g_statFrames.load(), g_texture, g_lampTexture, int(g_pending), g_otherTexture);
             reply(text);
         });
     }

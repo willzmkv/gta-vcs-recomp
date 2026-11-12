@@ -2045,8 +2045,15 @@ Found by a helper agent reading the decompiled code (its findings are also the h
   setting's reach as the sprite routine does and draws them through the game's own corona pass: one corona slot is kept
   as a size-0 corona with the lamps' texture (so the pass makes an Im2D call with their texture, blend and depth test
   every frame), and that call's vertices are replaced by a triangle list of every far lamp's quad (in guest memory at
-  `0x7C00000`); a lamp the game draws itself gets the complement of its alpha. Pictures at the avenue spot at 23:00:
-  the far lamps' glow down the avenue at ~720 m, none at Original. Switches: `VCS_HD_CORONAS=0`,
+  `0x7C00000`); a lamp the game draws itself gets the complement of its alpha.
+- Which sprite routine: `CCoronas::Render` draws a corona with the default texture (`*0x487778`) and the flares through
+  `FUN_003A03A8` (Im2D return `0x3A07A8`) with the depth test off, and any other texture - the lamps' - through
+  `FUN_003A0D08` (return `0x3A1260`; `FUN_003A12B0`, return `0x3A18A0`, when slot +0 is set) with it on. The far lamps
+  ride the lamps' call, so they are depth tested like the game's own. Im2D vertex alpha 0 is dropped by the renderer: the
+  first version wrote 0 and rode the flares' call - nothing far was ever seen (found with the F12 draw log,
+  `PS2X_HW_DUMP_ALLVERTS=1`: the injected vertices at alpha 0 in a `ztst=1` draw). A far lamp keeps at least 3 px of half
+  height (of 448), its true size being ~1 px at 600 m. Pictures at the avenue spot at 23:00: every lamp down the avenue
+  lit at ~720 m, the two nearest at Original; from above, every street's lamps. Switches: `VCS_HD_CORONAS=0`,
   `VCS_HD_CORONADEBUG=1` (projections logged; `=2` the quads six times larger, to find them in a picture); command
   `farcoronas`.
 

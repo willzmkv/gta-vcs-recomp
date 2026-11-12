@@ -19,9 +19,8 @@ machine (runs while the player compiled shaders elsewhere showed 77-93 fps - not
 ### Open (the player's last report) - the work list
 
 1. **Lamp-post coronas** - done (src/game/vcs_world_hd_coronas.cpp, game-internals.md 9k): the far lamp dummies are
-   projected and drawn through the game's own corona pass. Pictures at the avenue at 23:00 show the far glow; not yet
-   checked by the player. Possible follow-ups: a minimum on-screen size for very far lamps (Project2DFX-like), other
-   light types (2dfx type != 1/3: traffic lights, neon) left as they are.
+   projected and drawn through the game's own lamp-corona call, depth tested. The first version (a helper agent's)
+   drew nothing (vertex alpha 0, the flares' call); fixed 2026-11-12, pictures show every lamp down the avenue lit.
 2. **Some buildings appear only very close** - especially Little Havana near the Pay 'n' Spray. Check whether they are
    sectors at all (`probe_view.py` with the live game, below) or entities (CRenderer / IPL instances - vcs_distance.cpp's
    LOD scale). If sectors: which cell's list names them, whether `taken` or the low-detail rule leaves them out, whether
