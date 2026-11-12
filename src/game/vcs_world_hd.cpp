@@ -44,6 +44,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -860,11 +861,35 @@ namespace vcs::world_hd
 
         // entries emptied (one of ours unloaded, or the game dropped its copy of a gid we also hold): ours again
         bool g_reenter = false;
+        uint32_t bufferEnd(uint32_t from);
+        std::array<uint32_t, 2> g_loadingSwept{}; // the slot buffers being read into, already swept
+
+        // A cached packet holds REFs straight into the texture data its sector used when it was built - the game's copy
+        // in a slot buffer, for a sector of ours as well. When the game starts reading the next cell / area into that
+        // buffer, those REFs read the new data as it lands: textures of noise for some frames (purple blocks, leaves
+        // changing; the player's report and VCS_HD_DRAWCHECK, 2026-11-11). Every packet pointing into a buffer that
+        // has just started a read goes (the game builds it again from the entries as they are now).
+        void sweepLoading()
+        {
+            const uint32_t slots[2] = {rd32(g_level + 0x258u), rd32(g_level + 0x25Cu)};
+            for (int i = 0; i < 2; ++i)
+            {
+                const uint32_t buf = valid(slots[i], 0x14u) ? rd32(slots[i] + 0x10u) : 0u;
+                if (buf == g_loadingSwept[size_t(i)])
+                    continue;
+                g_loadingSwept[size_t(i)] = buf;
+                if (buf && inSlotBuffers(buf))
+                    g_freed.emplace_back(buf, bufferEnd(buf));
+            }
+            sweepPackets();
+        }
+
         void reenterAll()
         {
             gatherGame();
             for (auto &[k, cell] : g_cells)
                 enterCell(*cell);
+            sweepLoading();
             g_reenter = false;
             ++g_version;
         }
@@ -1649,11 +1674,76 @@ namespace vcs::world_hd
             g_append(rdram, ctx, runtime);
         }
 
+        // VCS_HD_DRAWCHECK=1: every sector drawn, its cached packet and the packets it CALLs (its textures') walked: a REF
+        // into a slot buffer the game is reading into (level + 0x258 / 0x25C), or a CALL into something that is not a
+        // packet, is logged once per gid and target ([hdworld-draw]) - textures read from memory being overwritten
+        const bool g_drawCheck = std::getenv("VCS_HD_DRAWCHECK") != nullptr;
+        uint64_t g_drawCheckLogged = 0;
+
+        void drawCheck(uint32_t record, uint32_t ra)
+        {
+            const uint32_t gid = rd16(record + 2u);
+            if (!valid(g_info, 4u) || !valid(g_level, 0x600u) || gid == 0 || gid >= kMaxGid || g_drawCheckLogged > 400u)
+                return;
+            // the buffers being read into
+            uint32_t loading[2][2] = {};
+            const uint32_t ls = rd32(g_level + 0x258u), la = rd32(g_level + 0x25Cu);
+            if (valid(ls, 0x14u) && rd32(ls + 0x10u))
+                loading[0][0] = rd32(ls + 0x10u), loading[0][1] = bufferEnd(rd32(ls + 0x10u));
+            if (valid(la, 0x14u) && rd32(la + 0x10u))
+                loading[1][0] = rd32(la + 0x10u), loading[1][1] = bufferEnd(rd32(la + 0x10u));
+            auto inLoading = [&](uint32_t a) {
+                for (const auto &b : loading)
+                    if (b[0] && a >= b[0] && a < b[1])
+                        return true;
+                return false;
+            };
+            static std::set<uint64_t> told;
+            auto walk = [&](uint32_t packet, uint32_t depth, auto &&self) -> void {
+                uint32_t p = packet;
+                for (int n = 0; n < 2048 && valid(p, 16u); ++n)
+                {
+                    const uint32_t w0 = rd32(p), id = (w0 >> 28) & 7u, qwc = w0 & 0xFFFFu, addr = rd32(p + 4u) & 0x7FFFFFFFu;
+                    const char *why = nullptr;
+                    if (w0 & 0x0FFF0000u)
+                        why = "not a DMA tag";
+                    else if ((id == 0u || id == 3u || id == 4u) && inLoading(addr))
+                        why = "REF into the slot buffer being read";
+                    if (why)
+                    {
+                        if (told.insert(uint64_t(gid) << 32 | p).second)
+                        {
+                            ++g_drawCheckLogged;
+                            const auto mine = g_registered.find(gid);
+                            std::fprintf(stderr, "[hdworld-draw] frame %llu: record id %u gid %u (entry 0x%08x %s, ra 0x%08x) packet 0x%08x depth %u: "
+                                         "tag@0x%08x %08x %08x - %s; loading cell 0x%08x..0x%08x area 0x%08x..0x%08x\n",
+                                         (unsigned long long)g_frame, rd16(record) & 0x7FFFu, gid, rd32(rd32(g_info) + gid * 0xCu),
+                                         mine != g_registered.end() ? "ours" : "the game's", ra, packet, depth, p, w0, rd32(p + 4u), why,
+                                         loading[0][0], loading[0][1], loading[1][0], loading[1][1]);
+                        }
+                        return;
+                    }
+                    if (id == 5u && depth < 2u)
+                        self(addr, depth + 1u, self);
+                    if (id == 1u || id == 5u)
+                        p += 16u + qwc * 16u;
+                    else if (id == 0u || id == 2u || id == 6u || id == 7u)
+                        return;
+                    else
+                        p += 16u;
+                }
+            };
+            if (const uint32_t packet = rd32(rd32(g_info) + gid * 0xCu + 4u))
+                walk(packet, 0u, walk);
+        }
+
         PS2_GUEST_CC void sectorHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_ram = rdram;
             if (g_pktDebug && valid(getRegU32(ctx, 5), kRecord))
                 checkCalls(getRegU32(ctx, 5));
+            if (g_drawCheck && valid(getRegU32(ctx, 5), kRecord))
+                drawCheck(getRegU32(ctx, 5), getRegU32(ctx, 31));
             const uint32_t used = bufferUsed();
             g_sectorCalls.fetch_add(1, std::memory_order_relaxed);
             if (0xE6670u - used < 0x12C00u)

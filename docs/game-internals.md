@@ -1998,6 +1998,13 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   draw called from the plain walk (return `0x23F4BC`; `0x24068C` is the translucent list's own call) becomes a tail
   call to `FUN_0023E548` with the bucket and the fade's alpha; the low-detail sectors they replace are left out only a
   fade later; a cell out of reach fades out before it is dropped. ~4 % of the frame on the cruise route.
+- **Packets reading a buffer being loaded** (the player's purple blocks and flickering leaves, 2026-11-11): a cached
+  sector packet holds REFs (qwc 4) straight into the texture data its meshes used when it was built - for a sector of
+  ours too, the game's copy in a slot buffer. When the game starts reading the next cell / area into that buffer
+  (`level + 0x258` / `0x25C`), those REFs read the new data as it lands: noise textures for some frames. Every packet
+  pointing into a buffer that has just started a read is now freed (rebuilt from the entries as they are). Found with
+  `VCS_HD_DRAWCHECK=1` (each drawn sector's packet and the packets it CALLs walked: 21 such REFs in a 7-minute drive,
+  0 after) and a RAM dump of the live game (`dump`), checked offline (build/analysis/hd_world/ramcheck.py, pktcheck.py).
 - **Two copies of a gid**: a gid can be in pieces of the current and the next slot at two addresses, either one in the
   entry - every copy counts as the game's (`[hdworld] built-list record ... bad` for 4 records per route before).
 - **The sector packet heap** `0x6F3DB8` (built by `FUN_002BB768` at boot, called from `0x369384`; 0x7CFC8 bytes at
