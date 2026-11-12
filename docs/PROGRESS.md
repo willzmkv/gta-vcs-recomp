@@ -944,7 +944,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_HD_TWINS=1` | HD world: once a minute, how many of the replaced low-detail sectors have a detailed record at the same centre and radius (`[hdtwin]`) |
 | `VCS_HD_FADE=<seconds>` | HD world: the detail's fade in / out on the horizon (default 1; 0 none) |
 | `VCS_HD_CORONAS=0` | HD world: the street lamps' coronas stay the game's (~80 m) with the detailed city further on |
-| `VCS_HD_CORONADEBUG=1` | HD world: a few far lamp coronas' projection logged every 300 frames (`[hdcorona]`) |
+| `VCS_HD_CORONADEBUG=1` | HD world: a few far lamp coronas' projection logged every 300 frames (`[hdcorona]`); `=2` quads 6x larger, `=3` in front of everything, `=4` marker vertex colours (what reaches the renderer), `=5` every far light that drops below 30 % of its alpha the frame before, with distance, light type and whether the game draws one there, and the corona table's use every 150 frames (`[hdcorona-dip]`) |
 | `VCS_HD_PKTDEBUG=1`, `VCS_HD_NODRAW=1`, `VCS_HD_DRAWMODE=1\|2\|3`, `VCS_HD_FREE_DELAY=n` | HD world (vcs_world_hd.cpp): cached packets put on the free ring / freed / CALLed after their free (`[hdworld-pkt]`); extra cells not drawn; bisection modes; arena reuse delay |
 | `VCS_GS_STATS=s` | GS state histogram |
 | `VCS_SELFTEST=1` | recompiled libgcc helpers vs native; RenderWare's clip flags (`VCLIPw`) on known vertices |

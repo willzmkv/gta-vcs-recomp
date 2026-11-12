@@ -49,6 +49,7 @@ namespace vcs::world_hd_coronas
         constexpr uint32_t kCoronaTable = 0x00512560u, kCoronaSlots = 56u, kCoronaStride = 0x90u;
         constexpr uint32_t kDummyPool = 0x00487AACu; // CPool {entries, flags, size}: 0x60-byte dummies (bit 7: free)
         constexpr uint32_t kDummySize = 0x60u;
+        constexpr uint32_t kObjectPool = 0x00487AA4u, kObjectSize = 0x220u; // CObjects (game-internals.md 13: 475 of 0x220)
         constexpr uint32_t kModelTable = 0x00486518u, kModelCount = 0x004CD10Cu, kEffects = 0x004E5CA8u; // 0x40 each
         constexpr uint32_t kCameraPos = 0x006F4500u, kCameraFwd = 0x006F44E0u, kHour = 0x004CD148u;
         constexpr uint32_t kScreenMatrix = 0x00520A00u, kOrigin = 0x006FE980u, kNear = 0x004CD130u, kFar = 0x004CD12Cu;
@@ -93,7 +94,23 @@ namespace vcs::world_hd_coronas
             uint8_t r, g, b;
             float d;      // from the camera
             bool traffic; // a traffic light: half the reach (TrafficReach)
+            uint8_t type = 1;
         };
+
+        // VCS_HD_CORONADEBUG=5: a far light that drops below 30 % of its alpha the frame before and the reason, the corona
+        // table's use - what makes the coronas dim and come back (the player, 2026-11-12)
+        struct DipTrack
+        {
+            std::unordered_map<uint64_t, std::pair<int, uint32_t>> last, now; // key -> alpha, the frame's reason bits
+            uint32_t gone = 0, dropped = 0, logged = 0, slotsMax = 0, frames = 0, collectedMax = 0;
+            static uint64_t key(const Light &l)
+            {
+                return uint64_t(uint32_t(int(l.x * 2.0f))) << 40 ^ uint64_t(uint32_t(int(l.y * 2.0f)) & 0xFFFFFu) << 20 ^
+                       (uint32_t(int(l.z * 2.0f)) & 0xFFFFFu);
+            }
+        };
+        DipTrack g_dips;
+
         std::vector<Light> g_lights; // this frame's far lamps (game thread)
         uint32_t g_texture = 0;      // RwRenderStateSet(1, texture): the current one
         uint32_t g_lampTexture = 0;  // the lamps' corona texture
@@ -275,19 +292,25 @@ namespace vcs::world_hd_coronas
             g_traffic = 0;
             g_otherTexture = 0;
             g_maxDistance = 0.0f;
-            const uint32_t pool = rd32(kDummyPool);
-            if (!valid(pool, 0xCu))
-                return;
-            const uint32_t entries = rd32(pool), flags = rd32(pool + 4u), size = rd32(pool + 8u);
-            if (size == 0 || size > 0x10000u || !valid(entries, size * kDummySize) || !valid(flags, size))
-                return;
             const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u), cz = rdf(kCameraPos + 8u);
             const float limit = reach + 10.0f;
+            // The dummies, then the objects: a map instance with 2D effects in the player's streaming area is an object, not
+            // a dummy - lamp posts 80 to 320 m away left the dummy pool while driving and the game draws an object's
+            // corona within 100 m only, so their coronas went out and came back (VCS_HD_CORONADEBUG=5, 2026-11-12)
+            for (const uint32_t poolPtr : {kDummyPool, kObjectPool})
+            {
+            const uint32_t pool = rd32(poolPtr);
+            if (!valid(pool, 0xCu))
+                continue;
+            const uint32_t stride = poolPtr == kDummyPool ? kDummySize : kObjectSize;
+            const uint32_t entries = rd32(pool), flags = rd32(pool + 4u), size = rd32(pool + 8u);
+            if (size == 0 || size > 0x10000u || !valid(entries, size * stride) || !valid(flags, size))
+                continue;
             for (uint32_t i = 0; i < size && g_lights.size() < kMaxLights * 4u; ++i)
             {
                 if (rd8(flags + i) & 0x80u)
                     continue;
-                const uint32_t e = entries + i * kDummySize;
+                const uint32_t e = entries + i * stride;
                 const float ex = rdf(e + 0x30u), ey = rdf(e + 0x34u);
                 if (std::fabs(ex - cx) > limit || std::fabs(ey - cy) > limit)
                     continue;
@@ -351,9 +374,11 @@ namespace vcs::world_hd_coronas
                         continue;
                     }
                     g_maxDistance = std::max(g_maxDistance, d);
-                    g_lights.push_back({x, y, z, f.size, f.show, f.r, f.g, f.b, d, false});
+                    g_lights.push_back({x, y, z, f.size, f.show, f.r, f.g, f.b, d, false, f.type});
                 }
             }
+            }
+            g_dips.collectedMax = std::max(g_dips.collectedMax, uint32_t(g_lights.size()));
             // the nearest when more than the buffer takes (the pool's order dropped lights here and there)
             if (g_lights.size() > kMaxLights)
             {
@@ -409,8 +434,9 @@ namespace vcs::world_hd_coronas
         }
 
         // the game's share of a light it draws itself at this position (0 when it does not): the render's fade from half
-        // the show distance to all of it - not the slot's current alpha, which follows the game's flicker and fade-in and
-        // made ours pulse against it
+        // the show distance to all of it, times the slot's current alpha for a steady light (its fade-in when the game
+        // takes it over: without it the sum dipped) - not for a flickering one, whose slot alpha stays while the game
+        // turns its colour black (with it the two pulsed against each other)
         float gameAlpha(const Light &l, float depth)
         {
             for (uint32_t i = 0; i < kCoronaSlots; ++i)
@@ -428,7 +454,8 @@ namespace vcs::world_hd_coronas
                     k = 0.0f;
                 else if (depth >= half)
                     k = 1.0f - (depth - half) / half;
-                return k;
+                const bool flickers = l.type == 2 || l.type == 3 || l.type >= 10;
+                return flickers ? k : float(rd8(s + 0x44u)) / 255.0f * k;
             }
             return 0.0f;
         }
@@ -478,6 +505,8 @@ namespace vcs::world_hd_coronas
             {
                 if (n + 6u > room)
                     break;
+                if (g_debugLevel == 5)
+                    g_dips.now[DipTrack::key(l)] = {-1, 0u}; // (collected; off screen until set below)
                 const float px = l.x + ox, py = l.y + oy, pz = l.z + oz;
                 float out[4];
                 for (int c = 0; c < 4; ++c)
@@ -494,6 +523,12 @@ namespace vcs::world_hd_coronas
                 a *= 1.0f - (1.0f - kFarDim) * std::clamp((d - kDimFrom) / (lreach - kDimFrom), 0.0f, 1.0f);
                 const float growth = std::clamp(1.0f + (kGrowMax - 1.0f) * (d - kGrowFrom) / (kGrowTo - kGrowFrom), 1.0f, kGrowMax);
                 const int alpha = int(a * 255.0f);
+                if (g_debugLevel == 5 && l.type != 2 && l.type != 3 && l.type < 10)
+                {
+                    const float game = gameAlpha(l, w);
+                    g_dips.now[DipTrack::key(l)] = {alpha, uint32_t(game > 0.0f) | uint32_t(d > lreach - kEdgeFade) << 1 | uint32_t(l.traffic) << 2 |
+                                                                 uint32_t(l.type & 0xF) << 3 | uint32_t(d) << 8};
+                }
                 if (alpha < 2)
                     continue;
                 // the sprite as CCoronas::Render sizes it: 448 / depth per metre, wider by 1.4285715 / the aspect, grown
@@ -556,6 +591,36 @@ namespace vcs::world_hd_coronas
                                  l.x, l.y, l.z, d, sx, sy, w, hw, hh, z, alpha, ir, ig, ib);
             }
             g_statDrawn.store(drawn, std::memory_order_relaxed);
+            if (g_debugLevel == 5)
+            {
+                for (const auto &[k, v] : g_dips.last)
+                {
+                    if (v.first < 100)
+                        continue;
+                    const auto it = g_dips.now.find(k);
+                    const bool gone = it == g_dips.now.end();
+                    if (!gone && (it->second.first < 0 || it->second.first * 10 >= v.first * 3))
+                        continue;
+                    ++(gone ? g_dips.gone : g_dips.dropped);
+                    if (g_dips.logged++ < 200u)
+                        std::fprintf(stderr, "[hdcorona-dip] frame %u: light at %.1f,%.1f, %u m: %s: alpha %d -> %d (game corona there %u -> %u, edge %u, traffic %u, type %u)\n",
+                                     g_statFrames.load(), float(int32_t(k >> 40)) * 0.5f, float(int32_t(uint32_t(k >> 20) & 0xFFFFFu) << 12 >> 12) * 0.5f, v.second >> 8,
+                                     gone ? "not collected" : "dimmed", v.first, gone ? 0 : it->second.first, v.second & 1u,
+                                     gone ? 0u : it->second.second & 1u, gone ? 0u : (it->second.second >> 1) & 1u, (v.second >> 2) & 1u, (v.second >> 3) & 0xFu);
+                }
+                g_dips.last.swap(g_dips.now);
+                g_dips.now.clear();
+                uint32_t used = 0;
+                for (uint32_t i = 0; i < kCoronaSlots; ++i)
+                    used += rd32(kCoronaTable + i * kCoronaStride + 0x20u) != 0;
+                g_dips.slotsMax = std::max(g_dips.slotsMax, used);
+                if (++g_dips.frames % 150u == 0u)
+                {
+                    std::fprintf(stderr, "[hdcorona-dip] last 150 frames: %u gone, %u dimmed; corona table at most %u of %u; lights collected at most %u\n", g_dips.gone,
+                                 g_dips.dropped, g_dips.slotsMax, kCoronaSlots, g_dips.collectedMax);
+                    g_dips.gone = g_dips.dropped = g_dips.slotsMax = g_dips.collectedMax = 0;
+                }
+            }
             return n;
         }
 

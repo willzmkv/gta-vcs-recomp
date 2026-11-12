@@ -2103,6 +2103,13 @@ Found by a helper agent reading the decompiled code (its findings are also the h
   distance): at most 1.25 m, x1 at 100 m to x2 at 1000 m; dimmer with distance (50 % at the reach) and fading over its
   last 100 m - a row of lamps far down a street seen from its pavement summed into one blob at full brightness. The
   nearest 1000 lights when more.
+- **Lamp posts are objects 80-320 m around the player** (measured with `VCS_HD_CORONADEBUG=5` on a night cruise): a map
+  instance with 2D effects in the player's streaming area leaves the dummy pool for the object pool (`*0x487AA4`, 0x220
+  each), and the game draws an object's corona within its show distance (100 m) only - so the far coronas, taken from
+  the dummies alone, went out 100-320 m away and came back (the player: "coronas almost go out and come back at full
+  intensity"). They are taken from both pools now; a light the game draws gets the complement of its slot's live alpha
+  (the fade-in when the game takes it over) unless it flickers (types 2 / 3 / 10 / 11: the game turns their colour
+  black, not their alpha). The corona table is at most 53 of 56 used while driving: it does not overflow.
 - **Sub-pixel far coronas** (the player: lamps "moving up and down, side to side"): Im2D vertices hold whole PS2 pixels
   (s16), and a far sprite a few pixels across stepped one PS2 pixel - 3 to 6 screen pixels - at a time. Measured with
   marker colours in an F12 dump (`VCS_HD_CORONADEBUG=4`): vertex colours reach the GS halved (0x41 -> 0x20, alpha 0xFE
