@@ -290,6 +290,12 @@ city (1325, -325) 196 / 203 -> 216 / 222 (render worker 5.0 -> 3.3 ms), the othe
 - Memory grows while new places are visited (529 -> 1,587 MB over the 24-minute soak) and converges when they repeat
   (three rounds of the same 8 spots: +260, +89, +45 MB): caches filling (texture and mesh caches are LRU-bounded; the
   RSL recordings ~115 MB of it), not a leak.
+  **Correction (2026-11-12):** the RSL recordings (`g_recordings`, src/game/vcs_rsl_world.cpp) were never dropped -
+  one per (kind, address, length), ~32 KB each. With the detailed city drawn far (its sector packets move about their
+  heap) a 5-minute loop of the cruise route left 28,000 of them (+180 MB a minute) and a 3-hour soak reached 6.3 GB;
+  without it the climb was slower (1.1 -> 2.75 GB in an hour of soak). They are now capped at 16,384, the least
+  recently met half dropped when over (a dropped one is recorded again when next met): the loop stays at 1.6-1.7 GB
+  (it was 3.4 GB at 11 minutes), cruise 144.7 fps against 145.0 before.
 
 ### 15. The helicopter's dust at high internal resolutions (2026-10-30)
 

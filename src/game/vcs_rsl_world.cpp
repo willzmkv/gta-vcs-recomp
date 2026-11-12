@@ -217,6 +217,7 @@ namespace vcs::rslworld
             std::vector<Op> ops;
             bool setsMask = false, setsRow = false, setsCycle = false; // the block's STMASK / STROW / STCYCL
             uint32_t mask = 0, row[4] = {}, finalCycle = 0;             // the VIF mask / row / cycle it leaves
+            uint64_t used = 0; // g_recordingClock when last met (the oldest go first: evictRecordings)
         };
 
         bool rawOps() // step 5e: VCS_RSL_RAW=0 refuses blocks with BASE / OFFSET / ITOP / MPG as before
@@ -338,6 +339,33 @@ namespace vcs::rslworld
         };
 
         std::unordered_map<uint64_t, Recording> g_recordings; // by (kind, address, length)
+        // Recordings are dropped once they are many, the least recently met first: they were never dropped, and blocks
+        // that move (the HD world's sector packets in their heap, 2026-11-12) left one behind per address - 28,000 in a
+        // 5-minute loop of the cruise route, ~32 KB each, 180 MB a minute; a 3-hour soak reached 6 GB and stopped. A
+        // dropped one is met again as "no recording": recorded anew (replaySkipped flattens the block from guest RAM).
+        constexpr size_t kMaxRecordings = 16384;
+        uint64_t g_recordingClock = 0, g_recordingsEvicted = 0;
+
+        void evictRecordings()
+        {
+            if (g_recordings.size() <= kMaxRecordings)
+                return;
+            std::vector<uint64_t> ages;
+            ages.reserve(g_recordings.size());
+            for (const auto &[key, rec] : g_recordings)
+                ages.push_back(rec.used);
+            auto mid = ages.begin() + ptrdiff_t(ages.size() / 2);
+            std::nth_element(ages.begin(), mid, ages.end());
+            const uint64_t cut = *mid;
+            for (auto it = g_recordings.begin(); it != g_recordings.end();)
+                if (it->second.used < cut)
+                {
+                    it = g_recordings.erase(it);
+                    ++g_recordingsEvicted;
+                }
+                else
+                    ++it;
+        }
         struct Stats
         {
             uint64_t blocks = 0, replayed = 0, recorded = 0, notReplayable = 0, changing = 0;
@@ -519,8 +547,9 @@ namespace vcs::rslworld
                                  (unsigned long long)s.notReplayable, (unsigned long long)s.changing);
                 g_stats[k] = Stats{};
             }
-            std::fprintf(stderr, "[rsl-world] %llu packets replayed, %llu marks without a length, %llu raster uploads named; %zu recordings\n",
-                         (unsigned long long)g_packets, (unsigned long long)g_unmarked, (unsigned long long)g_rasterMarks, g_recordings.size());
+            std::fprintf(stderr, "[rsl-world] %llu packets replayed, %llu marks without a length, %llu raster uploads named; %zu recordings (%llu dropped)\n",
+                         (unsigned long long)g_packets, (unsigned long long)g_unmarked, (unsigned long long)g_rasterMarks, g_recordings.size(),
+                         (unsigned long long)g_recordingsEvicted);
             if (!g_refusals.empty())
             {
                 std::fprintf(stderr, "[rsl-world] not replayable:");
@@ -623,6 +652,7 @@ namespace vcs::rslworld
             if (it != g_recordings.end())
             {
                 Recording &rec = it->second;
+                rec.used = ++g_recordingClock;
                 if (!rec.ops.empty() && rec.replayable && rec.mode == memory.vif1_regs.mode && rec.cycle == memory.vif1_regs.cycle)
                 {
                     replay(memory, rec);
@@ -781,7 +811,9 @@ namespace vcs::rslworld
             }
             Stats &stats = g_stats[d.kind];
             ++stats.blocks;
+            evictRecordings(); // (before the reference below: erasing moves nothing, but not the one about to be used)
             Recording &rec = g_recordings[(uint64_t(d.kind) << 56) | (uint64_t(d.addr & kRamMask) << 24) | units];
+            rec.used = ++g_recordingClock;
             if (rec.skip && !g_verify)
             {
                 --rec.skip;
