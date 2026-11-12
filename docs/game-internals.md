@@ -2090,6 +2090,13 @@ Found by a helper agent reading the decompiled code (its findings are also the h
   distance): at most 1.25 m, x1 at 100 m to x2 at 1000 m; dimmer with distance (50 % at the reach) and fading over its
   last 100 m - a row of lamps far down a street seen from its pavement summed into one blob at full brightness. The
   nearest 1000 lights when more.
+- **Sub-pixel far coronas** (the player: lamps "moving up and down, side to side"): Im2D vertices hold whole PS2 pixels
+  (s16), and a far sprite a few pixels across stepped one PS2 pixel - 3 to 6 screen pixels - at a time. Measured with
+  marker colours in an F12 dump (`VCS_HD_CORONADEBUG=4`): vertex colours reach the GS halved (0x41 -> 0x20, alpha 0xFE
+  -> 0x7F) and u, v arrive as float STQ (q 1). So each far corona vertex carries its fraction (1/16 pixel) in the low 4
+  bits of u and v (1.15) with bit 4 set and alpha 0xFE as the mark, and the renderer (gs_hw.cpp `recordPrimitive`,
+  PATH2 only) adds it back. Traffic lights far: half the lamps' reach, colour x 0.5 (the player: seen as far as the
+  lamps they looked unreal).
 
 ### 9l. Parked cars: the car generators (2026-11-12)
 

@@ -2894,6 +2894,23 @@ namespace
         void recordPrimitive(HwState s, HwVertex *out, uint32_t n, const GSPrimitiveBatch *batch, float ofx, float ofy,
                              uint32_t source, bool bookkeeping)
         {
+            // [gta-recomp] Sub-pixel 2D: RenderWare's Im2D takes whole PS2 pixels, so a small sprite steps a PS2 pixel at a
+            // time - several screen pixels at a higher internal resolution (the far lamp coronas wandering as the camera
+            // moved; src/game/vcs_world_hd_coronas.cpp). A vertex that carries its fraction (1/16 pixel) in the low bits
+            // of its texture coordinates (1.15 in Im2D: s * 32768, bit 4 set in both as the mark, alpha 0x7F) gets it
+            // back here; the coordinates move by under 1/1000 of the texture.
+            if (gsDrawSourcePath(source) == 2u && !s.fst)
+                for (uint32_t i = 0; i < n; ++i)
+                {
+                    if (out[i].a != 0x7Fu || out[i].q != 1.0f)
+                        continue;
+                    const int32_t us = static_cast<int32_t>(std::lround(out[i].s * 32768.0f)),
+                                  ut = static_cast<int32_t>(std::lround(out[i].t * 32768.0f));
+                    if (!(us & 0x10) || !(ut & 0x10))
+                        continue;
+                    out[i].x += static_cast<float>(us & 0xF) * 0.0625f;
+                    out[i].y += static_cast<float>(ut & 0xF) * 0.0625f;
+                }
             if (!s.iip) // [gta-recomp] flat: the GS colours with the last vertex; give every vertex that colour
                 for (uint32_t i = 0; i + 1 < n; ++i)
                 {

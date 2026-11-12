@@ -77,6 +77,9 @@ namespace vcs::world_hd_coronas
         constexpr uint32_t kTrafficGreen = 0x004883C0u;  // non-zero: every traffic light green
         constexpr uint32_t kRain = 0x004CD13Cu;
         constexpr uint32_t kTrafficBright = 0x3300u;     // *(kRenderGlobals) + this: the traffic coronas' brightness
+        // Traffic lights far: half the lamps' reach and dimmer than the game's x 0.7 - seen as far as the lamps they
+        // looked unreal (the player, 2026-11-12)
+        constexpr float kTrafficReach = 0.5f, kTrafficDim = 0.5f;
 
         PS2Runtime::RecompiledFunction g_render = nullptr, g_im2d = nullptr, g_stateSet = nullptr;
         uint8_t *g_ram = nullptr;
@@ -88,7 +91,8 @@ namespace vcs::world_hd_coronas
         {
             float x, y, z, size, show;
             uint8_t r, g, b;
-            float d; // from the camera
+            float d;      // from the camera
+            bool traffic; // a traffic light: half the reach (TrafficReach)
         };
         std::vector<Light> g_lights; // this frame's far lamps (game thread)
         uint32_t g_texture = 0;      // RwRenderStateSet(1, texture): the current one
@@ -314,12 +318,12 @@ namespace vcs::world_hd_coronas
                     const float y = rdf(e + 4u) * x0 + rdf(e + 0x14u) * ly + rdf(e + 0x24u) * lz + ey;
                     const float z = rdf(e + 8u) * x0 + rdf(e + 0x18u) * ly + rdf(e + 0x28u) * lz + ez;
                     const uint32_t globals = rd32(kRenderGlobals);
-                    const float bright = 0.7f * (valid(globals + kTrafficBright) ? rdf(globals + kTrafficBright) : 1.0f);
+                    const float bright = kTrafficDim * (valid(globals + kTrafficBright) ? rdf(globals + kTrafficBright) : 1.0f);
                     const float r = phase == 0 ? 0.0f : 255.0f, g = phase == 0 ? 255.0f : phase == 1 ? 128.0f : 0.0f;
                     const float d = std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy) + (z - cz) * (z - cz));
-                    if (d <= limit && ++g_traffic)
+                    if (d <= reach * kTrafficReach + 10.0f && ++g_traffic)
                         g_lights.push_back({x, y, z, 1.75f, 50.0f, uint8_t(std::clamp(r * bright, 0.0f, 255.0f)),
-                                            uint8_t(std::clamp(g * bright, 0.0f, 255.0f)), 0, d});
+                                            uint8_t(std::clamp(g * bright, 0.0f, 255.0f)), 0, d, true});
                     continue;
                 }
                 const std::vector<Effect> &fx = effects(model);
@@ -347,7 +351,7 @@ namespace vcs::world_hd_coronas
                         continue;
                     }
                     g_maxDistance = std::max(g_maxDistance, d);
-                    g_lights.push_back({x, y, z, f.size, f.show, f.r, f.g, f.b, d});
+                    g_lights.push_back({x, y, z, f.size, f.show, f.r, f.g, f.b, d, false});
                 }
             }
             // the nearest when more than the buffer takes (the pool's order dropped lights here and there)
@@ -429,17 +433,30 @@ namespace vcs::world_hd_coronas
             return 0.0f;
         }
 
-        // one Im2D vertex (16 bytes): u, v (1.15), r, g, b, a, x, y (pixels, 640 x 448), z
+        // One Im2D vertex (16 bytes): u, v (1.15), r, g, b, a, x, y (whole pixels, 640 x 448), z. Im2D has no fraction
+        // of a pixel: a small far sprite stepped a PS2 pixel at a time - 3 to 6 screen pixels at a higher internal
+        // resolution - and the lamps wandered as the camera moved (the player, 2026-11-12). The fraction (1/16 pixel)
+        // rides in the low bits of u and v with bit 4 set as the mark and alpha 0xFE (0x7F at the GS: colours reach it
+        // halved); the renderer adds it back (gs_hw.cpp recordPrimitive, PATH2 only). The texture moves by < 1/1000.
+        uint16_t withFraction(float t, int fraction)
+        {
+            int u = int(t * 32768.0f + 0.5f);
+            if (u >= 0x20)
+                u -= 0x20; // (stays inside the texture)
+            return uint16_t((u & ~0x1F) | 0x10 | (fraction & 0xF));
+        }
+
         void vertex(uint32_t at, float u, float v, uint8_t r, uint8_t g, uint8_t b, float x, float y, uint32_t z)
         {
-            wr16(at, uint16_t(int(u * 32768.0f + 0.5f)));
-            wr16(at + 2u, uint16_t(int(v * 32768.0f + 0.5f)));
-            wr8(at + 4u, r);
-            wr8(at + 5u, g);
-            wr8(at + 6u, b);
-            wr8(at + 7u, 0xFFu); // (0: the renderer drops the pixels)
-            wr16(at + 8u, uint16_t(int16_t(int(x))));
-            wr16(at + 0xAu, uint16_t(int16_t(int(y))));
+            const float fx = std::floor(x), fy = std::floor(y);
+            wr16(at, withFraction(u, int((x - fx) * 16.0f)));
+            wr16(at + 2u, withFraction(v, int((y - fy) * 16.0f)));
+            wr8(at + 4u, g_debugLevel == 4 ? 0x41u : r); // (=4: fixed colours, to see what reaches the renderer)
+            wr8(at + 5u, g_debugLevel == 4 ? 0x42u : g);
+            wr8(at + 6u, g_debugLevel == 4 ? 0x43u : b);
+            wr8(at + 7u, 0xFEu); // (0: the renderer drops the pixels; 0xFE marks the fraction above)
+            wr16(at + 8u, uint16_t(int16_t(int(fx))));
+            wr16(at + 0xAu, uint16_t(int16_t(int(fy))));
             wr32(at + 0xCu, z);
         }
 
@@ -472,8 +489,9 @@ namespace vcs::world_hd_coronas
                 const float d = std::sqrt((l.x - cx) * (l.x - cx) + (l.y - cy) * (l.y - cy) + (l.z - cz) * (l.z - cz));
                 // its alpha: what the game's own corona leaves (none beyond its show distance), fading at the reach
                 float a = 1.0f - gameAlpha(l, w);
-                a *= std::clamp((reach - d) / kEdgeFade, 0.0f, 1.0f);
-                a *= 1.0f - (1.0f - kFarDim) * std::clamp((d - kDimFrom) / (reach - kDimFrom), 0.0f, 1.0f);
+                const float lreach = l.traffic ? reach * kTrafficReach : reach;
+                a *= std::clamp((lreach - d) / (l.traffic ? kEdgeFade * 0.5f : kEdgeFade), 0.0f, 1.0f);
+                a *= 1.0f - (1.0f - kFarDim) * std::clamp((d - kDimFrom) / (lreach - kDimFrom), 0.0f, 1.0f);
                 const float growth = std::clamp(1.0f + (kGrowMax - 1.0f) * (d - kGrowFrom) / (kGrowTo - kGrowFrom), 1.0f, kGrowMax);
                 const int alpha = int(a * 255.0f);
                 if (alpha < 2)
