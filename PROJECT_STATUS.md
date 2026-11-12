@@ -42,8 +42,9 @@ machine (runs while the player compiled shaders elsewhere showed 77-93 fps - not
    build/analysis/hd_world: the player back at the save, the safehouse interior right, no VU1 / list errors). In the
    shop the draw check reported every record of the game's own list (the forced cell's copies are not among those
    gatherGame knows); harmless (the game's records are drawn regardless) and now skipped while a cell is forced.
-   `tools/saves.py` itself no longer runs: it expects "1 Soldier" on the Fort Baxter card, which now holds
-   "1 Cholo Vitorioso". Still untested: other missions, the bridge at speed. Soak (2026-11-12, 1 h of
+   `tools/saves.py` (recover / save / load / delete / backup) all ok with `VCS_HD_RADIUS=3` - after making it take the
+   rig card as it is (it expected "1 Soldier" and an English save name; this machine's card holds "1 Cholo
+   Vitorioso" and the game saves in Portuguese). Still untested: other missions, the bridge at speed. Soak (2026-11-12, 1 h of
    autodrive each, `tools/soak.py`): radius 3 and radius 0 both 120/120 samples ok, no crash / hang / falling, 30 fps
    held. Private memory 1.17 -> 3.06 GB at radius 3, 1.10 -> 2.75 GB at radius 0: the same climb (the renderer's
    texture / mesh caches filling at each new place, PERFORMANCE.md 14 - bounded by count, 3000 textures / 12000

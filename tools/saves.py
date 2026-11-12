@@ -33,6 +33,26 @@ ROOT = rig.ROOT
 FOLDER = ("mc0", "BASLUS-21590GTA40001")
 
 
+def normalise_seed(folder):
+    """The steps below expect the card the check was written with: slot 1 "1 Soldier" plus the stray "1 In the
+    beginning". The rig's Fort Baxter card is each machine's own (build/ is not in git; one holds "1 Cholo Vitorioso"
+    alone): its slot-1 save is renamed "1 Soldier" and copied as the stray when that is missing. A save's title on
+    the card is its file name after the slot number, so the copies load as the original."""
+    order_path = os.path.join(folder, ".ps2x-order")
+    order = open(order_path).read().split("\n")
+    slot1 = sorted(f for f in os.listdir(folder) if f.startswith("1 "))
+    if not slot1:
+        return
+    main_save = "1 Soldier" if "1 Soldier" in slot1 else next(f for f in slot1 if f != "1 In the beginning")
+    if main_save != "1 Soldier":
+        os.rename(os.path.join(folder, main_save), os.path.join(folder, "1 Soldier"))
+        order = ["1 Soldier" if o == main_save else o for o in order]
+    if not os.path.exists(os.path.join(folder, "1 In the beginning")):
+        shutil.copyfile(os.path.join(folder, "1 Soldier"), os.path.join(folder, "1 In the beginning"))
+        order = [o for o in order if o] + ["1 In the beginning", ""]
+    open(order_path, "w", newline="\n").write("\n".join(order))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("out", nargs="?", default=os.path.join(ROOT, "build", "saves"))
@@ -44,6 +64,7 @@ def main():
     folder = os.path.join(data, *FOLDER)
     seed = os.path.join(out, "seed")
     rig.copy_card(os.path.join(ROOT, "build", "rig", "saves", "fortbaxter", "mc0"), os.path.join(seed, "mc0"))
+    normalise_seed(os.path.join(seed, *FOLDER))
     if os.path.isdir(os.path.join(data, "backups")):
         shutil.rmtree(os.path.join(data, "backups"))
     if os.name == "nt":
@@ -92,7 +113,8 @@ def main():
         time.sleep(3)
         keys("save", "Shift@3", "Down", "Down", "Shift@3", "Up", "Shift@12", "Shift@4")
         new = [f for f in slot_files() if f not in before]
-        checks["save"] = {"ok": new == ["2 Kill Phil%3A Part 2"] and
+        # (named in the game's language: "2 Matar Phil%3A Parte 2" in Portuguese - slot 2, the colon encoded)
+        checks["save"] = {"ok": len(new) == 1 and new[0].startswith("2 ") and "%3A" in new[0] and
                           os.path.getsize(os.path.join(folder, new[0])) == 98304, "new_files": new}
         # load slot 1 (Map -> Brief -> Game tab), from the other end of the map: the load must bring the player back.
         # Trainer god mode on first: its tick script's slot is one the load fills with the save's scripts, which the
@@ -123,7 +145,7 @@ def main():
         if backups:
             with zipfile.ZipFile(backups[-1]) as z:
                 held = [n.rsplit("/", 1)[-1] for n in z.namelist() if n.rsplit("/", 1)[-1][:1].isdigit()]
-        checks["backup"] = {"ok": "2 Kill Phil%3A Part 2" in held, "zips": [os.path.basename(b) for b in backups],
+        checks["backup"] = {"ok": bool(new) and new[0] in held, "zips": [os.path.basename(b) for b in backups],
                             "slots_in_newest": held}
     finally:
         g.quit()
