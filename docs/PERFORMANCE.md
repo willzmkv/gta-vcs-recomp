@@ -1114,6 +1114,35 @@ About 7% of the GS stage's time. Uncapped, the stage spends what it saves on mor
 `texture_check.py`'s game check with the HD pack (1647 files matched and loaded, the five spots drawn).
 `build/cruise/gs_prof`, `gs_prof2`.
 
+### 43. The far crowd's draws: real peds as proxies; the proxies were never drawn (2026-11-12)
+
+The player's settings with the population sliders at 50 (police station, noon, ~130 peds): game thread 13.7 ms, render
+worker 13.5 ms, 65 fps; with the population at the game's own 6.6 / 6.0 ms, 135 fps. View distance, HD world, distant
+traffic / crowds cost nothing measurable - the real population does. Most of it stands 100-325 m out and each ped
+went through the game's whole draw: the skin palette (~30 bones, a 3x4 product each, inside `FUN_0039EC18`), its
+packets, the worker's skinning and copies. Not drawing peds past 110 m (`VCS_PED_DRAW_MAX=110`, a probe) took the
+render worker 16.8 -> 11.2 ms and the game thread 1.6 ms lower: the ceiling of a cheaper far draw.
+
+- **Real peds as proxies** (vcs_distant.cpp, `VCS_PED_PROXY=<m>`, 0 off): past 110 m a random ped skips CEntity::Render
+  and is drawn as the template's posed mesh at its own place (the distant crowds' way); the first of each model a
+  frame draws as the game does and is the template. Only with the population raised.
+- **The proxies had never been drawn**: `drawLitProxies` / the rigid proxies tested a proxy's box against rows 28-31
+  (the GS screen matrix) instead of the clip matrix 24-27 (`litClip`'s), and skipped any part under ~6 pixels - a
+  ped's part (0.3-0.8 m) past ~100 m. Every run counted 0 drawn, millions culled: distant traffic and distant crowds
+  simulated their proxies but never showed them. Now 24-27 and ~1.5 pixels: 15.6M drawn, 10.5M culled in a run.
+  `VCS_PROXY_DEBUG=1` logs a sample of the culls with the reason.
+
+Little Havana, distant traffic / crowds off, two alternating rounds:
+
+| | game thread | render worker | GS stage | fps |
+|---|---|---|---|---|
+| real peds as proxies | 13.3-13.7 | 14.7-15.0 | 14.9-15.8 | 58-59 |
+| the game's draw | 13.3-14.1 | 14.7-15.6 | 17.8-18.3 | 59-60 |
+
+The GS stage gains ~2.5 ms; the frame rate does not move here - the three threads sit at 13-15 ms each, and a proxy
+is still one native draw per part. With distant traffic / crowds at 100 (now drawn) the GS stage rises to 17-20 ms in
+Little Havana. Next for the far crowd: one draw for all of a template's proxies (instancing).
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker

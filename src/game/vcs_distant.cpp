@@ -140,6 +140,27 @@ namespace vcs::distant
         std::mutex g_framesMutex;
         std::shared_ptr<const FrameGroups> g_frames[8];
         std::atomic<uint64_t> g_statFrames{0}, g_statTemplates{0}, g_statAssigned{0}, g_statDrawn{0}, g_statStale{0};
+
+        // Real peds far away drawn as proxies (2026-11-12, PERFORMANCE.md 43): with the population distance raised most
+        // of the crowd stands 100-325 m out, and each one went through the game's whole draw (its skin palette, ~30 bones,
+        // its packets, the worker's skinning and copies) - not drawing them past 110 m took the render worker from 16.8
+        // to 11.2 ms and the game thread 1.6 ms lower. A random ped farther than this is drawn as a template's posed mesh
+        // at its own place instead (the distant crowds' way): the first one of each model a frame draws as the game does
+        // and becomes the template, the others skip CEntity::Render and join its proxies. They stay real peds (AI,
+        // physics, paths); only their draw is cheap. VCS_PED_PROXY=<m> moves the distance, 0 turns it off. Only while
+        // the population is raised: the game draws peds to ~70 m otherwise.
+        float pedProxyDistance()
+        {
+            static const float d = [] {
+                const char *e = std::getenv("VCS_PED_PROXY");
+                return e && *e ? static_cast<float>(std::atof(e)) : 110.0f;
+            }();
+            return d;
+        }
+        bool realPedProxies() { return pedProxyDistance() > 0.0f && vcs::distance::populationRaised(); }
+        std::vector<Proxy> g_realPedProxies;        // this frame's (game thread), handed over at frameKicked
+        std::vector<uint32_t> g_realPedModels;      // the models drawn by the game this frame (their templates)
+        std::atomic<uint64_t> g_statRealProxied{0}, g_statRealDrawn{0};
         thread_local std::shared_ptr<const FrameGroups> t_frame;
         thread_local const FrameGroups::Group *t_group = nullptr;
 
@@ -416,7 +437,7 @@ namespace vcs::distant
                 if (vtable != kCarVtable && vtable != kCar2Vtable)
                     return;
             }
-            else if (g_crowds.load(std::memory_order_relaxed) > 0 && isRandomPed(entity))
+            else if ((g_crowds.load(std::memory_order_relaxed) > 0 || realPedProxies()) && isRandomPed(entity))
                 ped = true;
             else
                 return;
@@ -436,11 +457,55 @@ namespace vcs::distant
             g_group = static_cast<uint16_t>(g_rendered.size());
         }
 
+        // a random ped past pedProxyDistance() whose model the game has drawn this frame: a proxy, not drawn here
+        bool proxyRealPed(uint32_t entity)
+        {
+            if (!realPedProxies() || !isRandomPed(entity))
+                return false;
+            const float x = rdf(entity + 0x30u), y = rdf(entity + 0x34u), z = rdf(entity + 0x38u);
+            const float dx = x - rdf(kCameraPos), dy = y - rdf(kCameraPos + 4u), dz = z - rdf(kCameraPos + 8u);
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz), far = pedProxyDistance();
+            if (d <= far)
+                return false;
+            uint16_t model;
+            std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
+            if (std::find(g_realPedModels.begin(), g_realPedModels.end(), model) == g_realPedModels.end())
+            {
+                g_realPedModels.push_back(model); // the first of its model: drawn, the template
+                g_statRealDrawn.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+            Proxy p{};
+            readMatrix(entity, p.m);
+            p.distance = d;
+            p.id = (entity >> 4) & 0xFFFFu;
+            p.model = model;
+            g_realPedProxies.push_back(p);
+            g_statRealProxied.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
         PS2_GUEST_CC void entityRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_rdram = rdram;
             if (ctx->pc == kEntityRender)
-                openGroup(GPR_U32(ctx, 4));
+            {
+                const uint32_t entity = GPR_U32(ctx, 4);
+                if (proxyRealPed(entity))
+                {
+                    ctx->pc = GPR_U32(ctx, 31); // replaced entirely (the hook rule): the proxy draws it
+                    return;
+                }
+                openGroup(entity);
+                // a near ped of a model counts as its template too
+                if (realPedProxies() && isRandomPed(entity))
+                {
+                    uint16_t model;
+                    std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
+                    if (std::find(g_realPedModels.begin(), g_realPedModels.end(), model) == g_realPedModels.end())
+                        g_realPedModels.push_back(model);
+                }
+            }
             g_entityRender(rdram, ctx, runtime);
         }
 
@@ -693,6 +758,9 @@ namespace vcs::distant
     {
         g_renderedEntity = 0;
         g_group = 0;
+        std::vector<Proxy> realPeds;
+        realPeds.swap(g_realPedProxies);
+        g_realPedModels.clear();
         if (g_rendered.empty())
         {
             if (g_frames[itemFrame & 7u])
@@ -713,6 +781,7 @@ namespace vcs::distant
             carProxies = g_published;
             pedProxies = g_publishedPeds;
         }
+        pedProxies.insert(pedProxies.end(), realPeds.begin(), realPeds.end());
         for (int kind = 0; kind < 2; ++kind)
         {
         const bool peds = kind == 1;
@@ -894,7 +963,9 @@ namespace vcs::distant
                                " added=" + std::to_string(g_statAdded.load()) + " assigned=" + std::to_string(g_statAssigned.load()) +
                                " drawn=" + std::to_string(g_statDrawn.load()) + " proxydraws=" + std::to_string(g_statProxy[0].load()) + "/" +
                                std::to_string(g_statProxy[1].load()) + "/" + std::to_string(g_statProxy[2].load()) +
-                               " stale=" + std::to_string(g_statStale.load());
+                               " stale=" + std::to_string(g_statStale.load()) +
+                               " realproxied=" + std::to_string(g_statRealProxied.load()) +
+                               " realtemplates=" + std::to_string(g_statRealDrawn.load());
             for (size_t i = 0; i < p.size() && i < 8; ++i)
             {
                 char b[96];

@@ -466,8 +466,11 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             std::memcpy(&camMode, rdram + 0x006F4540u + mode * 0x270u, 2);
             const float own = rdf(kLodMultiplier) / view, gen = rdf(kGenMultiplier), ped = own * peds;
             wrf(0x004CD5C0u, camMode == 1 || camMode == 0x25 ? 1e6f : own * (own * 400.0f));
-            wrf(0x004CD5D8u, ped * (ped * 4900.0f));
-            wrf(0x004CD5CCu, ped * (ped * 4900.0f));
+            // [probe] VCS_PED_DRAW_MAX=<m>: peds drawn no farther than that (what drawing the far crowd costs)
+            static const float pedDrawMax = envFloat("VCS_PED_DRAW_MAX", 1e9f);
+            const float pedDraw = std::min(70.0f * ped, pedDrawMax) / 70.0f;
+            wrf(0x004CD5D8u, pedDraw * (pedDraw * 4900.0f));
+            wrf(0x004CD5CCu, pedDraw * (pedDraw * 4900.0f));
             wrf(0x004CD5BCu, gen * (gen * 4900.0f));
             wrf(0x004CD5C4u, gen * (gen * 22500.0f));
             wrf(0x004CD5D0u, gen * (gen * 8100.0f));

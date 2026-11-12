@@ -2246,6 +2246,10 @@ namespace
             setupMatrices(tmp, 0, 16, 12, 24);
             Vec4 m[4];
             foldMatrix(tmp, 28, m);
+            Vec4 cm[4];
+            foldMatrix(tmp, 24, cm);
+            // the box against the clip matrix (24-27, as the draws' own clip test 0x0c38 / litClip): it was tested against
+            // 28-31, the GS screen matrix, where every corner lies outside +-w - no proxy was ever drawn (2026-11-12)
             uint32_t all = 0x3Fu;
             for (int corner = 0; corner < 8 && all; ++corner)
             {
@@ -2254,7 +2258,7 @@ namespace
                 v.v[1] = corner & 2 ? hi[1] : lo[1];
                 v.v[2] = corner & 4 ? hi[2] : lo[2];
                 v.v[3] = 1.0f;
-                const Vec4 q = transform(m, v);
+                const Vec4 q = transform(cm, v);
                 all &= clipFlags(q, q.v[3]);
             }
             if (all)
@@ -2263,8 +2267,6 @@ namespace
                 vcs::distant::noteProxy(1);
                 continue;
             }
-            Vec4 cm[4];
-            foldMatrix(tmp, 24, cm);
             for (int r = 0; r < 4; ++r)
             {
                 putRow(k + r * 4, m[r]);
@@ -2494,8 +2496,19 @@ namespace
             for (int c = 0; c < 3; ++c)
                 W[c] = b[0].v[c] * centre.v[0] + b[1].v[c] * centre.v[1] + b[2].v[c] * centre.v[2] + b[3].v[c];
             const float z_cam = br[0].v[2] * W[0] + br[1].v[2] * W[1] + br[2].v[2] * W[2] + br[3].v[2];
-            if (z_cam <= 0.0f || size < 0.005f * z_cam)
+            // a part under ~1.5 pixels of a 1080-line picture is skipped. The test is per part (a head, a torso: 0.3 -
+            // 0.8 m), and at 0.005 (~6 pixels) every part past ~100 m was skipped: no distant walker was ever drawn
+            // (16M proxy draws culled, none drawn) and the far real peds drawn as proxies vanished (2026-11-12)
+            static const bool debug = std::getenv("VCS_PROXY_DEBUG") != nullptr;
+            static std::atomic<int> logged{0};
+            auto why = [&](const char *reason) {
+                if (debug && logged.fetch_add(1) % 50000 == 0)
+                    std::fprintf(stderr, "[proxy] culled (%s): z %.1f size %.2f W %.1f %.1f %.1f P %.1f %.1f %.1f\n", reason, z_cam,
+                                 size, W[0], W[1], W[2], P[12], P[13], P[14]);
+            };
+            if (z_cam <= 0.0f || size < 0.001f * z_cam)
             {
+                why(z_cam <= 0.0f ? "behind" : "small");
                 vcs::distant::noteProxy(1);
                 continue;
             }
@@ -2504,15 +2517,20 @@ namespace
             const float bound = z_cam * 1.55f + size;
             if (std::abs(x_cam) > bound || std::abs(y_cam) > bound)
             {
+                why("outside");
                 vcs::distant::noteProxy(1);
                 continue;
             }
             for (int i = 0; i < 4; ++i)
                 storeF(tmp, i, b[i]);
             setupMatrices(tmp, 0, 16, 12, 24);
-            Vec4 m[4];
+            Vec4 m[4], cm[4];
             for (int r = 0; r < 4; ++r)
+            {
                 m[r] = loadF(tmp, 28 + r);
+                cm[r] = loadF(tmp, 24 + r);
+            }
+            // the box against the clip matrix 24-27 (as litClip), not 28-31 (the GS screen's): see the rigid proxies
             uint32_t all = 0x3Fu;
             for (int corner = 0; corner < 8 && all; ++corner)
             {
@@ -2521,17 +2539,15 @@ namespace
                 v.v[1] = corner & 2 ? hi[1] : lo[1];
                 v.v[2] = corner & 4 ? hi[2] : lo[2];
                 v.v[3] = 1.0f;
-                const Vec4 q = transform(m, v);
+                const Vec4 q = transform(cm, v);
                 all &= clipFlags(q, q.v[3]);
             }
             if (all)
             {
+                why("clipped");
                 vcs::distant::noteProxy(1);
                 continue;
             }
-            Vec4 cm[4];
-            for (int r = 0; r < 4; ++r)
-                cm[r] = loadF(tmp, 24 + r);
             for (int r = 0; r < 4; ++r)
             {
                 putRow(k + r * 4, m[r]);
