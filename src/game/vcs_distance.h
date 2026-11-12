@@ -13,4 +13,7 @@ namespace vcs::distance
     // Decorative distant life (`vcs::distant`) must stay strictly beyond these radii.
     float realCarOuterRadius();
     float realPedOuterRadius();
+    // Any of population distance / vehicle density / pedestrian density above the original (Enhancements > World's
+    // guards - cars kept in view - follow it: game/vcs_world_detail.cpp).
+    bool populationRaised();
 }

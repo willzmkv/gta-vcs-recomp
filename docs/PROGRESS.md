@@ -39,6 +39,30 @@
   - Added `props_boosted` counter to `lodstats` control command. Verified over 36,000 props boosted during gameplay with extended view distance, and exactly 0 boosted when `viewFactor == 1.0f` (100% authentic default preserved).
   - Verified with `tools/distance_check.py` PASS (23 visible entities at 100%, 74 visible entities at 352%, 23 visible entities returning to 100%).
 
+## 2026-11-12 - The population at 100: undone by the merge, held by its caps, appearing in view
+
+- After the merge of gothamor's main, Enhancements > World's spawner hooks (`vcs_world_detail.cpp`) wrote the
+  original caps (16 cars, 25 / 30 peds) and spawn chances right before every spawner: the fork's densities were undone.
+  Graphics > Distance and population owns the population now; Enhancements > World's three sliders are not shown, its
+  guards (cars in view kept, the vanish detector) follow the fork's sliders (DECISIONS.md 2026-11-12).
+- The player found the streets sparse at 100. Counted in the camera's cone (`popview`), noon, standing at the
+  reference spots: in view within 50 m 1.1-1.4 peds against the PS2's 10-11 - the fixed caps (64 cars, 104 peds) were
+  reached with the crowd far off (peds live out to ~325 m) and nothing was made near. Spawn rings brought near in
+  view filled the street (peds within 100 m 42 / 27) but the player saw cars and peds appear in front of them, so what
+  spawns in view stays far; the crowd at its cap recycles its farthest ped out of view (or beyond 250 m), the camera-cut
+  fill stays near, and the caps are the pools' room as Open Limit Adjuster's "unlimited" (game-internals.md 9h).
+  New peds within 100 m in view / cars within 200 m in view (`worlddetail` popin=, `VCS_POPIN_LOG=1`): 0 a minute.
+
+  | all sliders 100, police station (one game at a time) | peds | in view < 100 m | cars < 200 m | appearing in view | game thread |
+  |---|---|---|---|---|---|
+  | the PS2 (sliders 0) | 27 | 13 | 3 | - | 7-9 ms |
+  | fixed caps 64 / 104 | 99 | 2.6 | 12 | 0 | 11.9 ms |
+  | the pools' room (now) | 138 | 4.8 | 11 | 0 | 13.9 ms |
+
+  Little Havana: in view within 100 m 11 peds (the PS2 8-12, before 1.4). By the police station the street in front
+  stays below the PS2's: its crowd stands 100-200 m down the avenue (70 in view), the price of the far rings.
+  Knobs for a test: `VCS_POP_CAPS`, `VCS_CAR_RINGS`, `VCS_PED_INVIEW_K`, `VCS_PED_OUT_K`, `VCS_PED_INVIEW_MIN`.
+
 ## 2026-11-05 - T2 prop popping elimination, 800m-1000m on-foot sector triangle and OLA density
 
 - Eliminated prop popping (antennas, air conditioners, signs and rooftop attachments): hooked `CBaseModelInfo::GetLargestLodDistance` (`0x003A5380`) to defeat the hardcoded 330.0f distance clamp in `SetupEntityVisibility` (`0x0035EFD8`), added unconditional `propFloor` (`500m..900m`) and `streamFloor` (`550m..950m`), default 30 MB streaming heap in `vcs_memory.cpp`, and velocity-aware prefetch.
@@ -1154,6 +1178,9 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_WATCHDOG=s` | EE + IOP thread states (pc, ra and sp of the running thread: a hang's frame can be read) |
 | `VCS_PROFILE_INCLUSIVE=1` | with `VCS_PROFILE`: every guest function on the sampled stack counts once per sample (a subsystem's whole cost) |
 | `VCS_VIEW_DISTANCE`, `VCS_DETAIL_DISTANCE`, `VCS_POPULATION_DISTANCE`, `VCS_VEHICLE_DENSITY`, `VCS_PEDESTRIAN_DENSITY` | Graphics > Distance and population for one run (0..100) |
+| `VCS_CAR_RINGS=n`, `VCS_PED_INVIEW_K=k`, `VCS_PED_OUT_K=k`, `VCS_PED_INVIEW_MIN=m` | the spawn rings (1, 0, 1, 55 m; `VCS_PED_OUT_K=0`: out of view at the population distance's, as before 2026-11-12; rings / k > 1 bring spawns in view near: they appear) |
+| `VCS_POP_CAPS=cars,peds` | fixed population caps (default 0,0: the pools' room; 64,104 before 2026-11-12) |
+| `VCS_POPIN_LOG=1` | every new car / ped within 120 m, in view or not (`worlddetail` popin= counts the ones in view) |
 | `VCS_POOLS=peds,vehicles` | the ped / vehicle pool sizes for a test (default 280 / 200 with Streaming memory above PS2, else 70 / 40) |
 | `VCS_CROWD_LOD=0` | no crowd LOD (far random peds processed every frame; A / B measures) |
 | `VCS_DISTANT_TRAFFIC=0..100` | Graphics > Distant traffic for one run (DISTANT_LIFE.md: decorative cars beyond the simulated traffic) |

@@ -1736,3 +1736,25 @@ turned stick (the pull-in toward the player), through the game's own switch for 
   closed row cuts it to "(integr", Mesa's name being longer than the box; left as it is, for the user to decide.
   0.2.5's draft notes: the graphics card bullet describes the list by name, for both systems (it still said Fastest /
   Power saving / System default, which no release ever had).
+
+## 2026-11-12 - One population system after the merge of gothamor's main; the spawn rings near the player (the user's request)
+
+- **Graphics > Distance and population owns the population.** Upstream's Enhancements > World (`vcs_world_detail.cpp`,
+  Traffic density / Pedestrian density / Draw distance, 100-300 %) writes the same addresses as the fork's sliders
+  (`0x48A680`, `0x48A67C`, the caps `0x48A9A8` / `0x488004` / `0x488008`, the chance table `0x487498`, the LOD scale
+  `0x4887F8`) and rewrote them right before every spawner, so after the merge the fork's densities did nothing. Two
+  menus for one thing would confuse players, and the fork's version also has the pools, the population distance and the
+  frame-rate governor, so upstream's three sliders are not registered (`kDistanceOwnsPopulation`). Its guards stay -
+  cars in view are not removed, the vanish detector logs - active while the fork's population is above the original, at
+  the fork's real-car radius (never a read of `0x6F4CA0` in the world's process). The code stays as upstream wrote it
+  behind the constant, for the next merges.
+- **What spawns in view stays far; the caps are the pools' room.** The user found the streets sparse "at 100" and
+  asked for twice as much. Measured, the far spawn rings and the fixed caps were the limit (PROGRESS.md 2026-11-12).
+  Rings brought near in view doubled the street but the user saw cars and peds appear in front of them - not
+  acceptable, so in view nothing is made nearer than before; the street near the player fills from out of view and
+  through recycling at the cap. The user pointed at Open Limit Adjuster ("every limit is unlimited by default"): its
+  DLL patches the PC executable and cannot be used here, but its idea is - the pools were already made at their ceiling
+  and the sector node pools grow; the caps of 64 cars / 104 peds go, the pools' room (less the slots kept for
+  missions) decides (+40 % peds, +2 ms on the game thread). What stays open: the street in front by the police
+  station stays below the PS2's (its crowd 100-200 m down the avenue); more there needs larger ped pools (280 checked)
+  or a smaller ped radius - which the distant crowds' band forbids while they are on (T2 plan).

@@ -28,9 +28,16 @@
 // VCS_WORLD_DETAIL_HOOKS=0 writes nothing and hooks nothing; VCS_WORLD_KEEP=0 drops the pool reserve and keeps no car
 // in view (the caps as scaled: how it was before 2026-11-07's fix, to compare). Either way a car that disappears
 // within 100 m in view is counted and logged ([world] car vanished in view).
+//
+// [fork] Graphics > Distance and population (game/vcs_distance.cpp) owns the population and the LOD scale: it writes
+// the same factors, caps and chance table, and these spawner hooks rewrote the original caps (16 cars, 25 / 30 peds) and
+// chances right before each spawner - the fork's densities were undone after the merge of 2026-11-12. So with
+// kDistanceOwnsPopulation the three sliders are not registered and nothing is written; the guards stay (cars in view
+// kept, the vanish detector), active while the fork's population is above the original, at its real-car radius.
 #include "game/vcs_world_detail.h"
 
 #include "game/vcs_display.h"
+#include "game/vcs_distance.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_control.h"
@@ -75,6 +82,7 @@ namespace vcs::world
         constexpr int kPedReserve = 16;      // the same for peds (FUN_002B0C00)
         constexpr int kDriverSlots = 2;      // a random car's driver (and a passenger) come from the ped pool
         constexpr float kCarRadius = 6.0f;   // the in-view test's margin
+        constexpr bool kDistanceOwnsPopulation = true; // [fork] see the top of the file
 
         bool g_enabled = false;
         bool g_keep = true; // VCS_WORLD_KEEP=0: no pool reserve, no keeping cars in view
@@ -100,6 +108,8 @@ namespace vcs::world
         std::atomic<uint32_t> g_stPacketUsed{0}, g_stPacketPeak{0}, g_stCarChance{0}, g_stPedChance{0};
         std::atomic<uint32_t> g_stMinVehicleFree{999}, g_stMinPedFree{999}; // since the last query
         std::atomic<uint64_t> g_stKeptInView{0}, g_stVanished{0};
+        // [fork] new cars / peds that appeared in view (onGameFrame's pop-in detector): all, and the near ones
+        std::atomic<uint64_t> g_stPopCars{0}, g_stPopCarsNear{0}, g_stPopPeds{0}, g_stPopPedsNear{0};
         // the vanish detector: per vehicle pool slot, its flag byte (generation) last frame when it was near and in view
         int g_nearInView[256];
         float g_nearDist[256];
@@ -243,7 +253,21 @@ namespace vcs::world
                    std::fabs(dot(0x20)) <= std::max(y, 0.0f) * tanV + radius;
         }
 
-        bool active() { return g_orig.valid && (g_traffic.load(std::memory_order_relaxed) > 100 || g_peds.load(std::memory_order_relaxed) > 100 || g_draw.load(std::memory_order_relaxed) > 100); }
+        // the distance cars are drawn at: the fork's real-car radius when it owns the population
+        float drawnDistance(const uint8_t *ram)
+        {
+            if (kDistanceOwnsPopulation)
+                return vcs::distance::realCarOuterRadius();
+            return 160.0f * rdf(ram, kGenerationDist) * std::max(1.0f, g_draw.load(std::memory_order_relaxed) / 100.0f);
+        }
+
+        bool active()
+        {
+            if (kDistanceOwnsPopulation)
+                return vcs::distance::populationRaised();
+            return g_orig.valid && (g_traffic.load(std::memory_order_relaxed) > 100 || g_peds.load(std::memory_order_relaxed) > 100 ||
+                                    g_draw.load(std::memory_order_relaxed) > 100);
+        }
 
         void readOriginals(const uint8_t *ram)
         {
@@ -313,7 +337,7 @@ namespace vcs::world
             {
                 const float p[3] = {rdf(rdram, car + 0x30), rdf(rdram, car + 0x34), rdf(rdram, car + 0x38)};
                 const float dx = p[0] - rdf(rdram, kCamera + 0x30), dy = p[1] - rdf(rdram, kCamera + 0x34);
-                const float drawn = 160.0f * rdf(rdram, kGenerationDist) * std::max(1.0f, g_draw.load(std::memory_order_relaxed) / 100.0f);
+                const float drawn = drawnDistance(rdram);
                 if (dx * dx + dy * dy <= drawn * drawn && inView(rdram, p, kCarRadius))
                 {
                     g_stKeptInView.fetch_add(1, std::memory_order_relaxed);
@@ -377,6 +401,8 @@ namespace vcs::world
 
     void registerSettings()
     {
+        if (kDistanceOwnsPopulation)
+            return; // Graphics > Distance and population has them (game/vcs_distance.cpp)
         settings::add(percentSpec("enhance.traffic", "Traffic density",
                                   "How many cars drive around the city. 100% is the original game; missions that clear "
                                   "the streets still do. Costs some CPU time.",
@@ -447,13 +473,15 @@ namespace vcs::world
             std::snprintf(text, sizeof(text),
                           "ok enabled=%d valid=%d traffic=%d peds=%d draw=%d carcap=%d pedcap=%d/%d lod=%.3f pedfree=%d "
                           "vehfree=%d pedsused=%d vehused=%d minpedfree=%u minvehfree=%u kept=%llu vanished=%llu playerinview=%d "
-                          "packets=%u peak=%u far=%.0f carchance=%08x pedchance=%08x",
+                          "packets=%u peak=%u far=%.0f carchance=%08x pedchance=%08x popin=%llu/%llu,%llu/%llu",
                           g_enabled ? 1 : 0, g_orig.valid ? 1 : 0, g_traffic.load(), g_peds.load(), g_draw.load(),
                           g_stCarCap.load(), g_stPedCapOut.load(), g_stPedCapIn.load(), g_stLod.load(), g_stPedFree.load(),
                           g_stVehicleFree.load(), g_stPedsUsed.load(), g_stVehiclesUsed.load(), g_stMinPedFree.exchange(999),
                           g_stMinVehicleFree.exchange(999), (unsigned long long)g_stKeptInView.load(),
                           (unsigned long long)g_stVanished.load(),                          g_stPlayerInView.load(), g_stPacketUsed.load(), g_stPacketPeak.exchange(0),
-                          g_farClip > 0 ? g_farClip : 2000.0f, g_stCarChance.load(), g_stPedChance.load());
+                          g_farClip > 0 ? g_farClip : 2000.0f, g_stCarChance.load(), g_stPedChance.load(),
+                          (unsigned long long)g_stPopCars.load(), (unsigned long long)g_stPopCarsNear.load(),
+                          (unsigned long long)g_stPopPeds.load(), (unsigned long long)g_stPopPedsNear.load());
             reply(text);
         });
     }
@@ -462,26 +490,36 @@ namespace vcs::world
     {
         if (!g_enabled)
             return;
-        if (!g_orig.read)
-            readOriginals(rdram);
-        if (!g_orig.valid)
-            return;
-
-        // ---- density: factors and chance tables; the caps here for FUN_0043BE00 (and the command), the spawners set
-        // theirs again right before they run
         const int traffic = std::clamp(g_traffic.load(std::memory_order_relaxed), 100, kMaxPercent);
-        const int peds = std::clamp(g_peds.load(std::memory_order_relaxed), 100, kMaxPercent);
-        wrf(rdram, kCarFactor, traffic == 100 ? g_orig.carFactor : g_orig.carFactor * (traffic / 100.0f));
-        wrf(rdram, kPedFactor, peds == 100 ? g_orig.pedFactor : g_orig.pedFactor * (peds / 100.0f));
-        g_carChance = scaledChance(g_orig.spawnChance, traffic);
-        g_pedChance = scaledChance(g_orig.spawnChance, peds);
-        writeCarCap(rdram);
-        writePedCaps(rdram);
-
-        // ---- draw distance
         const int draw = std::clamp(g_draw.load(std::memory_order_relaxed), 100, kMaxPercent);
-        const float lod = draw == 100 ? g_orig.lodScale : draw / 100.0f;
-        wrf(rdram, kLodScale, lod);
+        float lod = rdf(rdram, kLodScale);
+        if (!kDistanceOwnsPopulation)
+        {
+            if (!g_orig.read)
+                readOriginals(rdram);
+            if (!g_orig.valid)
+                return;
+
+            // ---- density: factors and chance tables; the caps here for FUN_0043BE00 (and the command), the spawners
+            // set theirs again right before they run
+            const int peds = std::clamp(g_peds.load(std::memory_order_relaxed), 100, kMaxPercent);
+            wrf(rdram, kCarFactor, traffic == 100 ? g_orig.carFactor : g_orig.carFactor * (traffic / 100.0f));
+            wrf(rdram, kPedFactor, peds == 100 ? g_orig.pedFactor : g_orig.pedFactor * (peds / 100.0f));
+            g_carChance = scaledChance(g_orig.spawnChance, traffic);
+            g_pedChance = scaledChance(g_orig.spawnChance, peds);
+            writeCarCap(rdram);
+            writePedCaps(rdram);
+
+            // ---- draw distance
+            lod = draw == 100 ? g_orig.lodScale : draw / 100.0f;
+            wrf(rdram, kLodScale, lod);
+        }
+        else
+        {
+            g_stCarCap.store(static_cast<int>(rd32(rdram, kCarCap)), std::memory_order_relaxed);
+            g_stPedCapOut.store(static_cast<int>(rd32(rdram, kPedCapOut)), std::memory_order_relaxed);
+            g_stPedCapIn.store(static_cast<int>(rd32(rdram, kPedCapIn)), std::memory_order_relaxed);
+        }
 
         // ---- state for the command
         int pedsUsed = -1, vehiclesUsed = -1;
@@ -506,7 +544,7 @@ namespace vcs::world
             const bool cut = std::hypot(cam[0] - lastCam[0], cam[1] - lastCam[1]) > 30.0f;
             lastCam[0] = cam[0];
             lastCam[1] = cam[1];
-            const float drawn = 160.0f * rdf(rdram, kGenerationDist) * std::max(1.0f, draw / 100.0f);
+            const float drawn = drawnDistance(rdram);
             const uint32_t entries = rd32(rdram, pool) & 0x01FFFFFFu, flags = rd32(rdram, pool + 4) & 0x01FFFFFFu;
             const int size = std::min(static_cast<int>(rd32(rdram, pool + 8)), 256);
             for (int i = 0; i < size && entries && flags; ++i)
@@ -532,6 +570,65 @@ namespace vcs::world
                     g_nearDist[i] = dist;
                 }
             }
+        }
+        // ---- [fork] the pop-in detector (2026-11-12, the player: "cars and peds spawn in front of me"): a pool slot that
+        // has a new occupant (its flag byte changed) standing in view - cars within 200 m, peds within 100 m (not in a
+        // car, not the player) - counted for `worlddetail` (popin=); not for 90 frames after a camera cut (a teleport, a
+        // door, a cutscene: the game fills the streets in view then on purpose)
+        {
+            static int lastCar[256], lastPed[512];
+            static bool primed = false;
+            static int quiet = 0;
+            static float lastCam[2] = {0, 0};
+            if (!primed)
+            {
+                std::fill(std::begin(lastCar), std::end(lastCar), -1);
+                std::fill(std::begin(lastPed), std::end(lastPed), -1);
+            }
+            const float cam[2] = {rdf(rdram, kCamera + 0x30), rdf(rdram, kCamera + 0x34)};
+            if (std::hypot(cam[0] - lastCam[0], cam[1] - lastCam[1]) > 30.0f)
+                quiet = 90;
+            else if (quiet > 0)
+                --quiet;
+            lastCam[0] = cam[0];
+            lastCam[1] = cam[1];
+            const uint32_t playerPed = rd32(rdram, 0x004E4910u) & 0x01FFFFFFu;
+            auto scan = [&](uint32_t poolPtr, uint32_t stride, int *last, int limit, bool peds) {
+                const uint32_t pool = rd32(rdram, poolPtr) & 0x01FFFFFFu;
+                if (!pool)
+                    return;
+                const uint32_t entries = rd32(rdram, pool) & 0x01FFFFFFu, flags = rd32(rdram, pool + 4) & 0x01FFFFFFu;
+                const int size = std::min(static_cast<int>(rd32(rdram, pool + 8)), limit);
+                for (int i = 0; i < size && entries && flags; ++i)
+                {
+                    const int flag = rdram[flags + i];
+                    const bool fresh = !(flag & 0x80) && last[i] != flag;
+                    last[i] = (flag & 0x80) ? -1 : flag;
+                    if (!fresh || !primed || quiet)
+                        continue;
+                    const uint32_t e = entries + static_cast<uint32_t>(i) * stride;
+                    if (peds)
+                    {
+                        const uint32_t state = rd32(rdram, e + 0x8C4);
+                        if (e == playerPed || state == 0x37 || state == 0x39 || state == 0x3A)
+                            continue;
+                    }
+                    const float p[3] = {rdf(rdram, e + 0x30), rdf(rdram, e + 0x34), rdf(rdram, e + 0x38)};
+                    const float dist = std::hypot(p[0] - cam[0], p[1] - cam[1]);
+                    static const bool log = std::getenv("VCS_POPIN_LOG") != nullptr;
+                    if (log && dist < 120.0f)
+                        std::fprintf(stderr, "[popin] new %s slot %d at %.0f m, %s (%.1f %.1f %.1f)\n", peds ? "ped" : "car", i, dist,
+                                     inView(rdram, p, peds ? 0.5f : 2.0f) ? "in view" : "out of view", p[0], p[1], p[2]);
+                    if (dist >= (peds ? 100.0f : 200.0f) || !inView(rdram, p, peds ? 0.5f : 2.0f))
+                        continue;
+                    (peds ? g_stPopPeds : g_stPopCars).fetch_add(1, std::memory_order_relaxed);
+                    if (dist < (peds ? 50.0f : 100.0f))
+                        (peds ? g_stPopPedsNear : g_stPopCarsNear).fetch_add(1, std::memory_order_relaxed);
+                }
+            };
+            scan(kVehiclePool, 0x8C0u, lastCar, 256, false);
+            scan(kPedPool, 0xD20u, lastPed, 512, true);
+            primed = true;
         }
         const uint32_t used = packetUse(rdram);
         g_stPacketUsed.store(used, std::memory_order_relaxed);

@@ -147,6 +147,30 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         float g_genBase = 1.0f;
         constexpr float kGenUnwritten = -1.0f; // written before CCamera::Process: still there = it wrote none this frame
 
+        // The spawn rings (2026-11-12, the player: "few people and few cars on the streets at 100", then "they spawn in
+        // front of me"). With the population distance at its most every new ped stood 175-300 m away in view (the game's
+        // 35-60 x a factor of 5) or 22-44 m out of view, every new car in view 300-480 m away, and the far peds - alive out
+        // to ~325 m - held every slot of the cap: in view within 50 m 1.1-1.4 peds against the PS2's 10 (Little Havana /
+        // the police station, noon). Bringing the rings in view near filled the street but made peds and cars appear in
+        // plain sight (55-160 m), so what spawns in view stays far, and the street near the player fills from out of view:
+        // peds there at the game's 10-20 m (g_pedOutK), the crowd at its cap recycling its farthest ped (trimCrowd), the
+        // camera-cut fill (a new picture) within kFillInViewK. Knobs for a test: VCS_CAR_RINGS (n > 1: the car spawner's
+        // distance cycles over n rings from the game's own out to the population distance - in view, so cars appear),
+        // VCS_PED_INVIEW_K (k > 0: peds in view made within k x the game's distance), VCS_PED_OUT_K (0: the population
+        // distance's, as before), VCS_PED_INVIEW_MIN. All of them are the game's own at population distance 0.
+        float envFloat(const char *name, float fallback)
+        {
+            const char *v = std::getenv(name);
+            return v && *v ? static_cast<float>(std::atof(v)) : fallback;
+        }
+        const int g_carRings = static_cast<int>(envFloat("VCS_CAR_RINGS", 1.0f));
+        const float g_pedOutK = envFloat("VCS_PED_OUT_K", 1.0f);
+        const float g_pedInMin = envFloat("VCS_PED_INVIEW_MIN", 55.0f);
+        const float g_pedInMaxK = envFloat("VCS_PED_INVIEW_K", 0.0f);
+        constexpr float kFillInViewK = 1.5f; // the camera-cut fill's farthest in view (the picture is new then)
+        uint32_t g_carRing = 0;
+        float g_carSpawnK = 1.0f; // the car spawner's factor this call (the node list's shift follows it)
+
         // the game's constants, read once
         bool g_haveDefaults = false;
         float g_carNumber = 0.7f, g_pedNumber = 0.4f;
@@ -260,32 +284,49 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         // Peds above the cap (0x488008) fade out and go - the flag CPopulation's removal sets (+0x1C8 bit 63, bFadeOut; it
         // takes them away once faded): random peds on foot out of the camera's cone, the farthest first, at most two a
         // frame. Only while the budget holds the numbers below the sliders'.
+        // Also while the crowd is at its cap with the population distance raised (2026-11-12): peds live out to ~325 m, so
+        // the far ones held every slot and none was made near the player any more (by the police station 4 in view within
+        // 50 m against the PS2's 11). Then one ped at a time goes - out of the camera's cone beyond 40 m or anywhere beyond
+        // 250 m (in view only that far: a ped the player can make out never fades away), the farthest first, while fewer
+        // than two fade - and the spawner fills its slot, near out of view or far in view.
+        constexpr float kRecycleOutOfView = 40.0f, kRecycleAnywhere = 250.0f;
         void trimCrowd()
         {
-            if (g_budget >= 1.0f)
+            const int32_t count = rd32(kPeds);
+            const int32_t cap = rd32(0x00489F7Cu) == 0 ? rd32(kMaxPeds) : rd32(kMaxPedsB); // CGame::currArea: outdoors
+            const bool full = pedDistance() > 1.0f && count >= cap - 1;
+            if (g_budget >= 1.0f && !full)
                 return;
-            const int32_t excess = rd32(kPeds) - rd32(kMaxPedsB);
+            const int32_t excess = g_budget < 1.0f ? count - rd32(kMaxPedsB) : 0;
             const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
-            if (excess <= 0 || !pool)
+            if ((excess <= 0 && !full) || !pool)
                 return;
             const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
             const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), kLargePeds);
             const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u), cz = rdf(kCameraPos + 8u);
             const float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u), fz = rdf(kCameraFront + 8u);
+            const bool recycle = excess <= 0; // only the cap's recycling, not the budget's trim
+            const float nearOut = recycle ? kRecycleOutOfView : 30.0f;
             uint32_t pick[2] = {0, 0};
             float far[2] = {0.0f, 0.0f};
+            int fading = 0;
             for (uint32_t i = 0; i < size; ++i)
             {
                 if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
                     continue;
                 const uint32_t ped = entries + i * 0xD20u;
                 const int32_t state = rd32(ped + 0x8C4u);
-                if (rd32(ped + 0x8F4u) != 1 || state == 0x37 || state == 0x39 || state == 0x3A || rd32(ped + 0x538u) != 0 ||
-                    (rd32(ped + 0x1CCu) & 0x80000000))
+                if (rd32(ped + 0x8F4u) != 1 || state == 0x37 || state == 0x39 || state == 0x3A || rd32(ped + 0x538u) != 0)
                     continue;
+                if (rd32(ped + 0x1CCu) & 0x80000000)
+                {
+                    ++fading;
+                    continue;
+                }
                 const float dx = rdf(ped + 0x30u) - cx, dy = rdf(ped + 0x34u) - cy, dz = rdf(ped + 0x38u) - cz;
                 const float d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 < 30.0f * 30.0f || dx * fx + dy * fy + dz * fz > 0.2f * std::sqrt(d2))
+                const bool farAway = recycle && d2 > kRecycleAnywhere * kRecycleAnywhere;
+                if (!farAway && (d2 < nearOut * nearOut || dx * fx + dy * fy + dz * fz > 0.2f * std::sqrt(d2)))
                     continue; // near, or in view
                 for (int k = 0; k < 2; ++k)
                     if (d2 > far[k])
@@ -300,7 +341,8 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                         break;
                     }
             }
-            for (int k = 0; k < std::min(excess, 2); ++k)
+            const int n = recycle ? (fading < 2 ? 1 : 0) : std::min(excess, 2);
+            for (int k = 0; k < n; ++k)
                 if (pick[k])
                     wr32(pick[k] + 0x1CCu, rd32(pick[k] + 0x1CCu) | static_cast<int32_t>(0x80000000u));
         }
@@ -334,13 +376,20 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             // the caps share the ped pool: every random car takes a driver from it, the ambient peds the rest (less the
             // slots kept for missions and the player). Each keeps up to the game's own cap; what the settings ask beyond
             // that shares the room left, in proportion.
-            // Realistic Open Limit Adjuster (OLA) caps for 1986 Vice City:
-            // Base PS2: 16 cars, 30 peds.
-            // Realistic OLA target: up to 64 active cars and 104 active pedestrians (~20-25% boost over initial calibration).
-            // This provides rich, continuous traffic and bustling sidewalks without
-            // unrealistic 1000-NPC gridlocks or single-threaded MIPS CPU starvation.
-            constexpr int32_t kOlaMaxCars = 64;
-            constexpr int32_t kOlaMaxPeds = 104;
+            // The caps are the pools' room, as Open Limit Adjuster's "unlimited" (2026-11-12, the player's choice): the
+            // pools are made at their ceiling (240 / 140 here) and nothing below them stops the numbers - fixed 64 cars /
+            // 104 peds were reached at 100 and held the crowd there (by the police station 99 peds, 138 with the pools'
+            // room; game thread 11.9 -> 13.9 ms, PROGRESS.md 2026-11-12). The 1000-entity scenes of 2026-11-05 came from
+            // the decorative proxies on top and pools of 280 / 200; the slots kept for missions stay kept.
+            // VCS_POP_CAPS=cars,peds fixes them for a test (64,104: the caps before).
+            static const std::pair<int32_t, int32_t> kCaps = [] {
+                int cars = 0, peds = 0; // 0: the pools' room
+                if (const char *e = std::getenv("VCS_POP_CAPS"))
+                    std::sscanf(e, "%d,%d", &cars, &peds);
+                return std::make_pair(cars > 0 ? cars : 1000, peds > 0 ? peds : 1000);
+            }();
+            const int32_t kOlaMaxCars = kCaps.first;
+            const int32_t kOlaMaxPeds = kCaps.second;
             const int32_t carPool = static_cast<int32_t>(poolSize(kCarPool)), pedPool = static_cast<int32_t>(poolSize(kPedPool));
             const int32_t carRoom = std::clamp<int32_t>(carPool - static_cast<int32_t>(kCarsKept), g_maxCars, kOlaMaxCars);
             int32_t maxCars = std::clamp(static_cast<int32_t>(std::lround(g_maxCars * cars)), 0, carRoom);
@@ -451,7 +500,17 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                     const float v = rdf(kGenMultiplier);
                     g_genBase = v == kGenUnwritten ? g_genBase : v;
                 }
-                wrf(kGenMultiplier, g_genBase * (I < kPedReaders ? pedDistance() : cars));
+                float k = I < kPedReaders ? pedDistance() : cars;
+                if (kGenReaders[I] == 0x00430290u)
+                {
+                    // the car spawner: its rings spread from the game's distance out to the population distance's (the
+                    // spawn rings' note at g_carRings; the removal, FUN_00433378, keeps the population distance)
+                    const int rings = std::max(g_carRings, 1);
+                    if (rings > 1)
+                        k = 1.0f + (cars - 1.0f) * static_cast<float>(g_carRing++ % rings) / static_cast<float>(rings - 1);
+                    g_carSpawnK = k;
+                }
+                wrf(kGenMultiplier, g_genBase * k);
                 if (percent(g_population) == 1.0f) // back at the game's own: this frame keeps it, the next is left alone
                     g_genTouched = false;
             }
@@ -786,8 +845,9 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         }
         // FUN_00268048(CPathFind, pos, ..., nearestInView $f12, farthestInView $f13, nearestOut $f14, farthestOut $f15):
         // Stratifies the in-view real pedestrian spawn ring across close, medium, and far sub-bands within the currently
-        // cached pavement node window (35 m out to ~300 m) so raising Population distance populates the full visible range
-        // without leaving a hollow gap near the player.
+        // cached pavement node window so raising Population distance populates the visible range without leaving a hollow
+        // gap near the player. It begins at the caller's nearest (35 x the factor: 175 m at the most) - nearer, peds appear
+        // in plain sight; VCS_PED_INVIEW_K brings it in for a test (the spawn rings' note above).
         PS2_GUEST_CC void pedSpotFinder(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             if (ctx->pc == kPedSpotFinder)
@@ -799,10 +859,11 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                     const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
                     // Safe forward distance so pedestrians never pop in immediately in front of the vehicle/player bumper:
                     // stationary: 55m; at 30 m/s (108 km/h): 85m; at 50 m/s (180 km/h): 115m.
-                    const float safeInViewMin = std::max(55.0f, 40.0f + speed * 1.5f);
-                    const float minLo = std::max(safeInViewMin, ctx->f[12]);
+                    const float safeInViewMin = std::max(g_pedInMin, 40.0f + speed * 1.5f);
+                    const float kIn = g_pedInMaxK > 0.0f ? std::min(k, g_pedInMaxK) : k; // the spawn rings: genReader's note
+                    const float minLo = std::max(safeInViewMin, std::min(ctx->f[12], 35.0f * base * kIn));
                     const float cacheReach = 155.0f + g_pedNodeShift;
-                    const float maxHi = std::max(minLo + 45.0f, std::min(70.0f * base * k, cacheReach));
+                    const float maxHi = std::max(minLo + 45.0f, std::min(70.0f * base * kIn, cacheReach));
                     const uint32_t pass = g_pedSpotPass++ & 3u;
                     if (maxHi > minLo + 40.0f)
                     {
@@ -825,7 +886,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         {
             if (ctx->pc == kNodeList)
             {
-                const float k = carDistance(), kp = pedDistance();
+                const float k = g_carRings > 1 ? g_carSpawnK : carDistance(), kp = pedDistance();
                 const uint32_t ra = GPR_U32(ctx, 31);
                 if (k > 1.0f && ra >= kSpotFinder && ra < kSpotFinderEnd)
                 {
@@ -1305,7 +1366,9 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         // of view is the easiest to fill, so with the larger caps the crowd gathered around the player: 92 of 152 peds
         // within 30 m in Little Havana, the densest and slowest frames (game thread 15-27 ms). The ring out of view, and
         // the fill's both, are times the peds' population distance here - the area the caps were scaled for: 42 of 82
-        // within 30 m, 7 ms. The game's own at 0.
+        // within 30 m, 7 ms. The game's own at 0. Since 2026-11-12 the ring out of view is the game's (g_pedOutK = 1):
+        // with the in-view ring pushed far (since brought near) the crowd had gone from the player's street altogether,
+        // 1-2 peds in view within 50 m; the caps (104) keep the total down now.
         constexpr uint32_t kAddToPopulation = 0x002B17A8u, kFill = 0x002B0070u, kFillEnd = 0x002B0200u;
         PS2Runtime::RecompiledFunction g_addToPopulation = nullptr;
         PS2_GUEST_CC void addToPopulation(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1317,10 +1380,11 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 if (ra >= kFill && ra < kFillEnd)
                 {
                     ctx->f[12] *= kd; // nearest in view
-                    ctx->f[13] *= k;  // farthest in view
+                    ctx->f[13] *= std::min(k, kFillInViewK); // farthest in view: near, the picture has just been cut
                 }
-                ctx->f[14] *= kd; // nearest out of view
-                ctx->f[15] *= kd; // farthest out of view
+                const float ko = g_pedOutK > 0.0f ? g_pedOutK : kd;
+                ctx->f[14] *= ko; // nearest out of view
+                ctx->f[15] *= ko; // farthest out of view
             }
             g_addToPopulation(rdram, ctx, runtime);
         }
@@ -1492,6 +1556,12 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         return 65.0f * base * pedDistance();
     }
 
+    bool populationRaised()
+    {
+        return g_population.load(std::memory_order_relaxed) > 100 || g_traffic.load(std::memory_order_relaxed) > 100 ||
+               g_pedestrians.load(std::memory_order_relaxed) > 100;
+    }
+
     void install(PS2Runtime &runtime)
     {
         g_original = runtime.lookupFunction(kCameraProcess);
@@ -1580,6 +1650,44 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         // distancestate -> ok view=<%> detail=<%> scale=<ms_lodDistScale> lod=<LODDistMultiplier>
         //                  gen=<GenerationDistMultiplier> population=<%> traffic=<%> pedestrians=<%> cars=<random>/<cap>
         //                  peds=<peds>/<cap> pools=<peds>,<vehicles> numbers=<car>,<ped>
+        // popview -> ok peds=<total> <in view within 50 / 100 / 200 m> cars=<total> <in view within 50 / 100 / 200 m>: what the
+        // player sees of the population (a cone of +-40 degrees round the camera's forward), not the pools' totals
+        ps2control::addCommand("popview", [](const std::string &, ps2control::Reply reply) {
+            if (!g_rdram)
+                return reply("error the camera has not run yet");
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u);
+            const float fl = std::hypot(fx, fy);
+            fx /= fl > 0.0f ? fl : 1.0f;
+            fy /= fl > 0.0f ? fl : 1.0f;
+            auto count = [&](uint32_t global, uint32_t stride, int out[4]) {
+                const uint32_t pool = static_cast<uint32_t>(rd32(global));
+                if (!pool)
+                    return;
+                const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
+                const uint32_t size = static_cast<uint32_t>(rd32(pool + 8u));
+                for (uint32_t i = 0; i < size; ++i)
+                {
+                    if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
+                        continue;
+                    ++out[0];
+                    const uint32_t e = entries + i * stride;
+                    const float dx = rdf(e + 0x30u) - cx, dy = rdf(e + 0x34u) - cy, d = std::hypot(dx, dy);
+                    if (d < 1.0f || (dx * fx + dy * fy) < 0.766f * d)
+                        continue;
+                    out[1] += d < 50.0f;
+                    out[2] += d < 100.0f;
+                    out[3] += d < 200.0f;
+                }
+            };
+            int peds[4] = {0, 0, 0, 0}, cars[4] = {0, 0, 0, 0};
+            count(kPedPool, 0xD20u, peds);
+            count(kCarPool, 0x8C0u, cars);
+            char text[160];
+            std::snprintf(text, sizeof(text), "ok peds=%d %d %d %d cars=%d %d %d %d", peds[0], peds[1], peds[2], peds[3], cars[0],
+                          cars[1], cars[2], cars[3]);
+            reply(text);
+        });
         ps2control::addCommand("distancestate", [](const std::string &, ps2control::Reply reply) {
             if (!g_rdram)
                 return reply("error the camera has not run yet");

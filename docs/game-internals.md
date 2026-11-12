@@ -2221,6 +2221,22 @@ its lists; `pokef` of the scale below with screenshots).
   and moving towards the player. Removal **`FUN_00433378`** (as VC's PossiblyRemoveVehicle): out of view past **60 m**
   (70 with the camera looking down, x 1.5 extended), in view past 160 x gen. Standing still, 86 % of the new cars went
   at once; driving about half (the offscreen ones behind).
+- **Where the population is made decides what the player sees** (2026-11-12, the player: "few people and few cars at
+  100", then "they spawn in front of me"). With every slider at 100 the spawn rings follow the population distance:
+  new peds in view at 175-300 m (CPopulation::Update's 35 x gen x the factor of 5 as the ped spot finder's nearest),
+  out of view at 22-44 m; new cars in view at 300-480 m (the spawner's 110 x gen try, frames with `0x4CD124 & 3` per
+  the decompile; the other try is out of view at a fixed 40 m). Counted in the camera's cone (+-40 degrees, the
+  `popview` command), noon, the player at the reference spots (tools/spots.py; the rig's save puts him back at the save
+  house seconds after a teleport - `spots.check`): in view within 50 m **1.1-1.4 peds against the PS2's 10-11**. The
+  fixed caps (64 cars, 104 peds) were reached with ~76 peds 100-200 m out and none could be made near; births halved
+  (21 a minute against 41). Car births stay ~20 a minute whatever the density (the spots set the number).
+  Rings brought near in view (peds 55-105 m, cars from 100 m) filled the street - but new peds then stand up in plain
+  sight: a pool slot whose flag byte changed with the entity in view (`worlddetail` popin=, `VCS_POPIN_LOG=1`) counted
+  7-10 a minute within 100 m. So in view they stay far; now (vcs_distance.cpp): out of view at the game's 10-20 m, the
+  crowd at its cap fades its farthest ped (bFadeOut, +0x1CC bit 31) out of view beyond 40 m or anywhere beyond 250 m,
+  the camera-cut fill (`FUN_002B0070`) within 1.5 x the game's, the caps the pools' room. 0 appearing a minute;
+  police station 138 peds, in view within 100 m 4.8 (the PS2 13); Little Havana 11 (the PS2 8-12). The car counters at
+  `0x48A96C`: `+0xC` held 10 throughout (parked cars?).
 
 ### 9i. HD world further - streaming issues and Phase 1 fix (2026-11-09)
 
