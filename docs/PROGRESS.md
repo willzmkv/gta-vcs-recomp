@@ -937,6 +937,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `PS2X_LOG_MPG=1`, `PS2X_DUMP_MPG_DIR=d` | VU1 microcode uploads |
 | `PS2X_VIF_CHECK=1` | VIF1 chains parsed as they are copied: VIFcodes the VIF has none of (with the DMA tags before the first one of a chain) and each MSCAL address once - a CALL into freed memory shows here |
 | `VCS_HD_DRAWCHECK=1` | HD world: every drawn sector's cached packet (and those it CALLs) walked; REFs into a slot buffer being read, or non-tags, logged (`[hdworld-draw]`) |
+| `VCS_HD_DRAWDIFF=1` | HD world: sectors drawn one frame and missing the next logged (`[hdworld-drop]`), with each faded draw (`[hdworld-fade]`) |
 | `VCS_HD_FADE=<seconds>` | HD world: the detail's fade in / out on the horizon (default 1; 0 none) |
 | `VCS_HD_PKTDEBUG=1`, `VCS_HD_NODRAW=1`, `VCS_HD_DRAWMODE=1\|2\|3`, `VCS_HD_FREE_DELAY=n` | HD world (vcs_world_hd.cpp): cached packets put on the free ring / freed / CALLed after their free (`[hdworld-pkt]`); extra cells not drawn; bisection modes; arena reuse delay |
 | `VCS_GS_STATS=s` | GS state histogram |

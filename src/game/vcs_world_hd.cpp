@@ -323,7 +323,17 @@ namespace vcs::world_hd
             const char *e = std::getenv("VCS_HD_FADE");
             return e && *e ? std::max(0.0, std::strtod(e, nullptr)) : 1.0;
         }();
+        // (Only the opaque buckets fade. The translucent ones - 6 and 7, leaves and bushes - drawn with a lower alpha made
+        // the game's own foliage near the camera flicker, a frame at a time, while anything faded: with a fixed camera,
+        // 86 flickering pixels a burst with them, none without; so they come in as they are.)
         constexpr double kRecentlyDrawn = 2.0; // seconds: a sector drawn this recently comes back without a fade
+        // Near the camera the game's own list decides: an extra cell's list also names sectors of its whole area (3 x 3
+        // cells), some of them next to the camera that the game's list leaves out on purpose (bushes and trees the
+        // original never draws there). Added near the camera they came and went with the far cell that names them -
+        // the flickering bushes (the player's report, 2026-11-11). Nothing is added nearer than kNearOwn, and only
+        // sectors beyond kFadeFrom fade (the horizon).
+        constexpr float kNearOwn = 200.0f;
+        constexpr float kFadeFrom = 250.0f;
         constexpr uint32_t kAppendTranslucent = 0x0023E548u; // FUN_0023E548(level, record, bucket, alpha, list)
         constexpr uint32_t kMainWalkReturn = 0x0023F4BCu;     // FUN_0023E748's sector draw outside a cross-fade
         enum : uint8_t { kNoFade, kFadeIn, kFadeOut };
@@ -335,8 +345,9 @@ namespace vcs::world_hd
         std::array<Fade, 0x8000> g_fades{};          // by sector id
         std::array<double, 0x8000> g_drawnAt{};      // by sector id: when a built list last drew it
         std::array<double, 0x8000> g_replacedSince{}; // by low-detail id: since when detail replaces it (0: not)
-        PS2Runtime::RecompiledFunction g_append = nullptr;
         std::atomic<uint32_t> g_fadeDraws{0};
+        const bool g_drawDiff = std::getenv("VCS_HD_DRAWDIFF") != nullptr; // (below: drawDiffFrame)
+        uint32_t g_dropLogged = 0;
 
         double seconds()
         {
@@ -1236,6 +1247,9 @@ namespace vcs::world_hd
                         const uint16_t id = rd16(r) & 0x7FFFu, gid = rd16(r + 2u);
                         if (id < 0x20u || taken.test(id) || rd32(r + 0xCu) || !drawable(c, gid))
                             continue;
+                        const float near = std::hypot(half(rd16(r + 4u)) - camX, half(rd16(r + 6u)) - camY); // (its centre)
+                        if (near < kNearOwn)
+                            continue;
                         if (id >= kLodIds && drawMode() < 3)
                             continue;
                         if (id >= kLodIds && replaced(id, r))
@@ -1253,7 +1267,9 @@ namespace vcs::world_hd
                         // its fade: in when it was not drawn lately, out while its cell leaves (from where it is now)
                         Fade &f = g_fades[id];
                         const double a = opacity(id, t);
-                        if (c->leaving != 0.0)
+                        if (near < kFadeFrom)
+                            f = {}; // (not on the horizon: as it is)
+                        else if (c->leaving != 0.0)
                         {
                             if (f.kind != kFadeOut)
                                 f = {t - (1.0 - a) * kFadeSeconds, kFadeOut};
@@ -1338,11 +1354,14 @@ namespace vcs::world_hd
             return g_imageBase != 0;
         }
 
+        void drawDiffFrame();
+
         // every frame, before the game's chooser: the extra cells around the camera
         void update()
         {
             ++g_frame;
             g_stats.fading = g_fadeDraws.exchange(0, std::memory_order_relaxed);
+            drawDiffFrame();
             if (!g_arenaReady)
             {
                 g_arena.reset();
@@ -1659,25 +1678,42 @@ namespace vcs::world_hd
             return -1;
         }
 
-        // FUN_0023E548(level, record, bucket, alpha, list): a fading sector of ours no more opaque than its fade (the
-        // translucent buckets 6-7 come here straight from the world draw)
-        PS2_GUEST_CC void appendHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-        {
-            const uint32_t record = getRegU32(ctx, 5);
-            if (g_ram && kFadeSeconds > 0.0 && valid(record, kRecord) && g_fades[rd16(record) & 0x7FFFu].kind != kNoFade &&
-                fromBuiltList(record))
-            {
-                const uint32_t alpha = uint32_t(opacity(rd16(record), seconds()) * 255.0);
-                if (alpha < 0xFFu)
-                    SET_GPR_U32(ctx, 7, std::min(getRegU32(ctx, 7) & 0xFFu, alpha));
-            }
-            g_append(rdram, ctx, runtime);
-        }
-
         // VCS_HD_DRAWCHECK=1: every sector drawn, its cached packet and the packets it CALLs (its textures') walked: a REF
         // into a slot buffer the game is reading into (level + 0x258 / 0x25C), or a CALL into something that is not a
         // packet, is logged once per gid and target ([hdworld-draw]) - textures read from memory being overwritten
         const bool g_drawCheck = std::getenv("VCS_HD_DRAWCHECK") != nullptr;
+        // VCS_HD_DRAWDIFF=1: the sector ids drawn each frame (FUN_00240ED8 from every caller, and the translucent list's
+        // appends); one drawn the frame before and the frame after but not in between is logged ([hdworld-drop])
+        std::array<std::bitset<0x8000>, 3> g_drawnIds{}; // [0] this frame, [1] the last, [2] the one before
+        std::array<uint32_t, 0x8000> g_lastRecord{};
+
+        void noteDrawn(uint32_t record, const char *how)
+        {
+            const uint16_t id = rd16(record) & 0x7FFFu;
+            (void)how;
+            g_drawnIds[0].set(id);
+            g_lastRecord[id] = record;
+        }
+
+        void drawDiffFrame()
+        {
+            if (!g_drawDiff)
+                return;
+            // [1] dropped: in [2] and [0], not in [1]
+            const std::bitset<0x8000> dropped = g_drawnIds[2] & g_drawnIds[0] & ~g_drawnIds[1];
+            if (dropped.any() && g_dropLogged < 200000u)
+            {
+                ++g_dropLogged;
+                std::string ids;
+                for (uint32_t id = 0; id < 0x8000u && ids.size() < 400u; ++id)
+                    if (dropped.test(id))
+                        ids += " " + std::to_string(id) + "(" + std::to_string(rd16(g_lastRecord[id] + 2u)) + (g_fades[id].kind ? ",fade" : "") + ")";
+                std::fprintf(stderr, "[hdworld-drop] frame %llu: %zu sectors missing for one frame:%s\n", (unsigned long long)g_frame, dropped.count(), ids.c_str());
+            }
+            g_drawnIds[2] = g_drawnIds[1];
+            g_drawnIds[1] = g_drawnIds[0];
+            g_drawnIds[0].reset();
+        }
         uint64_t g_drawCheckLogged = 0;
 
         void drawCheck(uint32_t record, uint32_t ra)
@@ -1744,6 +1780,8 @@ namespace vcs::world_hd
                 checkCalls(getRegU32(ctx, 5));
             if (g_drawCheck && valid(getRegU32(ctx, 5), kRecord))
                 drawCheck(getRegU32(ctx, 5), getRegU32(ctx, 31));
+            if (g_drawDiff && valid(getRegU32(ctx, 5), kRecord))
+                noteDrawn(getRegU32(ctx, 5), "draw");
             const uint32_t used = bufferUsed();
             g_sectorCalls.fetch_add(1, std::memory_order_relaxed);
             if (0xE6670u - used < 0x12C00u)
@@ -1758,7 +1796,7 @@ namespace vcs::world_hd
             }
             // a fading sector of ours, outside the game's own cross-fade: into the translucent list with its alpha
             // (drawn there, sorted far to near, through this function again from another caller)
-            if (kFadeSeconds > 0.0 && g_append && getRegU32(ctx, 31) == kMainWalkReturn && valid(record, kRecord) &&
+            if (kFadeSeconds > 0.0 && getRegU32(ctx, 31) == kMainWalkReturn && valid(record, kRecord) &&
                 g_fades[rd16(record) & 0x7FFFu].kind != kNoFade)
             {
                 const double a = opacity(rd16(record), seconds());
@@ -1771,6 +1809,12 @@ namespace vcs::world_hd
                         return;
                     }
                     g_fadeDraws.fetch_add(1, std::memory_order_relaxed);
+                    if (g_drawDiff && g_dropLogged < 200000u)
+                    {
+                        ++g_dropLogged;
+                        std::fprintf(stderr, "[hdworld-fade] frame %llu: redirect id %u alpha %.2f bucket %d\n", (unsigned long long)g_frame,
+                                     rd16(record) & 0x7FFFu, a, k);
+                    }
                     SET_GPR_U32(ctx, 6, uint32_t(k));
                     SET_GPR_U32(ctx, 7, uint32_t(a * 255.0));
                     SET_GPR_U32(ctx, 8, 0u); // the current slot's list
@@ -1992,7 +2036,6 @@ namespace vcs::world_hd
             {kLevelLoad, &g_levelLoad, &levelLoadHook},
             {kWorldDraw, &g_draw, &drawHook},
             {kSectorDraw, &g_sector, &sectorHook},
-            {kAppendTranslucent, &g_append, &appendHook},
         };
         for (const Hook &h : hooks)
             if (!(*h.original = runtime.lookupFunction(h.at)))
