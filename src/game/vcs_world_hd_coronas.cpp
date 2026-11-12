@@ -97,7 +97,7 @@ namespace vcs::world_hd_coronas
         int g_fakeSlot = -1;
         // counters (the farcoronas command)
         std::atomic<uint32_t> g_statLights{0}, g_statDrawn{0}, g_statInjected{0}, g_statFrames{0};
-        uint32_t g_dummiesLit = 0;
+        uint32_t g_dummiesLit = 0, g_traffic = 0;
         uint32_t g_otherTexture = 0; // lights within reach left out: another corona texture than the first lamp's
         float g_maxDistance = 0.0f;
         uint32_t g_debugLogged = 0;
@@ -268,6 +268,7 @@ namespace vcs::world_hd_coronas
             g_lights.clear();
             g_lampTexture = 0;
             g_dummiesLit = 0;
+            g_traffic = 0;
             g_otherTexture = 0;
             g_maxDistance = 0.0f;
             const uint32_t pool = rd32(kDummyPool);
@@ -287,23 +288,25 @@ namespace vcs::world_hd_coronas
                 if (std::fabs(ex - cx) > limit || std::fabs(ey - cy) > limit)
                     continue;
                 const uint16_t model = rd16(e + 0x56u);
-                const std::vector<Effect> &fx = effects(model);
-                if (fx.empty())
-                    continue;
-                ++g_dummiesLit;
                 const float ez = rdf(e + 0x38u);
-                uint64_t bits;
-                std::memcpy(&bits, g_ram + ((e + 0x48u) & PS2_RAM_MASK), 8);
                 if (isTrafficLight(model))
                 {
+                    // (its lights are type 12, none of effects(): the box of the model's first six 2dfx entries, as
+                    // DisplayActualLight reads them)
+                    const uint32_t table = rd32(kModelTable);
+                    const uint32_t mi = model < rd32(kModelCount) && valid(table + model * 4u) ? rd32(table + model * 4u) : 0;
+                    const int16_t first = valid(mi, 0x40u) ? static_cast<int16_t>(rd16(mi + 0x18u)) : int16_t(-1);
+                    const uint32_t fx0 = rd32(kEffects) + uint32_t(first) * 0x40u;
                     const int phase = trafficPhase(e);
-                    if (phase < 0)
+                    if (first < 0 || rd8(mi + 0x11u) < 6u || !valid(fx0, 6u * 0x40u) || phase < 0)
                         continue;
-                    float x0 = fx[0].x, y0 = fx[0].y, y1 = fx[0].y, z0 = fx[0].z, z1 = fx[0].z;
-                    for (const Effect &f : fx)
+                    const float x0 = rdf(fx0);
+                    float y0 = rdf(fx0 + 4u), y1 = y0, z0 = rdf(fx0 + 8u), z1 = z0;
+                    for (uint32_t k = 1; k < 6u; ++k)
                     {
-                        y0 = std::min(y0, f.y), y1 = std::max(y1, f.y);
-                        z0 = std::min(z0, f.z), z1 = std::max(z1, f.z);
+                        const float fy = rdf(fx0 + k * 0x40u + 4u), fz = rdf(fx0 + k * 0x40u + 8u);
+                        y0 = std::min(y0, fy), y1 = std::max(y1, fy);
+                        z0 = std::min(z0, fz), z1 = std::max(z1, fz);
                     }
                     const float fwd = rdf(kCameraFwd) * rdf(e + 0x10u) + rdf(kCameraFwd + 4u) * rdf(e + 0x14u) + rdf(kCameraFwd + 8u) * rdf(e + 0x18u);
                     const float ly = fwd < 0.0f ? y1 : y0, lz = phase == 0 ? z0 : phase == 1 ? (z0 + z1) * 0.5f : z1;
@@ -314,11 +317,17 @@ namespace vcs::world_hd_coronas
                     const float bright = 0.7f * (valid(globals + kTrafficBright) ? rdf(globals + kTrafficBright) : 1.0f);
                     const float r = phase == 0 ? 0.0f : 255.0f, g = phase == 0 ? 255.0f : phase == 1 ? 128.0f : 0.0f;
                     const float d = std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy) + (z - cz) * (z - cz));
-                    if (d <= limit)
+                    if (d <= limit && ++g_traffic)
                         g_lights.push_back({x, y, z, 1.75f, 50.0f, uint8_t(std::clamp(r * bright, 0.0f, 255.0f)),
                                             uint8_t(std::clamp(g * bright, 0.0f, 255.0f)), 0, d});
                     continue;
                 }
+                const std::vector<Effect> &fx = effects(model);
+                if (fx.empty())
+                    continue;
+                ++g_dummiesLit;
+                uint64_t bits;
+                std::memcpy(&bits, g_ram + ((e + 0x48u) & PS2_RAM_MASK), 8);
                 for (const Effect &f : fx)
                 {
                     if (!lightOn(f, bits))
@@ -701,9 +710,9 @@ namespace vcs::world_hd_coronas
 
         ps2control::addCommand("farcoronas", [](const std::string &, ps2control::Reply reply) {
             char text[256];
-            std::snprintf(text, sizeof(text), "ok lights=%u drawn=%u injected=%u dummies=%u maxdist=%.0f slot=%d frames=%u texture=0x%08x lamptex=0x%08x pending=%d other=%u",
+            std::snprintf(text, sizeof(text), "ok lights=%u drawn=%u injected=%u dummies=%u maxdist=%.0f slot=%d frames=%u texture=0x%08x lamptex=0x%08x pending=%d other=%u traffic=%u",
                           g_statLights.load(), g_statDrawn.load(), g_statInjected.load(), g_dummiesLit, g_maxDistance, g_fakeSlot,
-                          g_statFrames.load(), g_texture, g_lampTexture, int(g_pending), g_otherTexture);
+                          g_statFrames.load(), g_texture, g_lampTexture, int(g_pending), g_otherTexture, g_traffic);
             reply(text);
         });
     }
