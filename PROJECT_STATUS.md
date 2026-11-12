@@ -37,7 +37,13 @@ machine (runs while the player compiled shaders elsewhere showed 77-93 fps - not
 4. **Parked cars / the ambulance** - done (game-internals.md 9l): the generators' 160 / 170 m follow Population
    distance (instruction patches in overrides.toml and vcs.toml, the values written by vcs_distance.cpp). Not yet
    checked by the player.
-5. Not tested with the setting on: interiors, save / load, missions, the bridge at speed. Soak (2026-11-12, 1 h of
+5. Tested with the setting on (2026-11-12): **Shakedown** (`VCS_HD_RADIUS=3 tools/shakedown.py`: cutscene, the shop
+   interior, mission running - PASS); **Load Game** from ~700 m away with the far cells in (load_check.py in
+   build/analysis/hd_world: the player back at the save, the safehouse interior right, no VU1 / list errors). In the
+   shop the draw check reported every record of the game's own list (the forced cell's copies are not among those
+   gatherGame knows); harmless (the game's records are drawn regardless) and now skipped while a cell is forced.
+   `tools/saves.py` itself no longer runs: it expects "1 Soldier" on the Fort Baxter card, which now holds
+   "1 Cholo Vitorioso". Still untested: other missions, the bridge at speed. Soak (2026-11-12, 1 h of
    autodrive each, `tools/soak.py`): radius 3 and radius 0 both 120/120 samples ok, no crash / hang / falling, 30 fps
    held. Private memory 1.17 -> 3.06 GB at radius 3, 1.10 -> 2.75 GB at radius 0: the same climb (the renderer's
    texture / mesh caches filling at each new place, PERFORMANCE.md 14 - bounded by count, 3000 textures / 12000

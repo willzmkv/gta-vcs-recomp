@@ -1922,7 +1922,10 @@ namespace vcs::world_hd
             if (used > g_bufferPeak.load(std::memory_order_relaxed))
                 g_bufferPeak.store(used, std::memory_order_relaxed);
             const uint32_t record = getRegU32(ctx, 5);
-            if (!g_cells.empty() && valid(record, kRecord) && !drawableNow(record, fromBuiltList(record)))
+            // (not while a cell is forced - interiors, cutscenes: nothing of ours is installed, and the forced slot's copies
+            // are not among the ones gatherGame knows - every record of the shop's list was reported in shakedown.py)
+            if (!g_cells.empty() && valid(record, kRecord) && (rd32(g_level + 0x260u) == 0 || fromBuiltList(record)) &&
+                !drawableNow(record, fromBuiltList(record)))
             {
                 ctx->pc = getRegU32(ctx, 31); // not drawn (FUN_00240ED8 returns nothing)
                 return;
