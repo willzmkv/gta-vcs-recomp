@@ -30,20 +30,13 @@ machine (runs while the player compiled shaders elsewhere showed 77-93 fps - not
    deliberately not faded (a lower alpha on them made the game's own near foliage flicker; game-internals.md 9j,
    "Fades"). Ideas: fade them another way (dithered, or an alpha that does not touch the state shared with the game's
    entries), or only at the very edge.
-4. **Parked cars / the ambulance pop in late** (not this feature): the car generators (FUN_0040A9E0, 300 generators in
-   16 slices) spawn when the player is within 160 m (`lui $at, 0x46C8` = 25600.0 at 0x40AB10, `mtc1` at 0x40AB14) and
-   take queued ones within 170 m (0x46E1C800: `lui`/`ori`/`mtc1` at 0x40ACA8..0x40ACB0). They are immediates, so the fix
-   is an instruction patch in game/vcs/overrides.toml (its format is there) loading the float from a free guest
-   address the host sets from a setting (default 25600 = original), e.g. `lui $at, 0x07F0` (0x3C0107F0) +
-   `lwc1 $f4, 0($at)` (0xC4240000); 0x07800000-0x07E00000 is unused. Then `python tools/build.py --recompile` (slow).
-   First check how far parked cars are removed (CCarCtrl::RemoveDistantCars FUN_00433008; population distance in
-   vcs_distance.cpp): spawning beyond the removal distance deletes them at once. A previous agent's C++ rewrite of
-   FUN_0040A9E0 in vcs_distance.cpp is commented out; it calls guest functions from host code (AGENTS.md rule 2) - do not
-   revive it. **The player has not yet said yes to the recompile** - ask.
+4. **Parked cars / the ambulance** - done (game-internals.md 9l): the generators' 160 / 170 m follow Population
+   distance (instruction patches in overrides.toml and vcs.toml, the values written by vcs_distance.cpp). Not yet
+   checked by the player.
 5. Not tested with the setting on: interiors, save / load, missions, a soak (`tools/soak.py`), the bridge at speed.
-6. Clean-up: the previous agent's untracked junk in the root (`apply_patch*.py`, `patch_*.py`, `final_patch*.py`,
-   `60/`, `PHASE3B_OPTION_D_STATUS.md`) - delete once the player agrees. The previous agent's settings
-   `world.hd_focus_*`, `world.preload_*`, `world.rsl_*` (still in vcs.ini) do nothing.
+6. Clean-up: done 2026-11-12 (the previous agent's scripts and old test output here and in D:\Games\VCS Recomp; its
+   two old agent worktrees removed). The previous agent's settings `world.hd_focus_*`, `world.preload_*`,
+   `world.rsl_*` (still in vcs.ini) do nothing.
 
 ## How it works (src/game/vcs_world_hd.cpp)
 

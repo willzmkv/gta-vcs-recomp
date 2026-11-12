@@ -789,6 +789,11 @@ instructions = [
   { address = "0x00433520", value = "0xC422FF40" },
   { address = "0x00433548", value = "0x3C010008" },
   { address = "0x0043354C", value = "0xC422FF48" },
+  { address = "0x0040AB10", value = "0x3C010008" },
+  { address = "0x0040AB14", value = "0xC424FF4C" },
+  { address = "0x0040ACA8", value = "0x3C010008" },
+  { address = "0x0040ACAC", value = "0xC426FF50" },
+  { address = "0x0040ACB0", value = "0x00000000" },
 ]
 
 [[jump_tables.table]]

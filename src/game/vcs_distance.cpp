@@ -926,6 +926,24 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         std::atomic<uint32_t> g_statCarGenChecks{0};
         std::atomic<uint32_t> g_statCarGenActive{0};
 
+        // The parked cars at the population distance (2026-11-11, the player's report: parked cars and the hospital's
+        // ambulance appearing right in front of them with the detailed city drawn far). FUN_0040A9E0 spawns a generator's
+        // car when the player comes within 160 m (25600.0, squared) and handles a queued one within 170 m (28900.0) -
+        // immediates, patched in game/vcs/overrides.toml to read guest RAM kCarGenSlots / + 4, written here before every
+        // call: the game's values times the population distance squared (the game's own at 100 %). The removal
+        // (FUN_00433378) takes parked cars away out of view past 160 m x GenerationDistMultiplier, which the same setting
+        // scales: spawned within it, they stay.
+        constexpr uint32_t kCarGenSlots = 0x0007FF4Cu; // next to kOffscreenSlots
+        PS2_GUEST_CC void carGeneratorsHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_rdram = rdram;
+            const float k = carDistance();
+            wrf(kCarGenSlots, 25600.0f * k * k);
+            wrf(kCarGenSlots + 4u, 28900.0f * k * k);
+            g_carGeneratorsProcess(rdram, ctx, runtime);
+        }
+
+        // (unused: a previous agent's rewrite, which calls guest functions from host code - AGENTS.md rule 2)
         PS2_GUEST_CC void carGeneratorsProcess(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_rdram = rdram;
@@ -1526,6 +1544,8 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             runtime.replaceFunction(kRandomPedControl, &randomPedControl);
         if ((g_processCollision = runtime.lookupFunction(kProcessCollision)))
             runtime.replaceFunction(kProcessCollision, &processCollision);
+        if ((g_carGeneratorsProcess = runtime.lookupFunction(kCarGeneratorsProcess)))
+            runtime.replaceFunction(kCarGeneratorsProcess, &carGeneratorsHook);
         // if ((g_carGeneratorsProcess = runtime.lookupFunction(kCarGeneratorsProcess)) &&
         //     (g_findPlayerCoors = runtime.lookupFunction(kFindPlayerCoors)) &&
         //     (g_findPlayerPed = runtime.lookupFunction(kFindPlayerPed)) &&

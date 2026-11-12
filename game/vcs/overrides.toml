@@ -254,3 +254,25 @@ value = "0x3C010008"
 [[patches]]
 address = "0x0043354C"
 value = "0xC422FF48"
+
+# Parked cars (the car generators, FUN_0040A9E0): a generator's car is spawned when the player comes within 160 m
+# (`lui $at, 0x46C8; mtc1 $at, $f4` = 25600.0, squared, at 0x40AB10) and a queued one is handled within 170 m
+# (`lui $at, 0x46E1; ori $at, $at, 0xC800; mtc1 $at, $f6` = 28900.0 at 0x40ACA8). Read from guest RAM 0x7FF4C / 0x7FF50
+# instead (`lui $at, 0x8; lwc1 $fN, -0xB4 / -0xB0($at)`, the ori's slot a nop), which src/game/vcs_distance.cpp writes
+# before every call: the game's values times the population distance squared - the game's own at 100 %. $at is not
+# read again before it is set.
+[[patches]]
+address = "0x0040AB10"
+value = "0x3C010008"
+[[patches]]
+address = "0x0040AB14"
+value = "0xC424FF4C"
+[[patches]]
+address = "0x0040ACA8"
+value = "0x3C010008"
+[[patches]]
+address = "0x0040ACAC"
+value = "0xC426FF50"
+[[patches]]
+address = "0x0040ACB0"
+value = "0x00000000"

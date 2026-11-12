@@ -2050,6 +2050,23 @@ Found by a helper agent reading the decompiled code (its findings are also the h
   `VCS_HD_CORONADEBUG=1` (projections logged; `=2` the quads six times larger, to find them in a picture); command
   `farcoronas`.
 
+### 9l. Parked cars: the car generators (2026-11-12)
+
+- `FUN_0040A9E0` (CCarGenerators::Process, as the previous agents named it) walks the generators in 16 slices a frame
+  (300 per slice table; count at `0x4CD674`, 10-byte entries at `*0x487490`: x, y as int16 * 0.125, z as a signed byte,
+  +6 the node). A generator whose position comes within **160 m** of the player (`25600.0` squared, an immediate at
+  `0x40AB10`) is flagged in the byte array `0x74D340` and, with the density's chance, spawns its car (`FUN_0040A418` ->
+  `FUN_0040B348`); leaving the range clears the flag. A queued one (16 at `0x7166F0`, 0x30 each) is handled within
+  **170 m** (`28900.0` at `0x40ACA8`).
+- The removal (`FUN_00433378`, PossiblyRemoveVehicle) takes a parked car away out of view past `160 m x
+  GenerationDistMultiplier` (`0x6F4CA0`), which Population distance scales (src/game/vcs_distance.cpp).
+- So with the detailed city drawn far, parked cars (the hospital's ambulance, cars at a Pay 'n' Spray) appeared 160 m
+  ahead, in view. The two immediates are patched (game/vcs/overrides.toml, and game/vcs/vcs.toml - the committed config
+  the recompiler uses when the analysis exports are absent: `tools/make_config.py` is not run by `build.py
+  --recompile`) to read guest RAM `0x7FF4C` / `0x7FF50`, written before every call with the game's values times the
+  population distance squared. Measured: 25 - 35 generators in range at the maximum (480 m) against 7 at the game's own,
+  16 vehicles at the avenue spot against 7.
+
 ## 10. Memory card and saves
 
 libmc calls are HLE (`Kernel/Stubs/MemoryCard.cpp`); files live in `%LOCALAPPDATA%/VCSRecomp/mc0`
