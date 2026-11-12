@@ -327,12 +327,9 @@ namespace vcs::world_hd
         // the game's own foliage near the camera flicker, a frame at a time, while anything faded: with a fixed camera,
         // 86 flickering pixels a burst with them, none without; so they come in as they are.)
         constexpr double kRecentlyDrawn = 2.0; // seconds: a sector drawn this recently comes back without a fade
-        // Near the camera the game's own list decides: an extra cell's list also names sectors of its whole area (3 x 3
-        // cells), some of them next to the camera that the game's list leaves out on purpose (bushes and trees the
-        // original never draws there). Added near the camera they came and went with the far cell that names them -
-        // the flickering bushes (the player's report, 2026-11-11). Nothing is added nearer than kNearOwn, and only
-        // sectors beyond kFadeFrom fade (the horizon).
-        constexpr float kNearOwn = 200.0f;
+        // Only sectors beyond kFadeFrom fade (the horizon); nearer ones come and go as they are. (Leaving out the extra
+        // sectors near the camera altogether was tried: what an extra cell's list showed from afar then vanished within
+        // 200 m and came back only once the game's own list had it - signs and parts of buildings; the player's report.)
         constexpr float kFadeFrom = 250.0f;
         constexpr uint32_t kAppendTranslucent = 0x0023E548u; // FUN_0023E548(level, record, bucket, alpha, list)
         constexpr uint32_t kMainWalkReturn = 0x0023F4BCu;     // FUN_0023E748's sector draw outside a cross-fade
@@ -1248,8 +1245,6 @@ namespace vcs::world_hd
                         if (id < 0x20u || taken.test(id) || rd32(r + 0xCu) || !drawable(c, gid))
                             continue;
                         const float near = std::hypot(half(rd16(r + 4u)) - camX, half(rd16(r + 6u)) - camY); // (its centre)
-                        if (near < kNearOwn)
-                            continue;
                         if (id >= kLodIds && drawMode() < 3)
                             continue;
                         if (id >= kLodIds && replaced(id, r))

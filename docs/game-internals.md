@@ -2000,9 +2000,9 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   fade later; a cell out of reach fades out before it is dropped. ~4 % of the frame on the cruise route.
   Only the opaque buckets fade: translucent entries (buckets 6-7, leaves and bushes) given a lower alpha made the
   game's own foliage near the camera flicker a frame at a time while anything faded (a fixed camera, 90-frame bursts
-  through the control channel's `burst`: 86 flickering pixels with, 0 without). And nothing is added nearer than
-  200 m: an extra cell's list also names sectors of its whole area (3 x 3 cells), some next to the camera that the
-  game's list leaves out on purpose (bushes and trees the original does not draw there).
+  through the control channel's `burst`: 86 flickering pixels with, 0 without). Only sectors beyond 250 m fade.
+  (Leaving out every extra sector within 200 m of the camera was tried and reverted: what an extra cell's list showed
+  from afar vanished on the way in and came back only once the game's own list had it.)
 - **Packets reading a buffer being loaded** (the player's purple blocks and flickering leaves, 2026-11-11): a cached
   sector packet holds REFs (qwc 4) straight into the texture data its meshes used when it was built - for a sector of
   ours too, the game's copy in a slot buffer. When the game starts reading the next cell / area into that buffer
