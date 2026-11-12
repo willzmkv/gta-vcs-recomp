@@ -427,14 +427,15 @@ namespace vcs::dualsense
                 g_prevSpeedNs = 0;
                 // On foot, the fire trigger (R2) feels the gun - but only with "Shoot with the triggers" on, where R2
                 // is the trigger you actually pull. (Firing with Circle leaves R2 alone, so it does not buzz for a
-                // trigger you are not using.) A single-shot gun gives a firm wall that breaks at the shot; an automatic
-                // rests on a light wall and buzzes while it fires.
+                // trigger you are not using.) A single-shot gun gives a firm wall that breaks at the shot, then kicks (a
+                // heavy, low buzz while it fires - the player found the wall alone gave no feel of the shot, 2026-11-12);
+                // an automatic rests on a light wall and buzzes while it fires.
                 if (g_cfg.triggerShoot && isGun(game.weapon))
                 {
                     if (isAutomatic(game.weapon))
                         right = firing ? triggerVibration(0, 7, 16) : triggerWeapon(3, 6, 4);
                     else
-                        right = triggerWeapon(4, 7, 7);
+                        right = firing ? triggerVibration(0, 8, 10) : triggerWeapon(4, 7, 7);
                 }
             }
         }

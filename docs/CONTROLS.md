@@ -131,12 +131,19 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
   **Swap sticks**, **Invert camera** left / right and up / down, **Drive with the triggers** / **Shoot with the
   triggers** (below), **Free aim** (above).
 - **Drive with the triggers** (off by default): while you drive, **R2 accelerates and L2 brakes / reverses** (instead
-  of Cross / Square), and look left / right (R2 / L2 on the PS2) move to the **D-pad**. On foot the buttons are
+  of Cross / Square: the pad's Cross / Square then do neither; the keyboard keeps its keys), and look left / right (R2 / L2 on the PS2) move to the **D-pad**. On foot the buttons are
   unchanged. Works on any pad with triggers; it is what makes the DualSense's adaptive triggers (below) act as a live
   throttle and brake.
 - **Shoot with the triggers** (off by default): on foot, **R2 fires and L2 aims** (instead of Circle / R1), and change
   weapon moves to the **D-pad** - the modern GTA IV / V layout. In a vehicle the buttons are unchanged. Pairs with the
   DualSense's weapon trigger feel (below).
+- **GTA V buttons** (off by default; an option, nothing else changes with it off): more of GTA V's layout on a
+  PlayStation pad. The **touchpad** changes the camera (Select on the PS2); while driving the **right stick pushed
+  well to a side looks / aims that way** (L2 / R2 on the PS2: the drive-by's side), **R3 looks behind** (L2 + R2), the
+  **D-pad's left / right** change the radio station (previous / next) and its **down** starts a sub-mission (taxi,
+  vigilante... - R3 on the PS2); with **Shoot with the triggers** on, **R2 fires guns** and **Circle is melee only**
+  (with a gun in hand the pad's Circle does nothing, so the two never fire together). L3 (horn) and R1 (handbrake) are GTA V's already. VCS has no reload button
+  (it reloads by itself). Checked by `tools/controls_check.py`.
 - **Vibration**: the DualShock 2's motors on the gamepad's rumble, 0-200% (100% as on the PS2, 0% off). The game
   drives them itself (crashes, explosions, gunfire; game-internals.md 12a).
 - **DualSense** (src/game/vcs_dualsense.cpp): extras a PS5 pad has, driven from the game's state, each off a no-op on
@@ -150,7 +157,8 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
     they come alive like GT7 / GTA V: the throttle (R2) firms up the harder you accelerate and **buzzes when you lose
     grip** (wheelspin or a slide), and the brake (L2) **pulses like ABS** under hard braking. On foot, with **Shoot
     with the triggers** on (so R2 is the trigger you pull), the fire trigger feels the gun - a single-shot gun gives a
-    firm wall that breaks at the shot, an automatic rests on a light wall and buzzes while it fires.
+    firm wall that breaks at the shot and then kicks (a heavy, low buzz while it fires), an automatic rests on a light
+    wall and buzzes while it fires.
   - **Sound through the controller**: play the game's sound - the radio, the police scanner, everything - through the
     DualSense's own speaker instead of your speakers or headphones. It is a small speaker, so it sounds thinner; turns
     itself off when the pad is unplugged. (The game mixes all its sound together, so this cannot be the radio alone.)

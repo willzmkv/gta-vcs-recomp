@@ -97,6 +97,7 @@ namespace platform
         GAMEPAD_DPAD_DOWN,
         GAMEPAD_DPAD_LEFT,
         GAMEPAD_DPAD_RIGHT,
+        GAMEPAD_TOUCHPAD, // the DualShock 4 / DualSense touchpad's click (other pads: never down)
         GAMEPAD_BUTTON_COUNT,
     };
 

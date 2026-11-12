@@ -74,6 +74,61 @@ class Check:
         d = dict(re.findall(r"(\w+)=([0-9a-f]+)", line))
         return {k: int(v, 16) if k == "buttons" else int(v) for k, v in d.items()}
 
+    def v_layout(self, car):
+        """Gamepad > GTA V buttons (pad.v_layout), in a car: off the game's buttons; on R3 looks behind (L2 + R2), the
+        D-pad's down is the sub-mission (R3), the touchpad Select, the D-pad's right / left the next / previous station."""
+        g = self.g
+
+        def press(button):
+            g.cmd("gamepad %s 1" % button)
+            p = self.pad()["buttons"]
+            g.cmd("gamepad %s 0" % button)
+            g.wait_frames(3)
+            return p
+
+        def station():
+            return g.peek(car + 0x2BA, 1)[0]
+
+        g.cmd("gamepad on")
+        try:
+            self.setting("pad.v_layout", 0)
+            off = (press("rs"), press("down"), press("touchpad"))
+            self.ok("GTA V buttons off: R3, D-pad down, touchpad as before", off == (R3, DOWN, 0), str(off))
+            self.setting("pad.v_layout", 1)
+            on = (press("rs"), press("down"), press("touchpad"), press("right") & (LEFT | RIGHT))
+            self.ok("GTA V buttons: R3 looks behind, D-pad down sub-mission, touchpad Select", on == (L2 | R2, R3, SELECT, 0), str(on))
+            g.wait_frames(45)
+            s0 = station()
+            press("right")
+            g.wait_frames(45)
+            s1 = station()
+            press("left")
+            g.wait_frames(45)
+            s2 = station()
+            self.ok("GTA V buttons: the D-pad steps the radio both ways", s1 == (s0 + 1) % 10 and s2 == s0, "%d -> %d -> %d" % (s0, s1, s2))
+            # the right stick well to a side looks that way (L2 / R2), the camera left alone
+            sides = []
+            for value, want in (("-1", L2), ("1", R2)):
+                g.cmd("gamepad rx %s" % value)
+                p = self.pad()
+                g.cmd("gamepad rx 0")
+                g.wait_frames(3)
+                sides.append((p["buttons"], p["rx"]))
+            self.ok("GTA V buttons: the right stick looks to the sides", sides == [(L2, 128), (R2, 128)], str(sides))
+            # Drive with the triggers: R2 / L2 instead of the pad's Cross / Square, not as well
+            self.setting("pad.trigger_drive", 1)
+            trig = (press("a"), press("x"))
+            g.cmd("gamepad rt 1")
+            rt = self.pad()["buttons"]
+            g.cmd("gamepad rt 0")
+            g.wait_frames(3)
+            self.ok("Drive with the triggers: the pad's Cross / Square do not drive, R2 does", trig == (0, 0) and rt == CROSS,
+                    "cross %04x square %04x r2 %04x" % (trig + (rt,)))
+        finally:
+            self.setting("pad.trigger_drive", 0)
+            self.setting("pad.v_layout", 0)
+            g.cmd("gamepad off")
+
     def held(self, *keys):
         for k in keys:
             self.g.cmd("key %s down" % k)
@@ -224,6 +279,7 @@ class Check:
         ped = g.player()[0]
         car = g.u32(ped + 0x480)
         self.ok("in a car", car != 0 and g.u32(ped + 0x8C4) == 0x37 and self.cam()[0] == 18, "car 0x%x mode %d" % (car, self.cam()[0]))
+        self.v_layout(car)
         got = {k: self.held(k) for k in ("w", "s", "space", "a", "shift", "mouseright")}
         want = {"w": CROSS, "s": SQUARE, "space": R1, "a": 0, "shift": CROSS, "mouseright": R1}
         bad = ["%s -> %s" % (k, p) for k, p in got.items() if p["buttons"] != want[k] or p["ly"] != 128 or

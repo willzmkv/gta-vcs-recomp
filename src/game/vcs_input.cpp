@@ -191,6 +191,8 @@ namespace vcs::input
             float walk = 0.45f;
             bool triggerDrive = false; // while driving: R2 accelerates, L2 brakes, the D-pad looks left / right
             bool triggerShoot = false; // on foot: R2 fires, L2 aims, the D-pad changes weapon
+            bool vLayout = false;      // GTA V's buttons (pad.v_layout): touchpad camera; driving R3 looks behind, the
+                                       // D-pad left / right the radio, down the sub-missions; on foot R2 fires guns only
         };
 
         std::mutex g_mapMutex;
@@ -233,6 +235,7 @@ namespace vcs::input
             m.vibration = settings::value("pad.vibration") / 100.0f;
             m.triggerDrive = settings::value("pad.trigger_drive") != 0;
             m.triggerShoot = settings::value("pad.trigger_shoot") != 0;
+            m.vLayout = settings::value("pad.v_layout") != 0;
             m.walk = settings::value("keys.walk_speed") / 100.0f;
             std::lock_guard<std::mutex> lock(g_mapMutex);
             g_map = m;
@@ -329,6 +332,7 @@ namespace vcs::input
             std::chrono::steady_clock::time_point hipUntil{}; // free aim held this long after the last shot from the hip
             bool aimHeld = false;      // the target button was held at the last game frame
             bool wheelWas[2] = {};     // a wheel notch (up, down) was down at the last game frame
+            bool padRadioWas[2] = {};  // GTA V's buttons: the D-pad left / right was down at the last game frame
             int wheelSteps = 0;        // weapon changes still to press (+ next / R2, - previous / L2), one a frame;
                                        // driving: radio stations (+ next, - previous: L1 either way)
             uint16_t wheelButton = 0;  // the button the wheel presses for this frame
@@ -369,6 +373,8 @@ namespace vcs::input
             const bool freeCamera = freecam::flying();
 
             bool padR1 = false, keyR1 = false, keyCircle = false; // the target / fire buttons, by device (free aim)
+            uint16_t padBits = 0, keyBits = 0; // the buttons the gamepad / the keyboard and mouse pressed (the triggers'
+                                               // schemes take the pad's own Cross / Square / Circle over, below)
             float padRx = 0.0f, padRy = 0.0f;
             bool padUsed = false, keysUsed = false; // the player's device this read (lastDevice)
             if (padConnected(physical) && !freeCamera)
@@ -382,6 +388,7 @@ namespace vcs::input
                     if (kControls[i].target == Target::Button && padSource(m.pad[i], m.trigger))
                     {
                         buttons |= kControls[i].mask;
+                        padBits |= kControls[i].mask;
                         padR1 = padR1 || kControls[i].mask == kR1;
                     }
                 lx = padAxis(AXIS_LEFT_X);
@@ -431,6 +438,7 @@ namespace vcs::input
                 if (c.target == Target::Button)
                 {
                     buttons |= c.mask;
+                    keyBits |= c.mask;
                     keyR1 = keyR1 || (c.mask == kR1 && !c.driving);
                     keyCircle = keyCircle || c.mask == kCircle;
                 }
@@ -642,6 +650,17 @@ namespace vcs::input
                 for (size_t i = 0; i < kControlCount; ++i)
                     for (int k : m.keys[i])
                         wheelBound = wheelBound || k == KEY_WHEEL_UP || k == KEY_WHEEL_DOWN;
+                // GTA V's buttons (pad.v_layout): while driving the D-pad's left / right is the previous / next station,
+                // a press each - the wheel's notch up / down below (the wheel's own notches only when the wheel is on)
+                const bool padRadioOn = m.vLayout && game.driving;
+                if (padRadioOn && (!m.mouseWheel || wheelBound))
+                    notch[0] = notch[1] = false;
+                for (int w = 0; w < 2; ++w)
+                {
+                    const bool down = padRadioOn && !blocked && padButton(w ? GAMEPAD_DPAD_RIGHT : GAMEPAD_DPAD_LEFT);
+                    notch[w] = notch[w] || (down && !g_mouse.padRadioWas[w]);
+                    g_mouse.padRadioWas[w] = down;
+                }
                 // Steps back on the radio waiting for the game (below): it counts the L1 presses and adds them to the
                 // vehicle's station 30 frames after the last one. Past that, a station still where it was put means the
                 // presses were not taken (an announcement is on, the vehicle has no radio): it goes back to what it
@@ -659,7 +678,7 @@ namespace vcs::input
                         g_mouse.radioVehicle = 0;
                     }
                 }
-                if (!m.mouseWheel || wheelBound || g_mouse.aim.camera || aim::aiming())
+                if (((!m.mouseWheel || wheelBound) && !padRadioOn) || g_mouse.aim.camera || aim::aiming())
                     g_mouse.wheelSteps = 0;
                 else if (game.driving)
                 {
@@ -740,13 +759,16 @@ namespace vcs::input
             if (m.triggerDrive && game.driving && !blocked)
             {
                 buttons &= static_cast<uint16_t>(~(kL2 | kR2 | kLeft | kRight)); // triggers were look; D-pad L/R repurposed
+                // the triggers instead of the pad's Cross / Square (both accelerated: the player's report, 2026-11-12);
+                // the keyboard's keep theirs
+                buttons &= static_cast<uint16_t>(~(padBits & ~keyBits & (kCross | kSquare)));
                 if (padAxis(AXIS_RIGHT_TRIGGER) > m.trigger)
                     buttons |= kCross;
                 if (padAxis(AXIS_LEFT_TRIGGER) > m.trigger)
                     buttons |= kSquare;
-                if (padButton(GAMEPAD_DPAD_RIGHT))
+                if (padButton(GAMEPAD_DPAD_RIGHT) && !m.vLayout) // (GTA V's buttons: the radio there, below)
                     buttons |= kR2; // look right
-                if (padButton(GAMEPAD_DPAD_LEFT))
+                if (padButton(GAMEPAD_DPAD_LEFT) && !m.vLayout)
                     buttons |= kL2; // look left
             }
 
@@ -759,8 +781,12 @@ namespace vcs::input
                 // A gun fires only once the trigger is pushed PAST the adaptive wall (it resists up to ~zone 7,
                 // game/vcs_dualsense.cpp triggerWeapon), so the shot breaks on a firm press, not on first touch of
                 // the resistance. Fists / melee have no wall, so they keep the light threshold.
+                // GTA V's buttons: the pad's Circle is melee only - with a gun in hand R2 alone fires (both fired)
+                if (m.vLayout && aim::gunInHand())
+                    buttons &= static_cast<uint16_t>(~(padBits & ~keyBits & kCircle));
                 const float fireAt = aim::gunInHand() ? 0.82f : m.trigger;
-                if (padAxis(AXIS_RIGHT_TRIGGER) > fireAt)
+                // (GTA V's buttons: R2 fires guns only - fists and melee weapons on Circle, below)
+                if (padAxis(AXIS_RIGHT_TRIGGER) > fireAt && (!m.vLayout || aim::gunInHand()))
                     buttons |= kCircle; // fire / attack
                 if (padAxis(AXIS_LEFT_TRIGGER) > m.trigger)
                     buttons |= kR1; // aim / target
@@ -768,6 +794,33 @@ namespace vcs::input
                     buttons |= kR2; // next weapon
                 if (padButton(GAMEPAD_DPAD_LEFT))
                     buttons |= kL2; // previous weapon
+            }
+
+            // "GTA V buttons" (pad.v_layout, an option, off by default): the touchpad changes the camera (Select); while
+            // driving R3 looks behind (L2 + R2 on the PS2), the D-pad's left / right step the radio (the wheel's code
+            // above), its down starts a sub-mission (R3 on the PS2: taxi, vigilante...); on foot R2 fires guns only
+            // (above). L3 is the horn and R1 the handbrake already, as in GTA V. On the default bindings of those
+            // buttons (the physical button is read here).
+            if (m.vLayout && !blocked)
+            {
+                if (padButton(GAMEPAD_TOUCHPAD))
+                    buttons |= kSelect;
+                if (game.driving)
+                {
+                    buttons &= static_cast<uint16_t>(~(kR3 | kLeft | kRight | kDown));
+                    if (padButton(GAMEPAD_RIGHT_STICK))
+                        buttons |= kL2 | kR2; // look behind
+                    if (padButton(GAMEPAD_DPAD_DOWN))
+                        buttons |= kR3; // sub-mission
+                    // the right stick pushed well to a side looks / aims that way (L2 / R2 on the PS2: the drive-by's
+                    // side), instead of turning the camera
+                    const float side = padAxis(m.swapSticks ? AXIS_LEFT_X : AXIS_RIGHT_X);
+                    if (std::fabs(side) > 0.6f && !(buttons & (kL2 | kR2)))
+                    {
+                        buttons |= side < 0.0f ? kL2 : kR2;
+                        rx = 0.0f;
+                    }
+                }
             }
 
             // the DualSense's trigger recoil on foot (game/vcs_dualsense.cpp): a gun in hand and the attack button down
@@ -840,6 +893,7 @@ namespace vcs::input
                     {"D-pad down", GAMEPAD_DPAD_DOWN},
                     {"D-pad left", GAMEPAD_DPAD_LEFT},
                     {"D-pad right", GAMEPAD_DPAD_RIGHT},
+                    {"Touchpad", GAMEPAD_TOUCHPAD},
                     {"None", kPadNone}};
         }
     }
@@ -1184,6 +1238,20 @@ namespace vcs::input
         settings::add(s);
 
         s = {};
+        s.key = "pad.v_layout";
+        s.page = kPad;
+        s.section = "Sticks and triggers";
+        s.label = "GTA V buttons";
+        s.help = "More of GTA V's layout on a PlayStation pad: the touchpad changes the camera; while driving the right "
+                 "stick pushed to a side looks / aims that way, R3 looks behind, the D-pad's left / right change the radio "
+                 "station (previous / next) and its down starts a sub-mission (taxi, vigilante...); with Shoot with the "
+                 "triggers, R2 fires guns and Circle is melee only. Off: the game's own buttons.";
+        s.type = Type::Toggle;
+        s.defaultValue = 0;
+        s.onChange = onChange;
+        settings::add(s);
+
+        s = {};
         s.key = "pad.free_aim";
         s.page = kPad;
         s.section = "Sticks and triggers";
@@ -1247,8 +1315,9 @@ namespace vcs::input
         // <value> -> ok: a gamepad set from here in place of the real one while on (free aim's checks in
         // tools/controls_check.py; sticks -1..1, down / right +)
         ps2control::addCommand("gamepad", [](const std::string &args, ps2control::Reply reply) {
-            static const char *const kButtons[GAMEPAD_BUTTON_COUNT] = {"a",  "b",  "x",  "y",  "back", "start", "ls",
-                                                                       "rs", "lb", "rb", "up", "down", "left",  "right"};
+            static const char *const kButtons[GAMEPAD_BUTTON_COUNT] = {"a",  "b",  "x",  "y",    "back",  "start",   "ls",
+                                                                       "rs", "lb", "rb", "up",   "down",  "left",    "right",
+                                                                       "touchpad"};
             static const char *const kAxes[AXIS_COUNT] = {"lx", "ly", "rx", "ry", "lt", "rt"};
             char name[16] = {};
             float value = 0.0f;
