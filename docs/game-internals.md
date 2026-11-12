@@ -2010,6 +2010,12 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   pointing into a buffer that has just started a read is now freed (rebuilt from the entries as they are). Found with
   `VCS_HD_DRAWCHECK=1` (each drawn sector's packet and the packets it CALLs walked: 21 such REFs in a 7-minute drive,
   0 after) and a RAM dump of the live game (`dump`), checked offline (build/analysis/hd_world/ramcheck.py, pktcheck.py).
+- **Entries emptied by a slot drop** (the player's "buildings switching between high and low quality", 2026-11-12):
+  dropping a slot, the game clears the table entries that still hold that slot's copy (`FUN_0023CED0`) - gids our
+  extra cells hold too. Until our next re-entry those sectors were left out of the built list, then back: models
+  flipping at every change of the game's cell (VCS_HD_OSC=1 logs sectors whose state flips four times within 10 s:
+  347 flips in a 5-minute drive, 315 of them an empty entry). An empty entry is now taken with our copy right at the
+  build: 0 flips near the camera; the ones left are cells entering / leaving the reach at 315-1090 m (with their fade).
 - **Two copies of a gid**: a gid can be in pieces of the current and the next slot at two addresses, either one in the
   entry - every copy counts as the game's (`[hdworld] built-list record ... bad` for 4 records per route before).
 - **The sector packet heap** `0x6F3DB8` (built by `FUN_002BB768` at boot, called from `0x369384`; 0x7CFC8 bytes at

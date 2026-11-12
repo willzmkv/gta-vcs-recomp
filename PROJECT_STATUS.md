@@ -21,11 +21,12 @@ machine (runs while the player compiled shaders elsewhere showed 77-93 fps - not
 1. **Lamp-post coronas** - done (src/game/vcs_world_hd_coronas.cpp, game-internals.md 9k): the far lamp dummies are
    projected and drawn through the game's own lamp-corona call, depth tested. The first version (a helper agent's)
    drew nothing (vertex alpha 0, the flares' call); fixed 2026-11-12, pictures show every lamp down the avenue lit.
-2. **Some buildings appear only very close** - especially Little Havana near the Pay 'n' Spray. Check whether they are
-   sectors at all (`probe_view.py` with the live game, below) or entities (CRenderer / IPL instances - vcs_distance.cpp's
-   LOD scale). If sectors: which cell's list names them, whether `taken` or the low-detail rule leaves them out, whether
-   their cell is loaded (nearest first, one a frame, within `kReach`).
-3. **Trees "sprout" far away** - vegetation popping in at distance. The translucent buckets (6-7: leaves, bushes) are
+2. **Buildings switching between high and low quality / appearing only close** - one cause found and fixed
+   2026-11-12: entries the game empties when it drops a slot left our sectors out until the next re-entry (game-internals
+   9j, "Entries emptied by a slot drop"; 347 flips -> 0 near the camera). Little Havana near the Pay 'n' Spray not yet
+   re-checked by the player; if a building there still comes late, stand there with `--control` and use probe_view.py.
+3. **Trees "sprout" far away** (the player: "as árvores realmente foram corrigidas" after the foliage fix - kept for
+   reference) - vegetation popping in at distance. The translucent buckets (6-7: leaves, bushes) are
    deliberately not faded (a lower alpha on them made the game's own near foliage flicker; game-internals.md 9j,
    "Fades"). Ideas: fade them another way (dithered, or an alpha that does not touch the state shared with the game's
    entries), or only at the very edge.

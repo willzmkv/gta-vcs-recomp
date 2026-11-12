@@ -342,6 +342,22 @@ namespace vcs::world_hd
         std::array<Fade, 0x8000> g_fades{};          // by sector id
         std::array<double, 0x8000> g_drawnAt{};      // by sector id: when a built list last drew it
         std::array<double, 0x8000> g_replacedSince{}; // by low-detail id: since when detail replaces it (0: not)
+        // VCS_HD_OSC=1: sectors whose state in the current slot's built list (absent / shown / hidden) changes four times
+        // or more within 10 s are logged ([hdworld-osc]) - models switching back and forth
+        const bool g_oscLog = std::getenv("VCS_HD_OSC") != nullptr;
+        std::array<uint8_t, 0x8000> g_oscState{};
+        std::array<uint8_t, 0x8000> g_oscFlips{};
+        std::array<double, 0x8000> g_oscSince{};
+        std::array<uint64_t, 0x8000> g_oscSource{}; // the extra cell (y << 32 | x) an added sector came from, + 1
+        uint32_t g_oscLogged = 0;
+        // why an extra cell's sector was left out of the last build (VCS_HD_OSC): 1 the game's list has it, 2 another
+        // extra cell gave it, 3 its geometry entry not drawable (the entry's value kept); 0: no loaded extra list named it
+        std::array<uint8_t, 0x8000> g_oscWhy{};
+        std::array<uint32_t, 0x8000> g_oscEntry{};
+        std::array<uint8_t, 0x8000> g_oscGoneWhy{};   // the reason the last time it went from shown to absent
+        std::array<uint32_t, 0x8000> g_oscGoneEntry{};
+        std::array<uint64_t, 0x8000> g_oscGoneSlot{};  // the slot's cell then (y << 32 | x)
+        std::array<float, 0x8000> g_oscDist{};         // its centre's distance from the camera at the last build
         std::atomic<uint32_t> g_fadeDraws{0};
         const bool g_drawDiff = std::getenv("VCS_HD_DRAWDIFF") != nullptr; // (below: drawDiffFrame)
         uint32_t g_dropLogged = 0;
@@ -1205,10 +1221,28 @@ namespace vcs::world_hd
             // game's copy while the slot that entered it still holds its cell / area
             // a gid's entry holds geometry we know is there: resident (no piece of the list has it), ours, or what a slot of
             // the game holds now (the stale ones were taken back before the build: reenterAll)
+            // An entry the game has just emptied (dropping a slot clears the entries that still held that slot's copy -
+            // a gid our cells hold too) is taken with our copy on the spot: until the next re-entry the sector was left
+            // out, then back - models switching back and forth at every change of the game's cell (VCS_HD_OSC: 315 of
+            // 347 flips; the player's report, 2026-11-12).
             auto drawable = [&](const Cell *c, uint16_t gid) {
-                const uint32_t now = rd32(table + gid * 0xCu);
-                if (!c->geometry.count(gid) && !inSlotBuffers(now))
+                const uint32_t e = table + gid * 0xCu, now = rd32(e);
+                const auto mine = c->geometry.find(gid);
+                if (mine == c->geometry.end() && !inSlotBuffers(now))
                     return now != 0; // the level's resident data
+                if (now == 0 && mine != c->geometry.end())
+                {
+                    if (const uint32_t packet = rd32(e + 4u))
+                    {
+                        freePacket(packet, 5u);
+                        wr32(e + 4u, 0);
+                    }
+                    wr32(e, mine->second);
+                    wr32(e + 8u, c->owner);
+                    g_registered[gid] = mine->second;
+                    ++g_reclaimed;
+                    return true;
+                }
                 return good(gid, now);
             };
 
@@ -1225,6 +1259,8 @@ namespace vcs::world_hd
                     }
                     out[k].push_back(rec);
                 }
+            if (g_oscLog && &b == &g_built[0])
+                g_oscWhy.fill(0);
             std::bitset<0x8000> taken = ids;
             std::bitset<0x8000> fading; // the added sectors: the only ones with a fade
             const uint32_t room = (kSynthBytes - 0x40u) / kRecord;
@@ -1242,6 +1278,18 @@ namespace vcs::world_hd
                     for (uint32_t r = from; r < to && total < room; r += kRecord)
                     {
                         const uint16_t id = rd16(r) & 0x7FFFu, gid = rd16(r + 2u);
+                        if (g_oscLog && id >= 0x20u && !rd32(r + 0xCu))
+                        {
+                            if (ids.test(id))
+                                g_oscWhy[id] = 1;
+                            else if (taken.test(id))
+                                g_oscWhy[id] = 2;
+                            else if (!drawable(c, gid))
+                            {
+                                g_oscWhy[id] = 3;
+                                g_oscEntry[id] = rd32(table + gid * 0xCu);
+                            }
+                        }
                         if (id < 0x20u || taken.test(id) || rd32(r + 0xCu) || !drawable(c, gid))
                             continue;
                         const float near = std::hypot(half(rd16(r + 4u)) - camX, half(rd16(r + 6u)) - camY); // (its centre)
@@ -1257,6 +1305,8 @@ namespace vcs::world_hd
                         if (hide < 0)
                             hide = 0;
                         out[k].push_back({id, r, c->cx - scx, c->cy - scy, -zShift, hide});
+                        g_oscSource[id] = (uint64_t(uint32_t(c->y)) << 32 | uint32_t(c->x)) + 1u;
+                        g_oscDist[id] = near;
                         ++added;
                         ++total;
                         // its fade: in when it was not drawn lately, out while its cell leaves (from where it is now)
@@ -1307,6 +1357,47 @@ namespace vcs::world_hd
                 for (const Rec &rec : out[k])
                     if (rec.hide != 1)
                         g_drawnAt[rec.id] = t;
+            if (g_oscLog && &b == &g_built[0])
+            {
+                std::array<uint8_t, 0x8000> now{};
+                for (int k = 0; k < 8; ++k)
+                    for (const Rec &rec : out[k])
+                        now[rec.id] = rec.hide == 1 || (rec.hide < 0 && (rd16(rec.from) & 0x8000u)) ? 2 : 1;
+                for (uint32_t id = 0; id < 0x8000u; ++id)
+                {
+                    if (now[id] == g_oscState[id])
+                        continue;
+                    if (now[id] == 0 && g_oscState[id] == 1)
+                    {
+                        g_oscGoneWhy[id] = g_oscWhy[id];
+                        g_oscGoneEntry[id] = g_oscEntry[id];
+                        g_oscGoneSlot[id] = uint64_t(uint32_t(sy)) << 32 | uint32_t(sx);
+                    }
+                    if (now[id] != 1 && g_oscState[id] != 1)
+                    {
+                        g_oscState[id] = now[id]; // (hidden <-> absent: not drawn either way)
+                        continue;
+                    }
+                    if (t - g_oscSince[id] > 10.0)
+                    {
+                        g_oscSince[id] = t;
+                        g_oscFlips[id] = 0;
+                    }
+                    if (++g_oscFlips[id] == 4 && g_oscLogged < 400u)
+                    {
+                        ++g_oscLogged;
+                        const uint64_t src = g_oscSource[id];
+                        std::fprintf(stderr, "[hdworld-osc] frame %llu: sector %u (%s) %u -> %u, 4 changes in %.1f s; in the game's list %d, "
+                                     "low detail replaced since %.1f s, fade %u, last added from cell %d,%d; slot cell %d,%d; left out: %u entry 0x%08x; last gone: %u entry 0x%08x slot %d,%d; %.0f m away\n",
+                                     (unsigned long long)g_frame, id, id >= kLodIds ? "low detail" : "detail", g_oscState[id], now[id],
+                                     t - g_oscSince[id], int(ids.test(id)), g_replacedSince[id] ? t - g_replacedSince[id] : -1.0,
+                                     g_fades[id].kind, src ? int(uint32_t(src - 1u)) : -1, src ? int((src - 1u) >> 32) : -1, sx, sy,
+                                     g_oscWhy[id], g_oscEntry[id], g_oscGoneWhy[id], g_oscGoneEntry[id],
+                                     int(uint32_t(g_oscGoneSlot[id])), int(g_oscGoneSlot[id] >> 32), g_oscDist[id]);
+                    }
+                    g_oscState[id] = now[id];
+                }
+            }
             for (uint32_t id = 0; &b == &g_built[0] && id < 0x8000u; ++id) // (the current slot's list decides)
             {
                 if (!fading.test(id) || (g_fades[id].kind == kFadeIn && t - g_fades[id].start >= kFadeSeconds))
