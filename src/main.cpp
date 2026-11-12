@@ -33,6 +33,7 @@
 #include "game/vcs_memory.h"
 #include "game/vcs_world.h"
 #include "game/vcs_world_hd.h"
+#include "game/vcs_world_hd_coronas.h"
 #include "game/vcs_streaming_trace.h"
 #include "mods/modloader.h"
 #include "mods/rwconv.h"
@@ -935,6 +936,7 @@ int main(int argc, char *argv[])
         vcs::memory::install(runtime);  // the streaming heap in the upper 32 MB when asked (game/vcs_memory.h)
         vcs::world::install(runtime);   // the world's area streaming (game/vcs_world.h; VCS_TRACE_AREAS=1)
         vcs::world_hd::install(runtime); // HD world further (experimental, game/vcs_world_hd.h)
+        vcs::world_hd_coronas::install(runtime); // the lamps' coronas as far (game/vcs_world_hd_coronas.h)
         vcs::streaming_trace::install(runtime); // streaming pipeline trace (experimental, game/vcs_streaming_trace.h)
         vcs::gameinfo::install(runtime); // the F3 overlay's game-state panel, the `gameinfo` command (debug/game_info.h)
         // setting <key> [value] -> ok <value>: a setting read or changed (a hidden run never writes vcs.ini)

@@ -11,4 +11,6 @@ namespace vcs::world_hd
     // The hooks on the area chooser / swap / flush (the game's list back before its streaming) and the world draw (the
     // list with the extra cells); the `hdworld` command (cells, memory, records added).
     void install(PS2Runtime &runtime);
+    // The setting's value now (0 Original .. 3 ~720 m); the lamp coronas (game/vcs_world_hd_coronas.cpp) follow it.
+    int radius();
 }

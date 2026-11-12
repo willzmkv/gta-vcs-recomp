@@ -2019,6 +2019,37 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   sector draw returns at once with less than 0x12C00 free. Measured at the avenue spot: 57 KB used at the peak, 89 KB
   with the detailed city at ~720 m - far from it.
 
+### 9k. Street-lamp coronas (2026-11-11)
+
+Found by a helper agent reading the decompiled code (its findings are also the header of src/game/vcs_world_hd_coronas.cpp):
+
+- Every instance of the map rests in the **dummy pool** (`CPools::ms_pDummyPool` `0x487AAC`: {entries, flags, size}, 3407
+  `CDummy` of 0x60 bytes in the game image - matrix at +0, position +0x30, model index +0x56; flag bit 7 = free).
+- Within ~80 m of the player a dummy whose model has 2D effects becomes an object (pool `0x487AA4`, CBuilding vtable
+  `0x48F848`) and the dummy is destroyed. `CEntity::PreRender` (`FUN_003C35A8`) of that object calls
+  `ProcessLightsForEntity` (`FUN_0027E430`), which registers a corona (`CCoronas::RegisterCorona` `FUN_0027DD80`) per night
+  light within the effect's show distance (2dfx +0x18, 100 m for lamps) into the **corona table** `0x512560` (56 slots
+  of 0x90: +0x10 position, +0x20 id, +0x28 the texture pointer's address, +0x2C size, +0x34 far clip, +0x38 depth bias,
+  +0x43 registered alpha, +0x44 current alpha, +0x45 registered this frame).
+- 2D effects: the model info (`0x486518`[model], count `0x4CD10C`) +0x11 count, +0x18 first index into `0x4E5CA8`
+  (0x40 each): +0 offset, +0x10 colour, +0x14 kind (0 light), +0x18 show distance, +0x20 corona size, +0x28 type (1 on
+  from 19:00 to 06:59, 3 the same with rain), +0x2C flags (bit 3 a switch), +0x30 texture. The hour is at `0x4CD148`.
+- `CCoronas::Render` (`FUN_0027C418`) draws each slot as a sprite: `FUN_003A03A8` -> `RwIm2DRenderPrimitive`
+  (`FUN_002FBE08`, a 4-vertex fan; the sprite routine's jal at `0x3A07A0`, return `0x3A07A8`), sized 448 / depth per metre
+  (`CSprite::CalcScreenCoords` `FUN_0039FC48`: the screen matrix `0x520A00`, origin `0x6FE980`, near / far `0x4CD130` /
+  `0x4CD12C`, Z terms at `0x520A68`), fading from half the show distance to all of it. The texture is set through
+  `RwRenderStateSet(1, tex)` (`FUN_00175198`). Im2D vertices: 16 bytes - u, v (1.15), r g b a, x y (pixels of 640 x 448),
+  z.
+- So the lamps' coronas end ~80 m from the player while the detailed city further draws the posts hundreds of metres
+  away. With `world.hd_radius` > 0 at night, src/game/vcs_world_hd_coronas.cpp projects the lamp dummies within the
+  setting's reach as the sprite routine does and draws them through the game's own corona pass: one corona slot is kept
+  as a size-0 corona with the lamps' texture (so the pass makes an Im2D call with their texture, blend and depth test
+  every frame), and that call's vertices are replaced by a triangle list of every far lamp's quad (in guest memory at
+  `0x7C00000`); a lamp the game draws itself gets the complement of its alpha. Pictures at the avenue spot at 23:00:
+  the far lamps' glow down the avenue at ~720 m, none at Original. Switches: `VCS_HD_CORONAS=0`,
+  `VCS_HD_CORONADEBUG=1` (projections logged; `=2` the quads six times larger, to find them in a picture); command
+  `farcoronas`.
+
 ## 10. Memory card and saves
 
 libmc calls are HLE (`Kernel/Stubs/MemoryCard.cpp`); files live in `%LOCALAPPDATA%/VCSRecomp/mc0`

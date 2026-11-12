@@ -1998,6 +1998,8 @@ namespace vcs::world_hd
         }
     } // namespace
 
+    int radius() { return g_radius.load(std::memory_order_relaxed); }
+
     void registerSettings()
     {
         settings::Spec s;
