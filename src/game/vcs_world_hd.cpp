@@ -358,6 +358,14 @@ namespace vcs::world_hd
         std::array<uint32_t, 0x8000> g_oscGoneEntry{};
         std::array<uint64_t, 0x8000> g_oscGoneSlot{};  // the slot's cell then (y << 32 | x)
         std::array<float, 0x8000> g_oscDist{};         // its centre's distance from the camera at the last build
+        // VCS_HD_LATE: a detailed sector first drawn near the camera while it moves (a building that pops in close)
+        const bool g_lateLog = std::getenv("VCS_HD_LATE") != nullptr;
+        std::array<uint8_t, 0x8000> g_lateState{};
+        uint32_t g_lateLogged = 0;
+        float g_lateCamX = 0.0f, g_lateCamY = 0.0f;
+        double g_lateQuietUntil = 0.0; // after a jump of the camera (teleport, campose)
+        std::array<uint8_t, 0x8000> g_lateWhy{};   // g_oscWhy at the last build that left it out
+        std::array<uint32_t, 0x8000> g_lateEntry{};
         std::atomic<uint32_t> g_fadeDraws{0};
         const bool g_drawDiff = std::getenv("VCS_HD_DRAWDIFF") != nullptr; // (below: drawDiffFrame)
         uint32_t g_dropLogged = 0;
@@ -1259,7 +1267,7 @@ namespace vcs::world_hd
                     }
                     out[k].push_back(rec);
                 }
-            if (g_oscLog && &b == &g_built[0])
+            if ((g_oscLog || g_lateLog) && &b == &g_built[0])
                 g_oscWhy.fill(0);
             std::bitset<0x8000> taken = ids;
             std::bitset<0x8000> fading; // the added sectors: the only ones with a fade
@@ -1278,7 +1286,7 @@ namespace vcs::world_hd
                     for (uint32_t r = from; r < to && total < room; r += kRecord)
                     {
                         const uint16_t id = rd16(r) & 0x7FFFu, gid = rd16(r + 2u);
-                        if (g_oscLog && id >= 0x20u && !rd32(r + 0xCu))
+                        if ((g_oscLog || g_lateLog) && id >= 0x20u && !rd32(r + 0xCu))
                         {
                             if (ids.test(id))
                                 g_oscWhy[id] = 1;
@@ -1396,6 +1404,45 @@ namespace vcs::world_hd
                                      int(uint32_t(g_oscGoneSlot[id])), int(g_oscGoneSlot[id] >> 32), g_oscDist[id]);
                     }
                     g_oscState[id] = now[id];
+                }
+            }
+            if (g_lateLog && &b == &g_built[0])
+            {
+                if (std::hypot(camX - g_lateCamX, camY - g_lateCamY) > 30.0f)
+                    g_lateQuietUntil = t + 8.0;
+                g_lateCamX = camX;
+                g_lateCamY = camY;
+                std::array<uint8_t, 0x8000> now{};
+                std::array<uint32_t, 0x8000> from{};
+                for (int k = 0; k < 8; ++k)
+                    for (const Rec &rec : out[k])
+                    {
+                        now[rec.id] = rec.hide == 1 || (rec.hide < 0 && (rd16(rec.from) & 0x8000u)) ? 2 : 1;
+                        from[rec.id] = rec.from;
+                    }
+                for (uint32_t id = 0x20u; id < kLodIds; ++id)
+                {
+                    if (now[id] == 1 && g_lateState[id] != 1 && t > g_lateQuietUntil && g_lateLogged < 2000u)
+                    {
+                        const float x = half(rd16(from[id] + 4u)), y = half(rd16(from[id] + 6u)), radius = half(rd16(from[id] + 0xAu));
+                        const float d = std::hypot(x - camX, y - camY);
+                        if (d - radius < 150.0f)
+                        {
+                            ++g_lateLogged;
+                            const uint64_t src = g_oscSource[id];
+                            std::fprintf(stderr, "[hdworld-late] frame %llu: sector %u at %.0f,%.0f r %.0f, %.0f m from the camera (%.0f,%.0f); "
+                                         "was %u; in the game's list %d; added from cell %d,%d; slot cell %d,%d; left out before: %u entry 0x%08x; last gone: %u\n",
+                                         (unsigned long long)g_frame, id, x, y, radius, d, camX, camY, g_lateState[id], int(ids.test(id)),
+                                         src ? int(uint32_t(src - 1u)) : -1, src ? int((src - 1u) >> 32) : -1, sx, sy, g_lateWhy[id],
+                                         g_lateEntry[id], g_oscGoneWhy[id]);
+                        }
+                    }
+                    if (now[id] != 1)
+                    {
+                        g_lateWhy[id] = g_oscWhy[id];
+                        g_lateEntry[id] = g_oscEntry[id];
+                    }
+                    g_lateState[id] = now[id];
                 }
             }
             for (uint32_t id = 0; &b == &g_built[0] && id < 0x8000u; ++id) // (the current slot's list decides)

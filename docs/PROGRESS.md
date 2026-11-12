@@ -939,6 +939,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_HD_DRAWCHECK=1` | HD world: every drawn sector's cached packet (and those it CALLs) walked; REFs into a slot buffer being read, or non-tags, logged (`[hdworld-draw]`) |
 | `VCS_HD_DRAWDIFF=1` | HD world: sectors drawn one frame and missing the next logged (`[hdworld-drop]`), with each faded draw (`[hdworld-fade]`) |
 | `VCS_HD_OSC=1` | HD world: sectors whose state in the built list (absent / shown / hidden) flips four times within 10 s, with why they were left out and how far (`[hdworld-osc]`) |
+| `VCS_HD_LATE=1` | HD world: a detailed sector first drawn within 150 m of the moving camera (a building popping in close), with what it was before and why it was left out (`[hdworld-late]`) |
 | `VCS_HD_FADE=<seconds>` | HD world: the detail's fade in / out on the horizon (default 1; 0 none) |
 | `VCS_HD_CORONAS=0` | HD world: the street lamps' coronas stay the game's (~80 m) with the detailed city further on |
 | `VCS_HD_CORONADEBUG=1` | HD world: a few far lamp coronas' projection logged every 300 frames (`[hdcorona]`) |

@@ -25,6 +25,10 @@ machine (runs while the player compiled shaders elsewhere showed 77-93 fps - not
    2026-11-12: entries the game empties when it drops a slot left our sectors out until the next re-entry (game-internals
    9j, "Entries emptied by a slot drop"; 347 flips -> 0 near the camera). Little Havana near the Pay 'n' Spray not yet
    re-checked by the player; if a building there still comes late, stand there with `--control` and use probe_view.py.
+   Checked 2026-11-12 with `VCS_HD_LATE=1` (a detailed sector first drawn within 150 m of a moving camera): 3 minutes
+   of AI driving through Little Havana and 10 minutes across the mainland - 2 events each, all sectors the game's own
+   list had hidden (flag 0x8000) until its cell changed, none left out by us. Pictures from 120-700 m south of the
+   player's spot, the player under the camera vs at the spot (approach.py): the same buildings.
 3. **Trees "sprout" far away** (the player: "as árvores realmente foram corrigidas" after the foliage fix - kept for
    reference) - vegetation popping in at distance. The translucent buckets (6-7: leaves, bushes) are
    deliberately not faded (a lower alpha on them made the game's own near foliage flicker; game-internals.md 9j,
@@ -33,7 +37,11 @@ machine (runs while the player compiled shaders elsewhere showed 77-93 fps - not
 4. **Parked cars / the ambulance** - done (game-internals.md 9l): the generators' 160 / 170 m follow Population
    distance (instruction patches in overrides.toml and vcs.toml, the values written by vcs_distance.cpp). Not yet
    checked by the player.
-5. Not tested with the setting on: interiors, save / load, missions, a soak (`tools/soak.py`), the bridge at speed.
+5. Not tested with the setting on: interiors, save / load, missions, the bridge at speed. Soak (2026-11-12, 1 h of
+   autodrive each, `tools/soak.py`): radius 3 and radius 0 both 120/120 samples ok, no crash / hang / falling, 30 fps
+   held. Private memory 1.17 -> 3.06 GB at radius 3, 1.10 -> 2.75 GB at radius 0: the same climb (the renderer's
+   texture / mesh caches filling at each new place, PERFORMANCE.md 14 - bounded by count, 3000 textures / 12000
+   meshes), the far city ~0.3-0.8 GB on top. Not a leak of ours; worth a 3-hour run with repeated spots to see it level.
 6. Clean-up: done 2026-11-12 (the previous agent's scripts and old test output here and in D:\Games\VCS Recomp; its
    two old agent worktrees removed). The previous agent's settings `world.hd_focus_*`, `world.preload_*`,
    `world.rsl_*` (still in vcs.ini) do nothing.

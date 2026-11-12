@@ -2016,6 +2016,9 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   flipping at every change of the game's cell (VCS_HD_OSC=1 logs sectors whose state flips four times within 10 s:
   347 flips in a 5-minute drive, 315 of them an empty entry). An empty entry is now taken with our copy right at the
   build: 0 flips near the camera; the ones left are cells entering / leaving the reach at 315-1090 m (with their fade).
+  VCS_HD_LATE=1 checks the other half of the report (a building appearing only close): a detailed sector first drawn
+  within 150 m of the moving camera. After the fix, 13 minutes of AI driving (Little Havana, the mainland) gave 4, all
+  sectors the game's own list carried hidden (record flag 0x8000) until its cell changed - the game's behaviour.
 - **Two copies of a gid**: a gid can be in pieces of the current and the next slot at two addresses, either one in the
   entry - every copy counts as the game's (`[hdworld] built-list record ... bad` for 4 records per route before).
 - **The sector packet heap** `0x6F3DB8` (built by `FUN_002BB768` at boot, called from `0x369384`; 0x7CFC8 bytes at
