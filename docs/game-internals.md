@@ -2010,6 +2010,19 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   pointing into a buffer that has just started a read is now freed (rebuilt from the entries as they are). Found with
   `VCS_HD_DRAWCHECK=1` (each drawn sector's packet and the packets it CALLs walked: 21 such REFs in a 7-minute drive,
   0 after) and a RAM dump of the live game (`dump`), checked offline (build/analysis/hd_world/ramcheck.py, pktcheck.py).
+- **A sector is several records** (the player's crane, 2026-11-12): one sector id can have a record per gid in the same
+  list - the parts of a model (the Little Havana crane's mast and jib: id 1033, gids 1516 and 1522; the low-detail ones
+  too, 5997 gids 4842 / 4844). The build took an id at its first record and left the other parts of every multi-part
+  sector out (170 records more at the crane's view once fixed: a tower beside it came back). An id is now taken from
+  one list - the game's, or the nearest extra cell naming it - with all of that list's records.
+- **Low-detail sectors are not twins of detailed ones**: of 138 replaced in a view, 19 had a detailed record at the very
+  same centre and radius (`VCS_HD_TWINS=1`); the rest are covered by several smaller detailed sectors. And a few hold
+  parts no detailed sector has: the crane's jib exists only in low-detail sector 5997, which the lists of the cells
+  around it hide (flag 0x8000) or do not name - the original loses the jib near the crane too (radius 0, the player in
+  that area: the mast alone). `kAlwaysKeepLod` keeps those (shown even where the game's list hides them). Tools:
+  `VCS_HD_PROBE=x,y,r` (what each build does with every record near a point, per list and why), the `keeplod` command
+  and `build/analysis/hd_world/bisect_lod.py` (which replaced low-detail sector holds a part: kept in halves, the part's
+  box measured in the picture).
 - **Entries emptied by a slot drop** (the player's "buildings switching between high and low quality", 2026-11-12):
   dropping a slot, the game clears the table entries that still hold that slot's copy (`FUN_0023CED0`) - gids our
   extra cells hold too. Until our next re-entry those sectors were left out of the built list, then back: models

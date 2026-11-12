@@ -360,6 +360,28 @@ namespace vcs::world_hd
         std::array<float, 0x8000> g_oscDist{};         // its centre's distance from the camera at the last build
         // VCS_HD_LATE: a detailed sector first drawn near the camera while it moves (a building that pops in close)
         const bool g_lateLog = std::getenv("VCS_HD_LATE") != nullptr;
+        // VCS_HD_PROBE=x,y,r: at a build (at most every 5 s, 20 times) every record whose sphere reaches within r of
+        // (x, y) - the game's and each extra cell's - with what the build did with it (a part of the map missing)
+        struct Probe
+        {
+            bool on = false;
+            float x = 0.0f, y = 0.0f, r = 0.0f;
+            Probe()
+            {
+                if (const char *e = std::getenv("VCS_HD_PROBE"))
+                    on = std::sscanf(e, "%f,%f,%f", &x, &y, &r) == 3;
+            }
+        } const g_probe;
+        double g_probeAt = 0.0;
+        // keeplod id,id,... (control command, bisecting a missing landmark): these low-detail sectors never replaced
+        std::bitset<0x8000> g_keepLod;
+        // Low-detail sectors that hold a part no detailed sector has, so they are never left out. The game's own data:
+        // the Little Havana crane's jib exists only in low-detail sector 5997 - the lists of the cells around it hide that
+        // sector (or do not name it) with no detailed jib, so the original loses the jib near the crane too; with the
+        // detailed city drawn far that was from 700 m on (the player, 2026-11-12). Found with build/analysis/hd_world/
+        // bisect_lod.py (keeplod over the replaced ones in view, the part's box measured in the picture).
+        constexpr uint16_t kAlwaysKeepLod[] = {5997};
+        uint32_t g_probeLogs = 0;
         std::array<uint8_t, 0x8000> g_lateState{};
         uint32_t g_lateLogged = 0;
         float g_lateCamX = 0.0f, g_lateCamY = 0.0f;
@@ -1209,6 +1231,8 @@ namespace vcs::world_hd
             std::bitset<0x8000> replacedNow;
             uint32_t lodHeld = 0;
             auto replaced = [&](uint16_t id, uint32_t r) {
+                if (g_keepLod.test(id) || std::find(std::begin(kAlwaysKeepLod), std::end(kAlwaysKeepLod), id) != std::end(kAlwaysKeepLod))
+                    return false;
                 const float x = half(rd16(r + 4u)), y = half(rd16(r + 6u)), radius = half(rd16(r + 0xAu));
                 const bool is = hd.any(x, y, radius, [&](int tag) {
                     if (tag == 0)
@@ -1259,20 +1283,44 @@ namespace vcs::world_hd
 
             std::array<std::vector<Rec>, 8> out;
             uint32_t hiddenLod = 0, added = 0, coarser = 0;
+            const bool probing = g_probe.on && &b == &g_built[0] && t - g_probeAt > 5.0 && g_probeLogs < 20u;
+            auto probeNear = [&](uint32_t r) {
+                return std::hypot(half(rd16(r + 4u)) - g_probe.x, half(rd16(r + 6u)) - g_probe.y) - half(rd16(r + 0xAu)) < g_probe.r;
+            };
+            if (probing)
+            {
+                g_probeAt = t;
+                ++g_probeLogs;
+                std::fprintf(stderr, "[hdprobe] build: slot cell %d,%d, camera %.0f,%.0f\n", sx, sy, camX, camY);
+            }
             for (int k = 0; k < 8; ++k)
                 for (uint32_t r = bucket[k]; r < bucket[k + 1]; r += kRecord)
                 {
                     Rec rec{uint16_t(rd16(r) & 0x7FFFu), r, 0.0f, 0.0f, 0.0f, -1};
+                    if (std::find(std::begin(kAlwaysKeepLod), std::end(kAlwaysKeepLod), rec.id) != std::end(kAlwaysKeepLod))
+                        rec.hide = 0; // (shown even where the game's own list hides it)
                     if (drawMode() >= 3 && rec.id >= kLodIds && !(rd16(r) & 0x8000u) && rd32(r + 0xCu) == 0 && replaced(rec.id, r))
                     {
                         rec.hide = 1;
                         ++hiddenLod;
                     }
+                    if (probing && probeNear(r))
+                        std::fprintf(stderr, "[hdprobe]   game  id %5u gid %5u at %.0f,%.0f r %.0f mat 0x%08x flag %u -> %s\n", rec.id,
+                                     rd16(r + 2u), half(rd16(r + 4u)), half(rd16(r + 6u)), half(rd16(r + 0xAu)), rd32(r + 0xCu),
+                                     rd16(r) >> 15, rec.hide == 1 ? "HIDDEN (replaced)" : (rd16(r) & 0x8000u) ? "hidden by the game" : "drawn");
                     out[k].push_back(rec);
                 }
             if ((g_oscLog || g_lateLog) && &b == &g_built[0])
                 g_oscWhy.fill(0);
+            // A sector id is taken from one list only (the game's, or the nearest extra cell naming it) - but with all of
+            // that list's records for it: a sector can be several records, one id and a gid each (the parts of a model -
+            // the Little Havana crane's mast and jib, id 1033 gids 1516 / 1522). Taking the id at its first record left the
+            // other parts out while their low-detail sector was hidden: the crane's top gone near it (the player,
+            // 2026-11-12; found with VCS_HD_PROBE and keeplod).
             std::bitset<0x8000> taken = ids;
+            static std::array<const Cell *, 0x8000> takenBy;
+            takenBy.fill(nullptr);
+            auto takenElsewhere = [&](uint16_t id, const Cell *c) { return taken.test(id) && takenBy[id] != c; };
             std::bitset<0x8000> fading; // the added sectors: the only ones with a fade
             const uint32_t room = (kSynthBytes - 0x40u) / kRecord;
             uint32_t total = (b8 - b0) / kRecord;
@@ -1293,7 +1341,7 @@ namespace vcs::world_hd
                         {
                             if (ids.test(id))
                                 g_oscWhy[id] = 1;
-                            else if (taken.test(id))
+                            else if (takenElsewhere(id, c))
                                 g_oscWhy[id] = 2;
                             else if (!drawable(c, gid))
                             {
@@ -1301,7 +1349,12 @@ namespace vcs::world_hd
                                 g_oscEntry[id] = rd32(table + gid * 0xCu);
                             }
                         }
-                        if (id < 0x20u || taken.test(id) || rd32(r + 0xCu) || !drawable(c, gid))
+                        if (probing && probeNear(r))
+                            std::fprintf(stderr, "[hdprobe]   cell %d,%d id %5u gid %5u at %.0f,%.0f r %.0f mat 0x%08x flag %u -> %s\n", c->x, c->y, id, gid,
+                                         half(rd16(r + 4u)), half(rd16(r + 6u)), half(rd16(r + 0xAu)), rd32(r + 0xCu), rd16(r) >> 15,
+                                         id < 0x20u ? "SKIPPED (moving)" : takenElsewhere(id, c) ? "taken already" : rd32(r + 0xCu) ? "SKIPPED (matrix)" :
+                                         !drawable(c, gid) ? "SKIPPED (entry)" : id >= kLodIds && replaced(id, r) ? "coarser, replaced" : "added");
+                        if (id < 0x20u || takenElsewhere(id, c) || rd32(r + 0xCu) || !drawable(c, gid))
                             continue;
                         const float near = std::hypot(half(rd16(r + 4u)) - camX, half(rd16(r + 6u)) - camY); // (its centre)
                         if (id >= kLodIds && drawMode() < 3)
@@ -1312,6 +1365,7 @@ namespace vcs::world_hd
                             continue;
                         }
                         taken.set(id);
+                        takenBy[id] = c;
                         int hide = switched(id);
                         if (hide < 0)
                             hide = 0;
@@ -1339,6 +1393,42 @@ namespace vcs::world_hd
                 }
             }
             g_stats.coarser = coarser;
+            // VCS_HD_TWINS=1 (once a minute): of the low-detail sectors left out as replaced, how many have a detailed
+            // twin (a record of id < kLodIds at the very same centre and radius - the half floats equal) in the lists
+            static const bool twinLog = std::getenv("VCS_HD_TWINS") != nullptr;
+            static double twinAt = 0.0;
+            if (twinLog && &b == &g_built[0] && t - twinAt > 60.0)
+            {
+                twinAt = t;
+                std::unordered_set<uint64_t> details;
+                auto key = [&](uint32_t r) { return uint64_t(rd16(r + 4u)) << 32 | uint64_t(rd16(r + 6u)) << 16 | rd16(r + 0xAu); };
+                for (uint32_t r = b0; r < b8; r += kRecord)
+                    if ((rd16(r) & 0x7FFFu) < kLodIds)
+                        details.insert(key(r));
+                for (const Cell *c : extra)
+                {
+                    const uint32_t from = rd32(c->list.at + 8u), to = rd32(c->list.at + 0x28u);
+                    for (uint32_t r = from; r >= c->list.at && r < to && to <= c->list.at + c->list.bytes; r += kRecord)
+                        if ((rd16(r) & 0x7FFFu) < kLodIds)
+                            details.insert(key(r));
+                }
+                uint32_t twins = 0, alone = 0, logged = 0;
+                for (int k = 0; k < 8; ++k)
+                    for (const Rec &rec : out[k])
+                        if (rec.id >= kLodIds && (rec.hide == 1 || replacedNow.test(rec.id)))
+                        {
+                            if (details.count(key(rec.from)))
+                                ++twins;
+                            else
+                            {
+                                ++alone;
+                                if (logged++ < 30u)
+                                    std::fprintf(stderr, "[hdtwin] lod %u at %.0f,%.0f r %.0f: no twin\n", rec.id, half(rd16(rec.from + 4u)),
+                                                 half(rd16(rec.from + 6u)), half(rd16(rec.from + 0xAu)));
+                            }
+                        }
+                std::fprintf(stderr, "[hdtwin] replaced low-detail sectors: %u with a detailed twin, %u without\n", twins, alone);
+            }
 
             // write it: header (the game's, the buckets ours), records by bucket sorted by id (FUN_0023E748's merge)
             const uint32_t at = b.buffers[b.next];
@@ -2241,6 +2331,22 @@ namespace vcs::world_hd
             reply(out);
         });
 
+        ps2control::addCommand("keeplod", [](const std::string &args, ps2control::Reply reply) {
+            std::lock_guard<std::recursive_mutex> lock(g_mutex);
+            g_keepLod.reset();
+            for (const char *p = args.c_str(); *p;)
+            {
+                char *end = nullptr;
+                const unsigned long v = std::strtoul(p, &end, 10);
+                if (end == p)
+                    break;
+                if (v < 0x8000u)
+                    g_keepLod.set(v);
+                p = *end ? end + 1 : end;
+            }
+            ++g_version;
+            reply("ok " + std::to_string(g_keepLod.count()));
+        });
         ps2control::addCommand("hdworld", [](const std::string &, ps2control::Reply reply) {
             std::lock_guard<std::recursive_mutex> lock(g_mutex);
             char text[512];

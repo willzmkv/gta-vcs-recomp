@@ -940,6 +940,8 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_HD_DRAWDIFF=1` | HD world: sectors drawn one frame and missing the next logged (`[hdworld-drop]`), with each faded draw (`[hdworld-fade]`) |
 | `VCS_HD_OSC=1` | HD world: sectors whose state in the built list (absent / shown / hidden) flips four times within 10 s, with why they were left out and how far (`[hdworld-osc]`) |
 | `VCS_HD_LATE=1` | HD world: a detailed sector first drawn within 150 m of the moving camera (a building popping in close), with what it was before and why it was left out (`[hdworld-late]`) |
+| `VCS_HD_PROBE=x,y,r` | HD world: at a build (every 5 s, 20 times) every record whose sphere reaches within r of (x, y), per list (the game's, each extra cell's), with what the build did and why (`[hdprobe]`); commands `keeplod id,...` (low-detail sectors never replaced) and `dummiesnear x y [r [pool pointer]]` |
+| `VCS_HD_TWINS=1` | HD world: once a minute, how many of the replaced low-detail sectors have a detailed record at the same centre and radius (`[hdtwin]`) |
 | `VCS_HD_FADE=<seconds>` | HD world: the detail's fade in / out on the horizon (default 1; 0 none) |
 | `VCS_HD_CORONAS=0` | HD world: the street lamps' coronas stay the game's (~80 m) with the detailed city further on |
 | `VCS_HD_CORONADEBUG=1` | HD world: a few far lamp coronas' projection logged every 300 frames (`[hdcorona]`) |

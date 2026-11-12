@@ -726,6 +726,41 @@ namespace vcs::world_hd_coronas
             reply(out);
         });
 
+        // dummiesnear X Y R -> ok then "model x y z lod0 lod1 type" per used dummy within R (the landmarks the low-detail
+        // city stands in for: which entity a hidden low-detail sector was the far image of)
+        ps2control::addCommand("dummiesnear", [](const std::string &args, ps2control::Reply reply) {
+            if (!g_ram)
+                return reply("error not yet");
+            float qx = 0.0f, qy = 0.0f, qr = 50.0f;
+            unsigned poolPtr = kDummyPool;
+            if (std::sscanf(args.c_str(), "%f %f %f %x", &qx, &qy, &qr, &poolPtr) < 2)
+                return reply("error usage: dummiesnear X Y [R [POOL_POINTER]]");
+            const uint32_t pool = rd32(poolPtr);
+            if (!valid(pool, 0xCu))
+                return reply("error no pool");
+            const uint32_t entries = rd32(pool), flags = rd32(pool + 4u), size = rd32(pool + 8u), table = rd32(kModelTable);
+            // (the entries' size: the flags follow them)
+            const uint32_t stride = poolPtr == kDummyPool || !size ? kDummySize : (flags - entries) / size;
+            std::string out = "ok stride=" + std::to_string(stride) + " size=" + std::to_string(size);
+            for (uint32_t i = 0; i < size && i < 0x10000u && out.size() < 3800u; ++i)
+            {
+                if (rd8(flags + i) & 0x80u)
+                    continue;
+                const uint32_t e = entries + i * stride;
+                const float x = rdf(e + 0x30u), y = rdf(e + 0x34u);
+                if (std::hypot(x - qx, y - qy) > qr)
+                    continue;
+                const uint16_t model = rd16(e + 0x56u);
+                const uint32_t mi = model < rd32(kModelCount) && valid(table + model * 4u) ? rd32(table + model * 4u) : 0;
+                char t[160];
+                std::snprintf(t, sizeof(t), " | %u %.1f %.1f %.1f lod %.0f %.0f type %u", model, x, y, rdf(e + 0x38u),
+                              valid(mi, 0x40u) ? rdf(mi + 0x2Cu) : -1.0f, valid(mi, 0x40u) ? rdf(mi + 0x30u) : -1.0f,
+                              valid(mi, 0x40u) ? rd8(mi + 0x10u) : 0u);
+                out += t;
+            }
+            reply(out);
+        });
+
         ps2control::addCommand("farcoronas", [](const std::string &, ps2control::Reply reply) {
             char text[256];
             std::snprintf(text, sizeof(text), "ok lights=%u drawn=%u injected=%u dummies=%u maxdist=%.0f slot=%d frames=%u texture=0x%08x lamptex=0x%08x pending=%d other=%u traffic=%u",
