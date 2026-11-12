@@ -2023,6 +2023,11 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   `VCS_HD_PROBE=x,y,r` (what each build does with every record near a point, per list and why), the `keeplod` command
   and `build/analysis/hd_world/bisect_lod.py` (which replaced low-detail sector holds a part: kept in halves, the part's
   box measured in the picture).
+- **Conditional pieces follow the clock** (the player's downtown tower, 2026-11-12: lit from one spot, dark 130 m
+  further): a cell list's conditional pieces (FUN_0023D600's {kind, value, piece} at +0x30) hold, among others, the
+  buildings' lit windows at night (hour windows). They were chosen when an extra cell was read: a cell read in the
+  afternoon kept its dark towers all night. Reproduced with the cells read at 12:00 and the clock moved to 03:30; each
+  cell's conditions are now checked once a second and a cell whose mask changed is read again.
 - **Lit low-detail models** (the player, 2026-11-12: downtown buildings losing their lights when they change model):
   a building's low-detail model can carry its night lights brighter than its detailed one. Downtown at 23:00 from
   cell 14,25, office block 869 / low-detail 6078 (same centre, -842,892): the game's list draws 6078 with a bright

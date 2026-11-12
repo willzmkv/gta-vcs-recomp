@@ -268,6 +268,7 @@ namespace vcs::world_hd
             float cx = 0, cy = 0;
             Piece list;                                // the cell's piece: its sector list
             std::vector<Piece> conditional;            // pieces its list switches on (state, hour)
+            uint64_t condMask = 0;                     // which of its list's conditions were on when it was read
             uint64_t area = 0;                         // key into g_areas
             std::unordered_map<uint32_t, uint32_t> geometry; // gid -> our geometry (cell, conditional, area pieces)
             std::bitset<0x8000> ids;                  // the sector ids in its list
@@ -977,6 +978,21 @@ namespace vcs::world_hd
             }
         }
 
+        // A cell list's conditions (FUN_0023D600: {kind, value, piece index} at +0x30, count +0x2C), the ones on now as bits.
+        // The pieces they switch hold, among others, the buildings' lit windows at night: read once with the cell, a cell
+        // read in the afternoon kept its dark towers all night (the player's downtown tower, 2026-11-12) - update() reads a
+        // cell again when its mask changes.
+        uint64_t condMask(uint32_t list, uint32_t bytes)
+        {
+            const uint32_t conds = rd16(list + 0x2Cu), condAt = rd32(list + 0x30u);
+            uint64_t mask = 0;
+            if (conds && conds < 0x100u && condAt >= list && condAt + conds * 4u <= list + bytes)
+                for (uint32_t i = 0; i < conds && i < 64u; ++i)
+                    if (switchedOn(rd8(condAt + i * 4u), rd8(condAt + i * 4u + 1u)))
+                        mask |= uint64_t(1) << i;
+            return mask;
+        }
+
         bool load(int x, int y)
         {
             const uint32_t entry = cellEntry(x, y);
@@ -990,6 +1006,7 @@ namespace vcs::world_hd
             if (!loadIndexed(entry, cell->list))
                 return false;
             const uint32_t list = cell->list.at;
+            cell->condMask = condMask(list, cell->list.bytes);
             // conditional pieces (FUN_0023D600): {kind, value, piece index} at the list's +0x30, count +0x2C
             const uint32_t conds = rd16(list + 0x2Cu), condAt = rd32(list + 0x30u);
             if (conds && conds < 0x100u && condAt >= list && condAt + conds * 4u <= list + cell->list.bytes)
@@ -1650,8 +1667,9 @@ namespace vcs::world_hd
             // entries the game left stale (or emptied) since: ours again - every change of its slots, and once a second
             if (g_reenter || slotState() != g_gameState || g_frame % 60u == 0u)
                 reenterAll();
-            // too far now: dropped
+            // too far now: dropped (and, once a second, a cell whose conditional pieces switched - read again)
             const double t = seconds();
+            const bool checkConds = g_frame % 60u == 30u;
             for (auto it = g_cells.begin(); it != g_cells.end();)
             {
                 Cell &c = *it->second;
@@ -1666,7 +1684,7 @@ namespace vcs::world_hd
                     c.leaving = t;
                     ++g_version;
                 }
-                if (far && t - c.leaving >= kFadeSeconds)
+                if ((far && t - c.leaving >= kFadeSeconds) || (checkConds && condMask(c.list.at, c.list.bytes) != c.condMask))
                 {
                     forget(*it->second);
                     it = g_cells.erase(it);
