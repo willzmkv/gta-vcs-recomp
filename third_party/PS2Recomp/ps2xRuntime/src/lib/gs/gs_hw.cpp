@@ -3763,7 +3763,17 @@ namespace
 
         static uint64_t hashBytes(const uint8_t *data, uint32_t size)
         {
-            // [gta-recomp] four independent lanes (one multiply chain was the cost of hashing every streamed upload)
+            // [gta-recomp] XXH3 (render::textureHash, the texture packs' hash; SIMD, ~10x the lanes below): every whole
+            // upload is hashed to skip the ones the game sends again, and the hash was the largest part of UploadImage -
+            // UploadImage 12% of the GS stage's time on the cruise (PERFORMANCE.md 42). The value only keys caches in
+            // this backend. PS2X_HW_UPLOAD_HASH=lanes: the hash before.
+            static const bool lanes = [] {
+                const char *e = std::getenv("PS2X_HW_UPLOAD_HASH");
+                return e && std::strcmp(e, "lanes") == 0;
+            }();
+            if (!lanes)
+                return render::textureHash(data, size);
+            // four independent lanes (one multiply chain was the cost of hashing every streamed upload)
             uint64_t h[4] = {0x9E3779B97F4A7C15ull ^ size, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull};
             uint32_t i = 0;
             for (; i + 32u <= size; i += 32u)

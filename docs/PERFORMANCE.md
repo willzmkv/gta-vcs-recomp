@@ -1095,6 +1095,25 @@ What is left in the largest frames (~48 s into the route, 14,000 draws): the GS 
 `recordPrimitive`, the GS path's own work - with the game thread and the render worker waiting on it. Outputs:
 `build/cruise/user_full`, `user_notex`, `user_full2`.
 
+### 42. The GS stage's hashes: XXH3 (2026-11-12)
+
+The GS stage on the cruise with the player's mods (`VCS_PROFILE_THREAD=GsStage`, 90,000 samples): 80% busy - UploadImage
+12.2% on its own, `gsRun` 10.7, memcpy 7.8, the CLUT (LoadClut, LoadClutFromRect, ClutHash) ~8.7, bindTexture 4.3, the
+heap ~2.8. Most of UploadImage was `hashBytes`: every whole upload is hashed to skip the ones the game sends again;
+ClutHash runs on nearly every draw (a CLUT load before each). Both are now XXH3 (`render::textureHash`, already in the
+build for the texture packs), the values only key the backend's caches (PS2RECOMP_PATCHES.md):
+
+| GS stage, share of its samples | before | after |
+|---|---|---|
+| UploadImage | 12.2% | 6.3% |
+| ClutHash | 1.18% | 0.06% |
+| render::textureHash (the XXH3 itself) | - | 0.02% |
+
+About 7% of the GS stage's time. Uncapped, the stage spends what it saves on more frames, so its busy share hardly moves
+(80.3 -> 78.5%); the cruise's fps varies 106-119 between identical runs, too much to show it. Checked:
+`texture_check.py`'s game check with the HD pack (1647 files matched and loaded, the five spots drawn).
+`build/cruise/gs_prof`, `gs_prof2`.
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker
