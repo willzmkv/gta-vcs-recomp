@@ -1,108 +1,106 @@
 # HD world further - status (branch hd-world-impl)
 
-Revised 2026-11-11 after a review of everything the previous agent did on this branch. The earlier version of this
-file described a "Phase 1-8" roadmap and several results that the code does not support; the corrections are below.
+Handoff written 2026-11-11 (night). Read this, then docs/game-internals.md 9j (everything learnt about the world's
+streaming, with addresses), then `src/game/vcs_world_hd.cpp` (its comments say why each part exists).
 
 ## Goal
 
-The detailed city (buildings, streets, props of the world's sector geometry) reaches ~260 m around the camera; beyond
-it the game draws its low-detail image of the map. Goal: the detailed city further, with the original kept as the
-reference (setting at 0 = untouched game path).
+The detailed city (the world's sector geometry: buildings, streets, props, vegetation) reaches ~260 m around the camera
+in the original; beyond it the game draws a low-detail image of the map. Goal: the detailed city further, authentic by
+default. Setting: Graphics > Distance and population (experimental) > **Detailed city distance**: Original (~260 m) /
+~450 / ~580 / ~720 m (`world.hd_radius`, env `VCS_HD_RADIUS`, live). Default stays Original. The player plays at ~720 m.
 
-## Review of the previous work (what was claimed vs what the code does)
+## State (the player's verdict, 2026-11-11: "quase tudo perfeito")
 
-| Claim | Reality |
-|---|---|
-| Phase 3A "Preload ahead": 15x frame time improvement (548 -> 37 ms) | `vcs_world.cpp` `chooseHook` only **logs** "bias would be ..."; nothing is changed. No measurement of 548/37 ms exists in the repo. |
-| Settings `world.hd_radius`, `hd_focus_*`, `preload_*`, `rsl_cells_radius`, `rsl_stream_budget_mb`, `rsl_crossfade` | 8 menu entries, **all no-ops** (empty `onChange`, or read by stubs). Why moving sliders showed nothing. |
-| Phase 3B Option C: `HostCellManager` implemented | Stub: `loadCell` / `submitDraws` are TODO comments; `computeVisibleCells` inserted map entries every frame and never removed them. |
-| Phase 3B Option D: piece cache hook (uncommitted) | Checked the piece magic against `0x006D646C` ("ldm") - the index entries are `'DLRW'` (`0x57524C44`), so it **never cached anything**. Had it matched: a world piece is not an LDM model (wrong decoder), the ISO was opened and read synchronously inside a guest hook, draws were submitted with zero constants (no transform), the index list was submitted as a triangle strip without indices, and a 64-bit hash of every vertex was computed per batch per frame. Saved as `build/analysis/hd_world/optionD_piececache_abandoned.patch` and reverted. |
-| "Crashes when leaving the safehouse" | Not reproduced by any test here; the tests ran at Fort Baxter (no city in view) - the locations could not show any result either. |
-| `vcs_ldm.cpp` "decoder for cell pieces" | A model (`.mdl`) decoder; cell pieces are WRLD sector data. Kept, unused. |
+Works: the far city at ~720 m, no VU1 garbage, no full-screen textures, no noise textures, no flickering foliage,
+the detail fading in / out on the horizon, ~145 fps uncapped on the cruise route (Original ~144), measured on an idle
+machine (runs while the player compiled shaders elsewhere showed 77-93 fps - not comparable).
 
-Root causes: no reverse engineering of how a cell's list and its geometry relate before writing code; no visible test.
+### Open (the player's last report) - the work list
 
-## What the game actually does (decompiled + measured, docs/game-internals.md 9j)
+1. **Lamp-post coronas** (the light sprites on street lamps) do not come with the far lamp posts, and show only at a
+   short range. The posts are sector geometry (drawn far now); the coronas come from the game's corona code (not found
+   yet; a `coronas` control command exists in src/debug/rig.cpp; src/game/vcs_distance.cpp and
+   docs/T2_POPULATION_AND_DISTANT_LIFE_PLAN.md cover other distances). Probably a per-corona far clip and/or lights
+   registered from the current cell / area only. Find where lamp coronas come from and their draw distance; make them
+   follow the setting.
+2. **Some buildings appear only very close** - especially Little Havana near the Pay 'n' Spray. Check whether they are
+   sectors at all (`probe_view.py` with the live game, below) or entities (CRenderer / IPL instances - vcs_distance.cpp's
+   LOD scale). If sectors: which cell's list names them, whether `taken` or the low-detail rule leaves them out, whether
+   their cell is loaded (nearest first, one a frame, within `kReach`).
+3. **Trees "sprout" far away** - vegetation popping in at distance. The translucent buckets (6-7: leaves, bushes) are
+   deliberately not faded (a lower alpha on them made the game's own near foliage flicker; game-internals.md 9j,
+   "Fades"). Ideas: fade them another way (dithered, or an alpha that does not touch the state shared with the game's
+   entries), or only at the very edge.
+4. **Parked cars / the ambulance pop in late** (not this feature): the car generators (FUN_0040A9E0, 300 generators in
+   16 slices) spawn when the player is within 160 m (`lui $at, 0x46C8` = 25600.0 at 0x40AB10, `mtc1` at 0x40AB14) and
+   take queued ones within 170 m (0x46E1C800: `lui`/`ori`/`mtc1` at 0x40ACA8..0x40ACB0). They are immediates, so the fix
+   is an instruction patch in game/vcs/overrides.toml (its format is there) loading the float from a free guest
+   address the host sets from a setting (default 25600 = original), e.g. `lui $at, 0x07F0` (0x3C0107F0) +
+   `lwc1 $f4, 0($at)` (0xC4240000); 0x07800000-0x07E00000 is unused. Then `python tools/build.py --recompile` (slow).
+   First check how far parked cars are removed (CCarCtrl::RemoveDistantCars FUN_00433008; population distance in
+   vcs_distance.cpp): spawning beyond the removal distance deletes them at once. A previous agent's C++ rewrite of
+   FUN_0040A9E0 in vcs_distance.cpp is commented out; it calls guest functions from host code (AGENTS.md rule 2) - do not
+   revive it. **The player has not yet said yes to the recompile** - ask.
+5. Not tested with the setting on: interiors, save / load, missions, a soak (`tools/soak.py`), the bridge at speed.
+6. Clean-up: the previous agent's untracked junk in the root (`apply_patch*.py`, `patch_*.py`, `final_patch*.py`,
+   `60/`, `PHASE3B_OPTION_D_STATUS.md`) - delete once the player agrees. The previous agent's settings
+   `world.hd_focus_*`, `world.preload_*`, `world.rsl_*` (still in vcs.ini) do nothing.
 
-- Three cell slots (`level + 0x248` current, `+0x250` previous/next, `+0x258` loading) and three area slots
-  (`+0x24C/0x254/0x25C`). A cell slot: `+8/+0xC` cell, `+0x14` z shift, `+0x18` complete, `+0x1C` piece count,
-  `+0x20..` pieces (the cell piece = its sector list, then its conditional pieces).
-- Every piece starts with `{gid, geometry}` pairs entered into the level's geometry table (0xC per gid: geometry, cached
-  packet, owner). The draw (`FUN_00240ED8`) draws a record when its gid's table entry has geometry.
-- **A cell's list names only its own cell's, its own area's and the always-resident low-detail geometry** (offline over
-  the disc: police cell 14,25 = 47 own-cell, 53 own-area, 386 resident records; no other cell's geometry anywhere).
-  So loading more pieces alone shows nothing: more *lists* must be drawn.
-- The world draw already merges two lists during the cross-fade (`FUN_0023E748`): the mechanism exists in the game.
-- Read watch on the list pointer: only the world draw and the streaming functions (`0x23C...-0x2413..`) read it.
+## How it works (src/game/vcs_world_hd.cpp)
 
-## The implementation now (src/game/vcs_world_hd.cpp)
+1. Cells around the camera (not the current one) are read from the disc image (`vcs::IsoImage`) into the port's memory
+   (arena at `0x4000000`, 48 MB; EE RAM is 128 MB), with their area and conditional pieces, relocated as the game does
+   (FUN_00324AC0); their {gid, geometry} pairs entered into the level's geometry table **only where the entry is empty
+   or stale** (the game's own entries are never taken; ours removed only while still ours).
+2. At the world draw (FUN_0023E748) the current slot's sector list is replaced by a built one: the game's records, plus
+   every detailed sector (id < 4000) of every loaded extra list once, with the low-detail sectors (id >= 5500) left out
+   where a list leaves them out for its own detail (the rule the lists were made by). Same for the previous slot while
+   the game cross-fades. The game's list is put back at the entry of every streaming function.
+3. Memory: the sector packet heap (0x6F3DB8) rebuilt at `0x7000000` with 8 MB (src/game/vcs_memory.cpp); the
+   translucent list moved to an 8192-entry buffer while on (it lives inside the level object, unbounded).
+4. Fades: an extra cell's opaque sectors beyond 250 m come in through the game's translucent list (FUN_0023E548, as its
+   cross-fade does) with the alpha rising over 1 s; the low detail they replace stays until then; a cell out of reach
+   fades out before it is dropped.
 
-1. Cells around the camera (not the current one) read from the disc image into the port's memory (`0x4000000`, 48 MB;
-   host EE RAM raised 64 -> 128 MB), with their area and conditional pieces; relocated as the game does
-   (`FUN_00324AC0`); their pairs entered into the table **only where the entry is empty** (the game's entries never
-   touched; ours removed only while still ours; cached packets freed through the game's own deferred ring).
-2. At the world draw, the current slot's list replaced by a built one, by the rule the game's lists are made by:
-   every detailed sector (id < 3500) of every loaded list once; a low-detail sector (id >= 5500) left out where a
-   loaded list leaves it out and has detailed sectors inside it. Same for the previous slot during the cross-fade.
-3. The game's list put back at the entry of every streaming function (chooser, area-for-position, swap, drop, flush);
-   everything dropped before the level's data is read again (`FUN_0023BAF0`: the islands share one level object and
-   one table - the bridge reloads it).
-4. The sector packet heap (`0x6F3DB8`, 512 KB) rebuilt in the upper memory with 8 MB.
-5. Setting: Graphics > Distance and population (experimental) > **Detailed city distance**: Original / ~450 / ~580 /
-   ~720 m (`world.hd_radius`, `VCS_HD_RADIUS`, live). `hdworld` control command for the numbers.
+### What broke, and what each taught (all fixed; game-internals.md 9j "What broke drawing more lists")
 
-## Results (2026-11-11, quick build, RX 7700 XT)
-
-| | Original | ~720 m |
+| Symptom | Cause | Fix |
 |---|---|---|
-| Avenue spot: sectors drawn | 229 | 439 (+629 records, 110 low-detail hidden) |
-| Extra memory | - | 24-33 MB |
-| Hooks' own time per frame | - | ~10 us; 1.5-2.6 ms in a frame that loads a cell / rebuilds |
-| Cruise route (138 s, 144 km/h, uncapped) | 138 fps, p95 12.6 ms | 129 fps, p95 12.7 ms; no hang |
-| Packet buffer peak (cap 0xE6670) | 57 KB | 89 KB; nothing skipped |
+| VU1 garbage, full-screen textures, <10 fps | translucent list overflowing inside the level object | moved to our buffer |
+| same | stale table entries (the game never clears an area's entries) | good = ours or what the game's current / next slots hold (every copy of a gid) |
+| same | cached packets orphaned by the cross-fade swap | swept on release |
+| same | a sector's cached packet CALLs its textures' cached packets, freed by the game with their area | every packet put on the free ring collected; its callers freed before the next draw |
+| purple / green noise blocks, leaves changing | cached packets REF texture data in a slot buffer the game starts reading the next cell into | packets pointing into a buffer that starts a read are freed |
+| sectors missing | only one game copy of a gid counted; a failed cell load marked empty for good | every copy counts; failed loads retried after 5 s |
+| foliage flickering near the camera | fading translucent entries (lower alpha) disturbed the game's own foliage | only opaque buckets fade |
+| signs / building parts vanishing on the way in | a 200 m "nothing extra near the camera" rule (a wrong theory) | reverted |
 
-Bugs found on the way (fixed): the neighbours' far low-detail sectors drawn as if detail (near buildings in low
-quality - the user's report); a sphere rule that cut large ground sectors (dark holes); the list rebuilt every frame;
-the island switch reloading the table under our entries (the world nearly empty, then the game spinning ~1 s a frame
-on the cruise route).
+## Tools and how to investigate
 
-## Status 2026-11-11 night - the VU1 garbage found and fixed; the player's check next
+- Correctness on the hidden cruise route: `python tools/cruise.py run --name N --fps 0 build/cruise/N VCS_HD_RADIUS=3
+  VCS_HD_DRAWCHECK=1`, then in `build/run/N.log`: `grep -c "VU1 reserved"` (garbage), `grep -c "list record"`
+  (refused records), `grep -c hdworld-draw` (packets reading a loading buffer) - all must be 0. `perf_report.py
+  build/cruise/N/perf.csv` for fps. (`out` is a path: a bare name lands in the repo root.)
+- With the player's game open (`python tools/run.py 0 NAME --control`, log in `build/run/NAME.log`):
+  `python tools/gamectl.py gameinfo` (position, camera), `gamectl.py screenshot F.png`, `hdworld` (counters: cells,
+  added, hidden, fading, lod_held, ...), `peek`, `dump PATH` (all 128 MB of guest RAM at once), `burst DIR N` (the next
+  N presented frames as PNGs), `press F12` (a frame's draw log into the run log + `build/run/hw_display.ppm`). Never
+  kill the player's game; never run tests while the player plays (and they can't relink while it runs).
+- build/analysis/hd_world (ignored by git): `probe_view.py LO HI [DMIN DMAX]` (sectors of our built lists in a bearing
+  range from the live camera, with geometry and texture entries; slow over `peek`, ~1 min - the player must stand
+  still), `ramcheck.py RAM.bin` / `pktcheck.py RAM.bin` (offline checks of a `dump`), `flicker.py NAME` +
+  `flickmap.py DIR [OUT]` (fixed camera, bursts per radius, pixels that change and change back), `shot_purple.py` (the
+  player's Little Havana spot; env TIME, WEATHER, DRIVE, REPS, VCS_SCREENSHOT_DIR for F8 window shots with
+  `PS2X_HIDDEN_WINDOW=3840x2160`), `shot_islands.py`, `shot_fade.py`, `crop.py`, `ppm2png.py`, `purple.py`.
+- Debug switches (docs/PROGRESS.md table): `VCS_HD_DRAWCHECK`, `VCS_HD_DRAWDIFF` (sectors missing for one frame, faded
+  draws), `VCS_HD_PKTDEBUG` (ring pushes / frees / CALL targets), `VCS_HD_FADE=<s>` (0 off), `VCS_HD_NODRAW`,
+  `VCS_HD_DRAWMODE=1|2|3`, `VCS_HD_FREE_DELAY`; runtime `PS2X_VIF_CHECK=1` (bad VIFcodes with their DMA tags).
+- The method that worked: reproduce hidden with a fixed camera, bisect with switches, confirm with a counter that must
+  be 0, then ask the player. The player's own sessions find what hidden runs miss (night, weather, their save, 4K).
 
-The player's session (`build/run/jogo_hd.log`): full-screen textures, the world "unloading", under 10 fps at ~720 m.
-The log had 216k `[VU1 reserved lower]` lines - the VU1 executing garbage. The hidden cruise route reproduces it;
-measure: `grep -c "VU1 reserved" build/run/<name>.log` after `tools/cruise.py run --name N build/cruise/N VCS_HD_RADIUS=3`.
+## Rules (AGENTS.md, and learnt here)
 
-Causes, each confirmed by the counts (docs/game-internals.md 9j, "What broke drawing more lists"): stale game entries
-for textures (taken back), cached packets orphaned by the cross-fade swap (swept), the slot being read into (not
-trusted), the level reload handing back torn-down pointers, the translucent list overflowing inside the level object
-(moved), and the last one: **a sector's cached packet CALLs its textures' cached packets** - the game freed those with
-their area while a sector of ours kept CALLing the freed block (found with `PS2X_VIF_CHECK=1`: a CALL into a block
-whose first words were the heap's links). Every packet put on the free ring is now collected, and every cached packet
-that CALLs one goes too before the next draw.
-
-| ~720 m, cruise route (165 s) | VU1 garbage | fps |
-|---|---|---|
-| before (4 runs) | 0 / 2015 / 986087 / 2450 | - |
-| after, 60 fps cap (3 runs) | 0 / 0 / 0 | 59.4, p99 17.0 ms |
-| after, uncapped | 0 | 144.9, p99 14.6 ms (Original: 144.2, p99 15.4) |
-
-Debug switches (vcs_world_hd.cpp): `VCS_HD_NODRAW=1`, `VCS_HD_DRAWMODE=1|2|3`, `VCS_HD_FREE_DELAY=<frames>`,
-`VCS_HD_PKTDEBUG=1`; runtime `PS2X_VIF_CHECK=1`; the `hdcompare` command; `[hdworld]` log line every 10 s (with
-"packets swept N + M callers"); `GAME-list` / `built-list` lines for entries refused at the draw.
-
-Next: the player's session at ~720 m (the setting's default stays Original until it passes).
-
-## Test spot
-
-`tools/spots.py` **avenue** (the user's spot): the police spot ~15 steps west, facing south - the whole avenue in view.
-Daytime (13:00). Script: `build/analysis/hd_world/shot_avenue.py NAME --hd 0 --hd 3`.
-
-## Plan
-
-1. The player's look in game (radius 1-3), with Fog at 100 % (this worktree's vcs.ini has `fog.distance=30`, which
-   swallows the city past ~250 m).
-2. Interiors, save / load, missions, a soak (soak.py) with the setting on.
-3. Hitches while cells load: spread the copy (one piece a frame now, up to 0.9 MB).
-4. Then: entities/props of the far cells (they are CRenderer's, not the sector lists - `vcs_distance.cpp`).
-5. Clean-up of the branch: the root `apply_patch*.py` / `patch_*.py` / `final_patch*.py` scripts and `60/` are the
-   previous agent's leftovers (untracked) - to delete once the user agrees.
+Never commit game code or data; analysis dumps to build/analysis. Use the Edit tool for C++ string literals: shell
+heredocs turn `\n` into real newlines (it happened four times on this branch). Hooks work before the original, never
+after it. Runtime changes get `[gta-recomp]` and a PS2RECOMP_PATCHES.md row. The player speaks pt-BR.
