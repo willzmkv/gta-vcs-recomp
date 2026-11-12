@@ -2023,6 +2023,14 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   `VCS_HD_PROBE=x,y,r` (what each build does with every record near a point, per list and why), the `keeplod` command
   and `build/analysis/hd_world/bisect_lod.py` (which replaced low-detail sector holds a part: kept in halves, the part's
   box measured in the picture).
+- **Lit low-detail models** (the player, 2026-11-12: downtown buildings losing their lights when they change model):
+  a building's low-detail model can carry its night lights brighter than its detailed one. Downtown at 23:00 from
+  cell 14,25, office block 869 / low-detail 6078 (same centre, -842,892): the game's list draws 6078 with a bright
+  green neon along the roof edge; the detailed 869 (cell 13,25's list, added by the far city) has it faint. The
+  original does the same from cell 13,26 (where its own list draws 869): the neon faint. So this is the game's data;
+  the detailed city drawn far moves that change from ~260 m to the reach. Found with the `skipextra` command (sector
+  ids the extra cells do not add) and `build/analysis/hd_world/bisect_cmd.py` (a generic bisection: a pose, a box of the
+  picture, a command over a list of ids).
 - **Entries emptied by a slot drop** (the player's "buildings switching between high and low quality", 2026-11-12):
   dropping a slot, the game clears the table entries that still hold that slot's copy (`FUN_0023CED0`) - gids our
   extra cells hold too. Until our next re-entry those sectors were left out of the built list, then back: models

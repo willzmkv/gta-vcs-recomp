@@ -375,6 +375,8 @@ namespace vcs::world_hd
         double g_probeAt = 0.0;
         // keeplod id,id,... (control command, bisecting a missing landmark): these low-detail sectors never replaced
         std::bitset<0x8000> g_keepLod;
+        // skipextra id,id,... (control command, bisecting): these sector ids never added from an extra cell
+        std::bitset<0x8000> g_skipExtra;
         // Low-detail sectors that hold a part no detailed sector has, so they are never left out. The game's own data:
         // the Little Havana crane's jib exists only in low-detail sector 5997 - the lists of the cells around it hide that
         // sector (or do not name it) with no detailed jib, so the original loses the jib near the crane too; with the
@@ -1283,7 +1285,7 @@ namespace vcs::world_hd
 
             std::array<std::vector<Rec>, 8> out;
             uint32_t hiddenLod = 0, added = 0, coarser = 0;
-            const bool probing = g_probe.on && &b == &g_built[0] && t - g_probeAt > 5.0 && g_probeLogs < 20u;
+            const bool probing = g_probe.on && &b == &g_built[0] && t - g_probeAt > 5.0 && g_probeLogs < 400u;
             auto probeNear = [&](uint32_t r) {
                 return std::hypot(half(rd16(r + 4u)) - g_probe.x, half(rd16(r + 6u)) - g_probe.y) - half(rd16(r + 0xAu)) < g_probe.r;
             };
@@ -1353,8 +1355,9 @@ namespace vcs::world_hd
                             std::fprintf(stderr, "[hdprobe]   cell %d,%d id %5u gid %5u at %.0f,%.0f r %.0f mat 0x%08x flag %u -> %s\n", c->x, c->y, id, gid,
                                          half(rd16(r + 4u)), half(rd16(r + 6u)), half(rd16(r + 0xAu)), rd32(r + 0xCu), rd16(r) >> 15,
                                          id < 0x20u ? "SKIPPED (moving)" : takenElsewhere(id, c) ? "taken already" : rd32(r + 0xCu) ? "SKIPPED (matrix)" :
-                                         !drawable(c, gid) ? "SKIPPED (entry)" : id >= kLodIds && replaced(id, r) ? "coarser, replaced" : "added");
-                        if (id < 0x20u || takenElsewhere(id, c) || rd32(r + 0xCu) || !drawable(c, gid))
+                                         !drawable(c, gid) ? "SKIPPED (entry)" : id >= kLodIds && replaced(id, r) ? "coarser, replaced" :
+                                         switched(id) == 1 ? "added, switched off" : switched(id) == 0 ? "added, switched on" : "added");
+                        if (id < 0x20u || takenElsewhere(id, c) || rd32(r + 0xCu) || g_skipExtra.test(id) || !drawable(c, gid))
                             continue;
                         const float near = std::hypot(half(rd16(r + 4u)) - camX, half(rd16(r + 6u)) - camY); // (its centre)
                         if (id >= kLodIds && drawMode() < 3)
@@ -2331,6 +2334,22 @@ namespace vcs::world_hd
             reply(out);
         });
 
+        ps2control::addCommand("skipextra", [](const std::string &args, ps2control::Reply reply) {
+            std::lock_guard<std::recursive_mutex> lock(g_mutex);
+            g_skipExtra.reset();
+            for (const char *p = args.c_str(); *p;)
+            {
+                char *end = nullptr;
+                const unsigned long v = std::strtoul(p, &end, 10);
+                if (end == p)
+                    break;
+                if (v < 0x8000u)
+                    g_skipExtra.set(v);
+                p = *end ? end + 1 : end;
+            }
+            ++g_version;
+            reply("ok " + std::to_string(g_skipExtra.count()));
+        });
         ps2control::addCommand("keeplod", [](const std::string &args, ps2control::Reply reply) {
             std::lock_guard<std::recursive_mutex> lock(g_mutex);
             g_keepLod.reset();
