@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include "runtime/ps2_host_std.h"
 
 namespace vcs::freecam
 {
@@ -73,7 +74,7 @@ namespace vcs::freecam
             g_pitch = std::clamp(std::asin(std::clamp(fz, -1.0f, 1.0f)), -kPitchLimit, kPitchLimit);
             const float fov = rdf(ram, cam + kCamFov);
             g_fov = fov >= 10.0f && fov <= 130.0f ? fov : 70.0f;
-            g_last = std::chrono::steady_clock::now();
+            g_last = ps2x::hostNow();
             g_flying = true;
             std::fprintf(stderr, "[freecam] on at (%.1f, %.1f, %.1f)\n", g_x, g_y, g_z);
         }
@@ -92,7 +93,7 @@ namespace vcs::freecam
         // changes how fast it flies), then the CCam gets it.
         void update(uint8_t *ram, uint32_t cam)
         {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             const float dt = std::clamp(std::chrono::duration<float>(now - g_last).count(), 0.0f, 0.1f);
             g_last = now;
             const input::FreeCamInput in = input::takeFreeCameraInput();

@@ -22,10 +22,12 @@
 #include "disc/iso_image.h"
 #include "disc/vcs_disc_id.h"
 #include "game/vcs_display.h"
+#include "game/vcs_driveby.h"
 #include "game/vcs_framerate.h"
 #include "game/vcs_movie.h"
 #include "game/vcs_hud.h"
 #include "game/vcs_input.h"
+#include "game/vcs_prompts.h"
 #include "game/vcs_volume.h"
 #include "game/vcs_fog.h"
 #include "game/vcs_distance.h"
@@ -37,6 +39,7 @@
 #include "game/vcs_streaming_trace.h"
 #include "mods/modloader.h"
 #include "mods/rwconv.h"
+#include "game/vcs_world_detail.h"
 #include "platform/platform.h"
 #include "render/presenter.h"
 #include "rhi/rhi.h"
@@ -223,6 +226,14 @@ namespace
         }
     }
 
+    // Display > Cutscene black bars: always on at 4:3 (the PS2's picture; the menu greys the setting out), the player's
+    // choice in widescreen. "Match window" with a 4:3 window counts as 4:3.
+    bool cutsceneBarsLocked() { return g_appliedAspect < 4.0f / 3.0f + 0.01f; }
+    void applyCutsceneBars()
+    {
+        vcs::setCutsceneBars(cutsceneBarsLocked() || settings::value("display.cutscene_bars") != 0);
+    }
+
     // Display aspect: the presenter's ratio, the game camera's Hor+ widening and the HUD squeeze (game/vcs_display.h).
     void applyAspect()
     {
@@ -233,7 +244,9 @@ namespace
         gsHwSetAspectWidening(aspect / (4.0f / 3.0f)); // post effects keep their 4:3 proportions
         const int hud = settings::value("display.hud");
         gsHwSetHudSqueeze(hud != 1 ? (4.0f / 3.0f) / aspect : 1.0f);
+        vcs::setHudSqueeze(hud != 1 ? (4.0f / 3.0f) / aspect : 1.0f); // the scope mask's bars (game/vcs_hud.h)
         vcs::setHudAnchoring(hud == 2); // per-element placement (game/vcs_hud.h)
+        applyCutsceneBars();
         std::fprintf(stderr, "[settings] display aspect %.3f, HUD %s\n", aspect, hud == 0 ? "4:3" : hud == 2 ? "screen edges" : "stretched");
     }
 
@@ -313,7 +326,7 @@ namespace
                                 {"display.fps", vcs::kCapRefresh}, {"display.vsync", 0}};
     const Preset kLight[] = {{"display.aspect", 0}, {"display.hud", 2},    {"display.scale", 1},  {"display.msaa", 1},
                              {"display.aniso", 4},  {"display.timing", 1}, {"display.fps", 60}, {"display.vsync", 0}};
-    const char *const kPresetKeys[] = {"display.aspect", "display.hud", "display.scale", "display.msaa",
+    const char *const kPresetKeys[] = {"display.aspect", "display.hud", "display.cutscene_bars", "display.scale", "display.msaa",
                                        "display.aniso",  "display.timing", "display.fps", "display.vsync"};
 
     template <size_t N> void applyPreset(const char *name, const Preset (&values)[N])
@@ -457,6 +470,22 @@ namespace
         s.env = "VCS_HUD";
         s.defaultValue = 0;
         s.onChange = [](int) { applyAspect(); };
+        settings::add(s);
+
+        s = {};
+        s.key = "display.cutscene_bars";
+        s.page = "Display";
+        s.section = "Screen";
+        s.label = "Cutscene black bars";
+        s.help = "The black bars above and below cutscenes, as on the PS2. Off shows the whole picture in widescreen "
+                 "(the PS2's own widescreen mode had none).";
+        s.type = Type::Toggle;
+        s.defaultValue = 1;
+        s.env = "VCS_CUTSCENE_BARS";
+        s.onChange = [](int) { applyCutsceneBars(); };
+        s.locked = [] { return cutsceneBarsLocked(); };
+        s.lockedValue = 1;
+        s.lockedNote = "Always on at 4:3, as on the PS2: choose a widescreen aspect ratio to change it.";
         settings::add(s);
 
         s = {};
@@ -690,6 +719,19 @@ namespace
 
         // The graphics API, when the build has more than one (Windows: D3D11, D3D12, Vulkan with VCS_RHI_VULKAN);
         // VCS_RHI=d3d11|d3d12|vulkan|null chooses for one run (render/presenter.h).
+        // The reflection on car paint (docs/game-internals.md 6g): the PS2 samples the frame once per spot, so a panel
+        // flickers as the camera moves - the same at every resolution, but plainer to see when the rest of the picture is
+        // sharp. Always Auto: the original at 1x, Smooth above it - no setting (the user's choice, DECISIONS.md
+        // 2026-11-06). VCS_REFLECTIONS=0|1|2 (Original / Smooth / Auto) picks for one run, for comparisons.
+        {
+            int mode = 2;
+            if (const char *e = std::getenv("VCS_REFLECTIONS"); e && *e >= '0' && *e <= '2' && !e[1])
+                mode = *e - '0';
+            vcs::setReflectionFilter(mode);
+        }
+
+        // The graphics API, when the build has more than one (Windows with VCS_RHI_VULKAN); VCS_RHI=d3d11|vulkan|null
+        // chooses for one run (render/presenter.h).
         s = {};
         s.key = "display.renderer";
         s.page = "Graphics";
@@ -707,8 +749,34 @@ namespace
         if (s.choices.size() > 1)
             settings::add(s);
 
+        // The graphics card, on a PC with more than one (GitHub issue 112: a laptop started the game on its integrated
+        // chip): the cards this PC has, by name, the fastest first and the default. vcs.ini keeps the card's id (rhi::Gpu);
+        // a card no longer there falls back to the fastest. The log's "[rhi] graphics cards" line names them with their
+        // ids (VCS_GPU=<id> for one run), "[present] ... on ..." the one in use.
+        if (const std::vector<rhi::Gpu> gpus = rhi::listGpus(); !gpus.empty())
+        {
+            s = {};
+            s.key = "display.gpu";
+            s.page = "Graphics";
+            s.section = "Renderer";
+            s.label = "Graphics card";
+            s.help = "The graphics card the game draws with, on a PC with more than one (most gaming laptops). The first "
+                     "is the fastest, and the default.";
+            s.type = Type::Choice;
+            for (const rhi::Gpu &g : gpus)
+                s.choices.push_back({g.name + (g.integrated ? " (integrated)" : ""), g.id});
+            s.defaultValue = gpus[0].id;
+            s.apply = Apply::Restart;
+            s.env = "VCS_GPU";
+            s.onChange = [](int v) { present::setGpu(v); };
+            settings::add(s);
+        }
+
         vcs::input::registerSettings(); // the Keyboard & mouse and Gamepad pages (game/vcs_input.h)
         vcs::mods::registerSettings(exeDirectory()); // the Mods page: modloader/ and texture packs (mods/modloader.h)
+        vcs::prompts::registerSettings(); // the Enhancements page: button prompts by device (game/vcs_prompts.h)
+        vcs::world::registerSettings();   // Enhancements > World: density, draw distance (game/vcs_world_detail.h)
+        vcs::driveby::registerSettings(); // Enhancements > Combat: drive-by fire rate (game/vcs_driveby.h)
 
         s = {};
         s.key = "graphics.perf_overlay";
@@ -907,6 +975,7 @@ int main(int argc, char *argv[])
                                         vcs::input::onHostFrame(ui::settingsMenuOpen() || ui::trainerMenuBlocksInput());
                                         vcs::volume::onHostFrame();
                                         vcs::mods::onHostFrame(); // mod / texture switches, live (mods/modloader.h)
+                                        vcs::prompts::onHostFrame();
                                         drawFrameRateCounter();
                                     },
                                     nullptr, nullptr);
@@ -934,7 +1003,7 @@ int main(int argc, char *argv[])
         vcs::volume::install(runtime);  // the game's music / effects levels follow the settings (game/vcs_volume.h)
         vcs::fog::install(runtime);     // the fog settings scale the game's fog range (game/vcs_fog.h)
         vcs::memory::install(runtime);  // the streaming heap in the upper 32 MB when asked (game/vcs_memory.h)
-        vcs::world::install(runtime);   // the world's area streaming (game/vcs_world.h; VCS_TRACE_AREAS=1)
+        vcs::world_areas::install(runtime); // the world's area streaming (game/vcs_world.h; VCS_TRACE_AREAS=1)
         vcs::world_hd::install(runtime); // HD world further (experimental, game/vcs_world_hd.h)
         vcs::world_hd_coronas::install(runtime); // the lamps' coronas as far (game/vcs_world_hd_coronas.h)
         vcs::streaming_trace::install(runtime); // streaming pipeline trace (experimental, game/vcs_streaming_trace.h)

@@ -7,7 +7,9 @@
 #include "game/vcs_input.h"
 
 #include "game/vcs_aim.h"
+#include "game/vcs_carcam.h"
 #include "game/vcs_freecam.h"
+#include "game/vcs_frontend.h"
 #include "platform/platform.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_audio_out.h"
@@ -27,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "runtime/ps2_host_std.h"
 
 namespace vcs::input
 {
@@ -81,7 +84,7 @@ namespace vcs::input
             {"r2", "R2", "Buttons", Target::Button, kR2, 0, 0, KEY_THREE, KEY_X, kPadRT},
             {"l3", "L3 (left stick click)", "Buttons", Target::Button, kL3, 0, 0, KEY_C, 0, GAMEPAD_LEFT_STICK},
             {"r3", "R3 (right stick click)", "Buttons", Target::Button, kR3, 0, 0, KEY_V, 0, GAMEPAD_RIGHT_STICK},
-            {"start", "Start (pause menu)", "Buttons", Target::Button, kStart, 0, 0, KEY_ENTER, 0, GAMEPAD_START},
+            {"start", "Start (pause menu)", "Buttons", Target::Button, kStart, 0, 0, KEY_ESCAPE, 0, GAMEPAD_START},
             {"select", "Select", "Buttons", Target::Button, kSelect, 0, 0, KEY_BACKSPACE, 0, GAMEPAD_BACK},
             {"dpad_up", "D-pad up", "D-pad", Target::Button, kUp, 0, 0, KEY_UP, 0, GAMEPAD_DPAD_UP},
             {"dpad_down", "D-pad down", "D-pad", Target::Button, kDown, 0, 0, KEY_DOWN, 0, GAMEPAD_DPAD_DOWN},
@@ -102,6 +105,10 @@ namespace vcs::input
         constexpr uint32_t kPlayerPed = 0x004E4910u;   // CWorld::Players[0].m_pPed
         constexpr uint32_t kPedVehicle = 0x480u;       // the vehicle it is in (0 on foot)
         constexpr uint32_t kPedState = 0x8C4u;         // 0x37 driving
+        constexpr uint32_t kVehicleRadio = 0x2BAu;     // the vehicle's radio station (u8): 0..8 the stations, 9 off
+        constexpr uint32_t kRadioPositions = 10u;      // L1 steps through them and round (game-internals.md 12a)
+        constexpr int kRadioRetuneFrames = 40;         // the game adds its L1 presses to the station 30 frames after the
+                                                       // last one; by now it has
         constexpr uint32_t kTheCamera = 0x006F44D0u;
         constexpr uint32_t kLooksAtPlayer = kTheCamera + 0x888u; // 0 under a script camera
         constexpr uint32_t kCam = kTheCamera + 0x70u;  // the active CCam: +0 mode, +0x78 alpha (pitch), +0x7C beta (heading),
@@ -135,11 +142,18 @@ namespace vcs::input
             return v;
         }
         void wrf(uint32_t a, float v) { std::memcpy(g_rdram + (a & kRamMask), &v, 4); }
+        void wr32(uint32_t a, uint32_t v) { std::memcpy(g_rdram + (a & kRamMask), &v, 4); }
+        // Walls (game-internals.md 12b): the on-foot camera's update pulls the camera in toward the player at a wall
+        // only for a turned stick, or while this is > 0 (it sets it to 2 after a pull-in and counts it down).
+        constexpr uint32_t kCamWallSkip = 0x00487E58u;
+        constexpr uint32_t kGameClock = 0x004CD104u; // CTimer::m_snTimeInMilliseconds
+        constexpr uint32_t kWallTailMs = 300;        // ... kept so this long after the mouse's last turn
 
         struct GameState
         {
             bool driving = false;
             bool footCamera = false; // the on-foot follow camera, turned by the player (no script camera, controls on)
+            bool paused = false;     // the pause menu or the game's own pause
         };
 
         GameState gameState()
@@ -152,6 +166,7 @@ namespace vcs::input
             int16_t disabled;
             std::memcpy(&disabled, g_rdram + kPad0 + 0x96, 2);
             const bool paused = g_rdram[kUserPause] || g_rdram[kCodePause];
+            s.paused = paused;
             s.footCamera = ped && !s.driving && !paused && rd32(kCam) == kCamModeFollowPed && rd32(kLooksAtPlayer) == 1 &&
                            disabled == 0 && rd32(kCamStickLocked) == 0;
             return s;
@@ -165,6 +180,7 @@ namespace vcs::input
             bool mouseCamera = true;
             float mouseScale = 1.0f; // stick deflection per mouse count per second (the cameras the stick turns)
             float mouseLook = 0.0025f; // radians per mouse count (the on-foot camera, turned directly)
+            float carLook = 0.0025f;   // ... the camera behind a vehicle (Car camera sensitivity on top)
             bool mouseInvertY = false;
             bool freeAimMouse = false, freeAimPad = false; // free aim (game/vcs_aim.h) on the keyboard / mouse, the gamepad
             bool mouseWheel = true;                        // the wheel changes weapons on foot and zooms scopes
@@ -180,6 +196,7 @@ namespace vcs::input
         std::atomic<bool> g_backgroundPause{false}; // game.background = Pause and the window is behind others
         std::atomic<uint64_t> g_lastReport{0};       // buttons | rx << 16 | ry << 24 | lx << 32 | ly << 40 ("padstate")
         std::atomic<uint32_t> g_reads{0};            // pad reads so far ("padstate")
+        std::atomic<int> g_lastDevice{static_cast<int>(Device::Keyboard)}; // lastDevice()
 
         std::string keyId(const Control &c, int slot) { return std::string("keys.") + c.id + (slot ? "2" : ""); }
         std::string padId(const Control &c) { return std::string("pad.") + c.id; }
@@ -198,6 +215,7 @@ namespace vcs::input
             // (half an inch at 800 DPI) turn a radian, as the PC GTAs' default
             m.mouseScale = settings::value("mouse.sensitivity") / 100.0f / 1500.0f;
             m.mouseLook = settings::value("mouse.sensitivity") / 100.0f * 0.0025f;
+            m.carLook = m.mouseLook * settings::value("mouse.car_sensitivity") / 100.0f;
             m.mouseInvertY = settings::value("mouse.invert_y") != 0;
             m.freeAimMouse = settings::value("mouse.free_aim") != 0;
             m.freeAimPad = settings::value("pad.free_aim") != 0;
@@ -217,11 +235,13 @@ namespace vcs::input
 
         // A bound key is down: the key itself (physical or injected over the control channel), the other side's
         // Shift / Ctrl / Alt, Keypad Enter for Enter. Enter with Alt held is Alt+Enter (full screen), not a binding.
+        // The pause menu's own keys (Enter, Escape, the mouse buttons and wheel while it is up: game/vcs_frontend.h)
+        // are not bindings then.
         bool bound(int key, bool alt)
         {
             if (key <= 0)
                 return false;
-            auto down = [](int k) { return ps2control::keyDown(k); };
+            auto down = [](int k) { return ps2control::keyDown(k) && !frontend::ownsKey(k); };
             switch (key)
             {
             case KEY_LEFT_SHIFT: return down(KEY_LEFT_SHIFT) || down(KEY_RIGHT_SHIFT);
@@ -304,8 +324,14 @@ namespace vcs::input
             std::chrono::steady_clock::time_point hipUntil{}; // free aim held this long after the last shot from the hip
             bool aimHeld = false;      // the target button was held at the last game frame
             bool wheelWas[2] = {};     // a wheel notch (up, down) was down at the last game frame
-            int wheelSteps = 0;        // weapon changes still to press (+ next / R2, - previous / L2), one a frame
+            int wheelSteps = 0;        // weapon changes still to press (+ next / R2, - previous / L2), one a frame;
+                                       // driving: radio stations (+ next, - previous: L1 either way)
             uint16_t wheelButton = 0;  // the button the wheel presses for this frame
+            uint32_t radioVehicle = 0; // steps back on the radio the game has not added yet: the vehicle (0: none), ...
+            uint8_t radioWas = 0, radioSet = 0; // ... its station before them, and where it was put for the L1s
+            int radioFrames = 0;       // ... and the game frames since the last press
+            bool footTurn = false;     // the mouse is turning the on-foot camera (walls: the stick's path, below)
+            uint32_t footTurned = 0;   // ... last at this game time, ms
         } g_mouse;
 
         std::mutex g_injectedMutex;
@@ -339,8 +365,14 @@ namespace vcs::input
 
             bool padR1 = false, keyR1 = false, keyCircle = false; // the target / fire buttons, by device (free aim)
             float padRx = 0.0f, padRy = 0.0f;
+            bool padUsed = false, keysUsed = false; // the player's device this read (lastDevice)
             if (padConnected(physical) && !freeCamera)
             {
+                // a button, or a stick / trigger past half way: the gamepad is in use (a resting stick's drift is not)
+                for (int b = 0; b < GAMEPAD_BUTTON_COUNT && !padUsed; ++b)
+                    padUsed = padButton(static_cast<GamepadButton>(b));
+                for (int a = 0; a < AXIS_COUNT && !padUsed; ++a)
+                    padUsed = std::fabs(padAxis(static_cast<GamepadAxis>(a))) > 0.5f;
                 for (size_t i = 0; i < kControlCount; ++i)
                     if (kControls[i].target == Target::Button && padSource(m.pad[i], m.trigger))
                     {
@@ -386,6 +418,7 @@ namespace vcs::input
                 auto active = [&](int key) { return bound(key, alt) && !(game.driving && !c.driving && drivingKey(key)); };
                 if (!active(m.keys[i][0]) && !active(m.keys[i][1]))
                     continue;
+                keysUsed = true;
                 if (c.target == Target::Button)
                 {
                     buttons |= c.mask;
@@ -410,10 +443,13 @@ namespace vcs::input
                     ly *= m.walk / mag;
                 }
             }
+            // the pause menu: Enter / Escape as Cross / Triangle, the mouse's steps and clicks (game/vcs_frontend.h);
+            // what the player presses meanwhile takes over
+            buttons |= frontend::padButtons(buttons, lx != 0.0f || ly != 0.0f || rx != 0.0f || ry != 0.0f, blocked);
 
             // the mouse camera, on top of the right stick: worked out once per game frame (the game reads the pad three
             // times a frame; the frame's other reads repeat the deflection)
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             const float dt = g_mouse.last.time_since_epoch().count() ? std::chrono::duration<float>(now - g_mouse.last).count() : 0.0f;
             const uint32_t frame = g_rdram ? rd32(kFrameCounter) : 0;
             if (freeCamera)
@@ -432,6 +468,8 @@ namespace vcs::input
                     dy += g_injectedY;
                     g_injectedX = g_injectedY = 0.0f;
                 }
+                // a hand on the mouse moves it more than a nudge of the desk does
+                keysUsed = keysUsed || std::fabs(dx) + std::fabs(dy) > 12.0f;
                 const bool on = m.mouseCamera && !blocked;
                 // up (+) for a mouse moved forward (SDL: y grows downwards); the game looks up for a stick pulled
                 // back (y > 0)
@@ -480,11 +518,17 @@ namespace vcs::input
                 {
                     // the scopes and first-person weapon views turn by the mouse itself, as the follow camera's heading:
                     // their update adds the stick's speed to +0x78 / +0x7C and keeps them in its limits
-                    // (FUN_00297cb8); zoomed in they turn slower
+                    // (FUN_00297cb8); zoomed in they turn slower. Attached to a vehicle (+0x858: a gun in a helicopter's
+                    // door) the heading is the turn from the side he faces, signed and kept within the attachment's
+                    // limit: wrapped into 0..2 pi, a turn right of the middle became the limit on the left
                     const float look = m.mouseLook * fov / 70.0f;
                     const float turn = -dx * look;
                     float beta = std::fmod(rdf(cam + 0x7C) + turn, 6.2831855f);
-                    wrf(cam + 0x7C, beta < 0.0f ? beta + 6.2831855f : beta);
+                    if (rd32(rd32(kPlayerPed) + 0x858))
+                        beta = std::remainder(rdf(cam + 0x7C) + turn, 6.2831855f);
+                    else if (beta < 0.0f)
+                        beta += 6.2831855f;
+                    wrf(cam + 0x7C, beta);
                     wrf(cam + 0x78, rdf(cam + 0x78) + up * look);
                 }
                 else if (on && game.footCamera)
@@ -532,6 +576,34 @@ namespace vcs::input
                             wrf(at + 8, tz - d * std::sin(e));
                         }
                     }
+                    // Walls. The camera's update pulls the camera in toward the player at a wall only while its stick
+                    // turns the camera; with the stick at rest it puts the camera at its full distance, inside the
+                    // wall, and then keeps the last place that fitted. So a mouse's turn toward a building left the
+                    // camera standing at the wall's edge while its heading turned on behind the wall (the user's
+                    // report). While the mouse turns it, and a moment after (so a slow hand's frames without a count
+                    // are not the game's own turn away from a wall), the update is told to take the stick's path.
+                    // VCS_FOOT_WALL=0: as before.
+                    static const bool wallFix = [] {
+                        const char *e = std::getenv("VCS_FOOT_WALL");
+                        return !(e && e[0] == '0');
+                    }();
+                    const uint32_t clock = rd32(kGameClock);
+                    if (turn != 0.0f || tilt != 0.0f)
+                    {
+                        g_mouse.footTurn = true;
+                        g_mouse.footTurned = clock;
+                    }
+                    else if (clock - g_mouse.footTurned > kWallTailMs)
+                        g_mouse.footTurn = false;
+                    if (wallFix && g_mouse.footTurn && rd32(kCamWallSkip) == 0)
+                        wr32(kCamWallSkip, 1);
+                }
+                else if (on && game.driving && carcam::turns(mode))
+                {
+                    // the camera behind a vehicle turns by the mouse itself and stays where it is put while the mouse
+                    // moves, then goes back behind the car (game/vcs_carcam.h)
+                    if (!game.paused)
+                        carcam::mouse(-dx * m.carLook, up * m.carLook);
                 }
                 else
                 {
@@ -552,7 +624,8 @@ namespace vcs::input
                 bool notch[2] = {};
                 for (int w = 0; w < 2; ++w)
                 {
-                    const bool down = !blocked && ps2control::keyDown(w ? KEY_WHEEL_DOWN : KEY_WHEEL_UP);
+                    const int key = w ? KEY_WHEEL_DOWN : KEY_WHEEL_UP;
+                    const bool down = !blocked && ps2control::keyDown(key) && !frontend::ownsKey(key);
                     notch[w] = down && !g_mouse.wheelWas[w];
                     g_mouse.wheelWas[w] = down;
                 }
@@ -560,8 +633,51 @@ namespace vcs::input
                 for (size_t i = 0; i < kControlCount; ++i)
                     for (int k : m.keys[i])
                         wheelBound = wheelBound || k == KEY_WHEEL_UP || k == KEY_WHEEL_DOWN;
-                if (!m.mouseWheel || wheelBound || game.driving || g_mouse.aim.camera || aim::aiming())
+                // Steps back on the radio waiting for the game (below): it counts the L1 presses and adds them to the
+                // vehicle's station 30 frames after the last one. Past that, a station still where it was put means the
+                // presses were not taken (an announcement is on, the vehicle has no radio): it goes back to what it
+                // was, so a notch then does nothing, as L1 itself.
+                if (g_mouse.radioVehicle)
+                {
+                    const uint32_t ped = rd32(kPlayerPed);
+                    const uint32_t at = (g_mouse.radioVehicle + kVehicleRadio) & kRamMask;
+                    if (!ped || rd32(ped + kPedVehicle) != g_mouse.radioVehicle)
+                        g_mouse.radioVehicle = 0;
+                    else if (++g_mouse.radioFrames >= kRadioRetuneFrames)
+                    {
+                        if (g_rdram[at] == g_mouse.radioSet)
+                            g_rdram[at] = g_mouse.radioWas;
+                        g_mouse.radioVehicle = 0;
+                    }
+                }
+                if (!m.mouseWheel || wheelBound || g_mouse.aim.camera || aim::aiming())
                     g_mouse.wheelSteps = 0;
+                else if (game.driving)
+                {
+                    // the radio (GitHub issue 90): a notch down is the next station - the game's own L1 - and a notch up
+                    // the one before. The game only steps forwards: each L1 clicks and counts, and 30 frames after the
+                    // last one the count is added to the vehicle's station (+0x2BA: 0..8 the stations, 9 off, then 0
+                    // again) and the radio retunes - the name, the stream. So a step back puts the station two back
+                    // and presses L1: one forward from there. One press, a frame up, then the next.
+                    g_mouse.wheelSteps = game.paused ? 0 : std::clamp(g_mouse.wheelSteps + (notch[1] ? 1 : 0) - (notch[0] ? 1 : 0), -3, 3);
+                    if (g_mouse.wheelSteps && !pressedLast)
+                    {
+                        const uint32_t vehicle = rd32(rd32(kPlayerPed) + kPedVehicle);
+                        const uint32_t at = (vehicle + kVehicleRadio) & kRamMask;
+                        // (a vehicle whose station is none of these has no radio to step back: the plain L1)
+                        if (g_mouse.wheelSteps < 0 && g_rdram[at] < kRadioPositions)
+                        {
+                            if (g_mouse.radioVehicle != vehicle || g_rdram[at] != g_mouse.radioSet)
+                                g_mouse.radioWas = g_rdram[at]; // the first step back since the game last retuned
+                            g_mouse.radioVehicle = vehicle;
+                            g_mouse.radioSet = static_cast<uint8_t>((g_rdram[at] + kRadioPositions - 2u) % kRadioPositions);
+                            g_rdram[at] = g_mouse.radioSet;
+                        }
+                        g_mouse.radioFrames = 0; // any press starts the game's 30 frames again
+                        g_mouse.wheelButton = kL1;
+                        g_mouse.wheelSteps += g_mouse.wheelSteps > 0 ? -1 : 1;
+                    }
+                }
                 else if (zoomMode(mode))
                 {
                     // the zoom the scope eases its FOV toward (0x487E2C, FUN_00297cb8), in the game's own limits: 70
@@ -583,6 +699,10 @@ namespace vcs::input
                 else
                     g_mouse.wheelSteps = 0;
             }
+            // the right stick (the gamepad's, or the camera keys) on the camera behind a vehicle hands it back to the
+            // game at once, should the mouse have held it a moment before (game/vcs_carcam.h)
+            if ((rx != 0.0f || ry != 0.0f) && game.driving)
+                carcam::stickMoved();
             rx += g_mouse.x;
             ry += g_mouse.y;
             buttons |= g_mouse.wheelButton;
@@ -604,6 +724,13 @@ namespace vcs::input
                 if (g_mouse.aim.padR1Fires && padR1)
                     buttons = static_cast<uint16_t>((buttons & ~(keyR1 ? 0 : kR1)) | kCircle);
             }
+
+            // the menu's keys and mouse buttons count too (Enter, Escape, clicks)
+            if (!blocked)
+                for (int k : {KEY_ENTER, KEY_KP_ENTER, KEY_ESCAPE, KEY_MOUSE_LEFT, KEY_MOUSE_RIGHT})
+                    keysUsed = keysUsed || ps2control::keyDown(k);
+            if (padUsed != keysUsed) // both at once: as it was
+                g_lastDevice.store(static_cast<int>(padUsed ? Device::Gamepad : Device::Keyboard), std::memory_order_relaxed);
 
             const uint16_t word = static_cast<uint16_t>(~buttons);
             data[2] = static_cast<uint8_t>(word & 0xFF);
@@ -681,7 +808,8 @@ namespace vcs::input
                 s.label = "Mouse camera";
                 s.help = "Moving the mouse turns the camera, and the mouse is held in the window while you play (free again "
                          "in the menus and when the window is in the background). On foot it turns the camera itself, as "
-                         "in a PC game; in vehicles and while aiming it moves the right stick. Off: the mouse only clicks.";
+                         "in a PC game, and behind a car too (it goes back behind the car after Car camera return); in other "
+                         "vehicle cameras and locked on it moves the right stick. Off: the mouse only clicks.";
                 s.type = Type::Toggle;
                 s.defaultValue = 1;
                 s.onChange = onChange;
@@ -701,6 +829,35 @@ namespace vcs::input
                 s.format = "%d%%";
                 s.defaultValue = 100;
                 s.onChange = onChange;
+                settings::add(s);
+
+                s = {};
+                s.key = "mouse.car_sensitivity";
+                s.page = kKeys;
+                s.section = "Mouse";
+                s.label = "Car camera sensitivity";
+                s.help = "How far the camera behind a car, bike or boat turns for a mouse movement, on top of Mouse "
+                         "sensitivity (100%: as far as on foot).";
+                s.type = Type::Integer;
+                s.min = 10;
+                s.max = 400;
+                s.format = "%d%%";
+                s.defaultValue = 100;
+                s.onChange = onChange;
+                settings::add(s);
+
+                s = {};
+                s.key = "mouse.car_return";
+                s.page = kKeys;
+                s.section = "Mouse";
+                s.label = "Car camera return";
+                s.help = "Behind a car, boat or bike the camera stays where the mouse puts it while the mouse moves; this "
+                         "long after the mouse stops it eases back behind the vehicle. Never: it stays until the game's "
+                         "own camera turns it (when driving on).";
+                s.type = Type::Choice;
+                s.choices = {{"0.5 s", 5}, {"1 s", 10}, {"1.5 s", 15}, {"2 s", 20}, {"3 s", 30}, {"5 s", 50}, {"Never", -1}};
+                s.defaultValue = 15;
+                s.onChange = [](int v) { carcam::setReturnDelay(v < 0 ? -1.0f : v / 10.0f); };
                 settings::add(s);
 
                 s = {};
@@ -733,7 +890,8 @@ namespace vcs::input
                 s.section = "Mouse";
                 s.label = "Mouse wheel";
                 s.help = "On foot the wheel changes weapon (down: next, up: previous); in a sniper scope, the camera and "
-                         "binoculars it zooms. Off, or with the wheel bound to a control, it does only that.";
+                         "binoculars it zooms; while you drive it changes the radio station (down: next, up: previous). "
+                         "Off, or with the wheel bound to a control, it does only that.";
                 s.type = Type::Toggle;
                 s.defaultValue = 1;
                 s.onChange = onChange;
@@ -1006,7 +1164,9 @@ namespace vcs::input
             std::lock_guard<std::mutex> lock(g_mapMutex);
             camera = g_map.mouseCamera || g_map.freeAimMouse;
         }
-        setMouseCaptured(((g_enabled && camera) || freecam::flying()) && !menuOpen && ps2control::physicalInputOn());
+        // the cursor shows over the game's pause menu (game/vcs_frontend.h), as over ours
+        setMouseCaptured(((g_enabled && camera) || freecam::flying()) && !menuOpen && !frontend::open() && ps2control::physicalInputOn());
+        frontend::onHostFrame();
 
         // the window in the background (Game > In the background): a hidden test run never is
         const bool behind = !ps2control::hiddenMode() && !windowFocused();
@@ -1028,6 +1188,8 @@ namespace vcs::input
     }
 
     void stopVibration() { gamepadRumble(0.0f, 0.0f); }
+
+    Device lastDevice() { return static_cast<Device>(g_lastDevice.load(std::memory_order_relaxed)); }
 
     FreeCamInput takeFreeCameraInput()
     {

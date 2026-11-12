@@ -12,10 +12,13 @@
 #include "debug/rsl_shadow.h"
 #include "debug/rsl_trace.h"
 #include "game/vcs_display.h"
+#include "game/vcs_driveby.h"
 #include "game/vcs_framerate.h"
 #include "game/vcs_movie.h"
 #include "game/vcs_input.h"
 #include "game/vcs_volume.h"
+#include "game/vcs_world_detail.h"
+#include "game/vcs_script_fixes.h"
 #include "game/vcs_script_timing.h"
 #include "game/vcs_physics_timing.h"
 #include "game/vcs_inflate.h"
@@ -24,8 +27,11 @@
 #include "game/vcs_aim.h"
 #include "game/vcs_distance.h"
 #include "game/vcs_distant.h"
+#include "game/vcs_carcam.h"
 #include "game/vcs_freecam.h"
+#include "game/vcs_frontend.h"
 #include "game/vcs_hud.h"
+#include "game/vcs_prompts.h"
 #include "game/vcs_rsl_native.h"
 #include "game/vcs_rsl_world.h"
 #include "ps2_runtime.h"
@@ -43,6 +49,7 @@
 #include <mutex>
 #include <tuple>
 #include <iostream>
+#include "runtime/ps2_host_std.h"
 
 namespace
 {
@@ -214,9 +221,9 @@ namespace
     // VCS_TRACE_DELAY=1: DelayThread(usec) (0x468318, SetTimerAlarm + WaitSema) with host time between calls.
     PS2_GUEST_CC void traceDelay(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        static auto last = std::chrono::steady_clock::now();
+        static auto last = ps2x::hostNow();
         static int count = 0;
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (count++ < 100000)
             std::fprintf(stderr, "[delay] DelayThread(%u us) ra=0x%08x  %.2f ms since previous call\n", GPR_U32(ctx, 4),
                          GPR_U32(ctx, 31), std::chrono::duration<double, std::milli>(now - last).count());
@@ -278,10 +285,10 @@ namespace
     PS2_GUEST_CC void countCall(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         ++g_counted[I].calls;
-        static auto last = std::chrono::steady_clock::now();
+        static auto last = ps2x::hostNow();
         if (I == 0)
         {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             if (now - last > std::chrono::seconds(5))
             {
                 last = now;
@@ -684,11 +691,11 @@ namespace
     {
         static std::mutex lock;
         static std::map<std::tuple<int, uint32_t, uint32_t, uint32_t, uint32_t>, uint64_t> counts;
-        static auto last = std::chrono::steady_clock::now();
+        static auto last = ps2x::hostNow();
         {
             std::lock_guard<std::mutex> g(lock);
             ++counts[{Which, GPR_U32(ctx, 31), GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6)}];
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             if (now - last > std::chrono::seconds(5))
             {
                 last = now;
@@ -714,9 +721,9 @@ namespace
     PS2_GUEST_CC void traceDmaSend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         static std::map<std::pair<uint32_t, uint32_t>, uint64_t> counts;
-        static auto last = std::chrono::steady_clock::now();
+        static auto last = ps2x::hostNow();
         ++counts[{GPR_U32(ctx, 31), GPR_U32(ctx, 4)}];
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - last > std::chrono::seconds(5))
         {
             last = now;
@@ -744,7 +751,7 @@ namespace
         FUN_003816f8_0x3816f8(rdram, ctx, runtime);
         static uint64_t calls = 0, visible = 0;
         static int samples = 0;
-        static auto last = std::chrono::steady_clock::now();
+        static auto last = ps2x::hostNow();
         ++calls;
         visible += GPR_U32(ctx, 2) ? 1u : 0u;
         if (samples < 12 && (calls % 997u) == 0u)
@@ -760,7 +767,7 @@ namespace
                          guestFloat(rdram, cam + 0xB88), guestFloat(rdram, cam + 0xB94), guestFloat(rdram, cam + 0xB98),
                          guestFloat(rdram, mat + 48), guestFloat(rdram, mat + 52), guestFloat(rdram, mat + 56));
         }
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - last > std::chrono::seconds(5))
         {
             last = now;
@@ -824,7 +831,7 @@ namespace
     void dumpRamOnSchedule(const uint8_t *rdram)
     {
         static const char *env = std::getenv("VCS_DUMP_RAM");
-        static const auto start = std::chrono::steady_clock::now();
+        static const auto start = ps2x::hostNow();
         static size_t next = 0;
         if (!env)
             return;
@@ -834,7 +841,7 @@ namespace
         if (!p || !*p)
             return;
         const int at = std::atoi(p);
-        if (std::chrono::steady_clock::now() - start < std::chrono::seconds(at))
+        if (ps2x::hostNow() - start < std::chrono::seconds(at))
             return;
         ++next;
         char name[64];
@@ -849,7 +856,7 @@ namespace
 
     PS2_GUEST_CC void testSaveOnPadRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        static const auto start = std::chrono::steady_clock::now();
+        static const auto start = ps2x::hostNow();
         static const char *saveEnv = std::getenv("VCS_TEST_SAVE");
         static const int delay = saveEnv ? std::atoi(saveEnv) : 0;
         static const uint32_t slot = [] {
@@ -861,7 +868,7 @@ namespace
         constexpr uint32_t kCardManager = 0x00510480u, kSavingFlag = 0x0048A664u;
         g_origPadRead(rdram, ctx, runtime);
         dumpRamOnSchedule(rdram);
-        if (!saveEnv || step > 3 || std::chrono::steady_clock::now() - start < std::chrono::seconds(delay))
+        if (!saveEnv || step > 3 || ps2x::hostNow() - start < std::chrono::seconds(delay))
             return;
         uint32_t status = 0;
         std::memcpy(&status, rdram + kCardManager + 0x54u, 4);
@@ -977,7 +984,7 @@ namespace
     {
         ++g_sectorCalls;
         static uint64_t calls = 0, noSector = 0, noIndex = 0, notLoaded = 0, loaded = 0;
-        static auto last = std::chrono::steady_clock::now();
+        static auto last = ps2x::hostNow();
         static std::map<uint32_t, uint32_t> missing; // model index -> count
         const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
         const uint32_t level = GPR_U32(ctx, 4), sector = GPR_U32(ctx, 5);
@@ -999,7 +1006,7 @@ namespace
                 ++loaded;
         }
         FUN_00240ed8_0x240ed8(rdram, ctx, runtime);
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - last < std::chrono::seconds(5))
             return;
         last = now;
@@ -1020,10 +1027,10 @@ namespace
     // FUN_0023E748, and the focus position each time FUN_0023C188(level, pos) re-evaluates it.
     PS2_GUEST_CC void traceCellWalk(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        static auto last = std::chrono::steady_clock::now();
+        static auto last = ps2x::hostNow();
         const auto rd32 = [&](uint32_t a) { uint32_t v = 0; std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4); return v; };
         const uint32_t level = GPR_U32(ctx, 4);
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - last > std::chrono::seconds(2))
         {
             last = now;
@@ -1036,7 +1043,7 @@ namespace
                          guestFloat(rdram, 0x006F4504u), guestFloat(rdram, 0x006F4508u));
         }
         static uint64_t walks = 0, emptyWalks = 0, skippedGrid = 0;
-        static auto lastWalk = std::chrono::steady_clock::now();
+        static auto lastWalk = ps2x::hostNow();
         const uint64_t before = g_sectorCalls;
         if (static_cast<int32_t>(rd32(rd32(level + 0x248u) + 8u)) <= 0)
             ++skippedGrid;
@@ -1068,7 +1075,7 @@ namespace
     {
         static std::map<uint32_t, uint32_t> peak;
         static uint64_t calls = 0, nearFull = 0;
-        static auto last = std::chrono::steady_clock::now();
+        static auto last = ps2x::hostNow();
         const uint32_t buffer = GPR_U32(ctx, 4);
         FUN_00476770_0x476770(rdram, ctx, runtime);
         const uint32_t used = GPR_U32(ctx, 2);
@@ -1076,7 +1083,7 @@ namespace
         nearFull += (0xE6670u - used <= 0x12BFFu) ? 1u : 0u;
         uint32_t &p = peak[buffer];
         p = std::max(p, used);
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - last < std::chrono::seconds(2))
             return;
         last = now;
@@ -1099,8 +1106,11 @@ namespace
         vcs::input::holdInBackground(runtime);      // paused while the window is in the background (game/vcs_input.h)
         vcs::trainer::onGameFrame(rdram);           // the trainer's actions and held toggles (game/vcs_trainer.h)
         vcs::volume::onGameFrame(rdram);            // the music / effects levels and the pause menu's (game/vcs_volume.h)
+        vcs::world::onGameFrame(rdram);             // density, draw distance and their guards (game/vcs_world_detail.h)
         vcs::gameinfo::onGameFrame(rdram);          // the F3 game-state panel's snapshot (debug/game_info.h)
         vcs::onFrameKick();                         // the HUD context ends (game/vcs_hud.h)
+        vcs::frontend::onFrameKick();               // the pause menu's drawing is over (game/vcs_frontend.h)
+        vcs::prompts::onFrameKick(rdram);           // the button prompts' glyphs to the renderer (game/vcs_prompts.h)
         vcs::rsltrace::onFrameKick(rdram);          // VCS_TRACE_RSL (debug/rsl_trace.h)
         vcs::rslshadow::onFrameKick(rdram);         // VCS_RSL_SHADOW (debug/rsl_shadow.h)
         vcs::rslworld::onFrameKick();               // world / model draws from RSL calls (game/vcs_rsl_world.h)
@@ -1178,13 +1188,19 @@ namespace
         runtime.replaceFunction(0x002723E8u, &markFrameKick);
         vcs::installDisplayHooks(runtime); // widescreen (settings menu)
         vcs::installHudHooks(runtime);     // 2D at the RenderWare level
+        vcs::frontend::install(runtime);   // the pause menu with Enter / Escape and the mouse (game/vcs_frontend.h)
+        vcs::prompts::install(runtime);    // button prompts by device (game/vcs_prompts.h; chains onto the 2D hooks above)
         vcs::freecam::install(runtime);    // the trainer's free camera (game/vcs_freecam.h)
         vcs::aim::install(runtime);        // free aim with the mouse / right stick (game/vcs_aim.h)
         vcs::distance::install(runtime);   // the draw distance settings, around aim's CCamera::Process (game/vcs_distance.h)
         vcs::distant::install(runtime);    // decorative distant traffic's simulation (game/vcs_distant.h)
+        vcs::carcam::install(runtime);     // the mouse on the camera behind a vehicle (game/vcs_carcam.h)
+        vcs::world::install(runtime);      // density and draw distance (game/vcs_world_detail.h)
+        vcs::driveby::install(runtime);    // the NPC drive-by's fire rate (game/vcs_driveby.h)
         vcs::installFrameRateHooks(runtime); // 30 / 60 fps (game/vcs_framerate.h)
         vcs::installScriptTimingHooks(runtime); // per-frame mission meters on the time step (game/vcs_script_timing.h)
         vcs::installPhysicsTimingHooks(runtime); // per-frame vehicle pushes on the time step (game/vcs_physics_timing.h)
+        vcs::installScriptFixHooks(runtime); // mission scripts stuck above 30 fps (game/vcs_script_fixes.h)
         vcs::installMovieHooks(runtime);     // STINGS / INTRO played natively (game/vcs_movie.h)
         const bool stream = vcs::installStreamHooks(runtime); // disc streaming without the IOP (game/vcs_stream.h)
         const bool sound = vcs::installSoundHooks(runtime);   // sound without the IOP (game/vcs_sound.h)

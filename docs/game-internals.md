@@ -136,7 +136,10 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
   FUN_002f47c0 call (ra 0x2F4C04) puts back a step the 0.5 minimum raised (floor 0.05); the limiter's WaitVBlank
   (ra 0x317A50) presents the frame, paces to the cap on the host clock, brings the EE clock up to real time on the
   VBlank chain (`EeScheduler::syncToRealTime`) and sets the VBlank count to 2. Measured: game clock = wall clock
-  (x1.001) at 30 and 144; steps 1.65-1.70 at 30, 0.55-0.60 at ~85 fps.
+  (x1.001) at 30 and 144; steps 1.65-1.70 at 30, 0.55-0.60 at ~85 fps. The cap also paces the host's main loop
+  (`applyPresentRate`); "Display refresh" reads the window's display, and vcs.ini is applied before SDL starts (no
+  display: 60), so the limiter re-applies the pace whenever the cap it sees changes (GitHub issue 64: 60 fps after every
+  start until the setting was touched).
 - **Steps below 0.5 break the game** (frame-rate audit `tools/framerate_audit.py`, 2026-10-24): with the minimum lifted
   the player runs at 4.7 m/s up to 1/100 s steps, then 1.4 m/s at 1/110, 1.0 at 1/120, 0.5 at 1/240 (per-frame
   movement shrinks with the step squared); with the game's own 0.5 floor at 1/110 he runs 5.15 m/s (= 4.7 x 0.5 /
@@ -242,6 +245,63 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
     (at 30 fps and 16 m/s a frame moves the car 0.55 m into it). The per-frame part is what made them grow.
   - **Still per frame** (read in ProcessWheel, not measured or fixed): a burst tyre's wobble - a random sideways amount
     added every frame when the wheel status (last argument) is 1.
+  - **CBike's brake wobble** (found 2026-11-04 from GitHub issue 64: at 240 fps a bike braked from speed threw its
+    rider; the user saw it too). CBike::ProcessControl FUN_00337208 at 0x33BD18..0x33BE54: while `brake - gas > 0.9`
+    (+0x260 / +0x25C), the speed along the bike is over 0.02 and a wheel touches (suspension +0x540 / +0x544 < 1), a
+    phase +0x5FC grows by `random(0.5..1) * 0.2 * step` (FUN_004080B8), and the bike gets `ApplyTurnForce(min(speed,
+    0.2) * FUN_0044A2D0(phase) * turn mass (+0xD4) * k * right vector, a contact point)`, k = 0.03 with a rear wheel
+    down (+0x548 / +0x54C < 1), else 0.007 (`lui 0x3CF5` / `0x3BE5` at 0x33BDDC / 0x33BE00) - once a frame, the step
+    only in the phase (reVC's m_fBrakeDestabilization). So the shove came 4.8 times as often per second at 144 fps. Found
+    with `VCS_TURN_LOG=212` (every ApplyTurnForce on the PCJ-600: caller, its change to the yaw and pitch rates) summed
+    by caller over the first 0.15 s of braking: ra 0x33BE5C turned the bike at -0.32 yaw units/s at 144 fps against
+    -0.086 at 30; the other callers (the wheels 0x3E7E34 / 0x3E7E9C, the springs 0x34E330 / dampers 0x34E750) were the
+    same per second or reacted to it. Fixed in `src/game/vcs_physics_timing.cpp` like the body push (force * step /
+    (50/30), return address 0x33BE5C). The way there, for the next one: the sideways speed at the wheels (`VCS_WHEEL_LOG=1`)
+    grew at the same rate per second at both rates; at 144 the wheel's grip per frame (adhesion * step) is a fifth of
+    30's, so the full-cancel sideways demand tipped a wheel into skidding (state 2) within 10 frames and it lost its
+    traction (handling +0x6C). Scaling that sideways demand by the step instead was tried and made it worse (the bike
+    spun 180 degrees at 240): the slip was the symptom, the wobble the cause.
+  - **A rotor blade against the world** (found 2026-11-10 from GitHub issue 102: helicopters explode much faster at
+    high frame rates when their blades touch something). **`FUN_003EE308` is CVehicle's blade test** (reVC's
+    DoBladeCollision; radius f12, damage multiplier f13, the vehicle a0, the rotor's matrix a1; decompiled): for every
+    collision point of the rotor's sphere it makes sparks (FUN_001E9040), once pushes the vehicle off (ApplyTurnForce,
+    the rotor's speed +0x700 cut to 0.15) and sets the vehicle's **damage impulse +0x10C** to `max(the contact's impulse
+    (FUN_0034AC70), *0x48A1C0 * mass / 3000) * multiplier` when that is more than it holds (+0x132 the damaged piece 0,
+    +0x150 the entity hit, +0x120.. the normal). CAutomobile::ProcessControl's `VehicleDamage(0, 0)` (FUN_00136C10,
+    the virtual call at 0x13C3C0: impulse 0 = "take +0x10C / +0x132") turns it into health the same frame, and
+    CPhysical::ProcessControl clears +0x10C (0x348A4C). So a blade in a wall costs the same health every frame: a
+    Maverick (model 213) standing in an alley narrower than its rotor lost **12.75 a frame** - 375 a second at 30
+    fps, 1840 at 144 (`framerate_audit.py --only rotor` with `VCS_PHYSICS_TIMESTEP=0`): on fire in under a second.
+    **The health VehicleDamage takes from is the vehicle's +0x27C**; +0x278, which section 12 calls the health and
+    the trainer / F3 panel read, stayed 1000 while the helicopter burned and blew up - what +0x278 is, is open.
+    VehicleDamage has a threshold and several factors, so the impulse cannot simply be scaled by the step; the fix
+    (vcs_physics_timing.cpp, 4.) makes the blades count on one frame per 1/30 s, as on the PS2: a per-vehicle sum of
+    the frames' steps lets the multiplier f13 through when it reaches a PS2 frame (within 10%; the rest is carried)
+    and zeroes it otherwise - sparks and push stay every frame. After: 375 / 391 / 377 / 389 / 395 a second at 1/30 /
+    60 / 100 / 144 / 240. Found with a diff of the vehicle's floats over time (the one that fell), a write watch on it
+    with `VCS_WATCH_STACK=1` (pc 0x137918, the caller at VehicleDamage's saved ra, sp + 0xB8), then the stores to
+    +0x10C in the generated code (23 functions; the one in CVehicle's range) and `tools/eedecomp.py`. A rig `watch` on
+    +0x10C itself only showed the clears.
+  - **Braking audit** (`framerate_audit.py --only bikebrake,brake`, the airport runway: RUNWAY_SPOT, a PCJ-600 from 36
+    m/s, a Sentinel from 24; before = `VCS_PHYSICS_TIMESTEP=0`):
+
+    | | 1/30 | 1/60 | 1/144 | 1/240 |
+    |---|---|---|---|---|
+    | bike: heading swing, degrees (before) | 4.3 (11) | 3.3 (5.3) | 1.3 (58) | 0.5 (180: spun round) |
+    | bike: lean drawn, degrees (before) | 4.8 (6.7) | 9.7 (11) | 5.7 (37) | 2.4 (33) |
+    | bike: up z at the end (before) | 1.0 (1.0) | 1.0 (1.0) | 1.0 (1.0) | 1.0 (-0.55: on its side) |
+    | bike: time to stop / distance | 1.63 s / 30 m | 1.37 s / 26 m | 1.22 s / 23 m | 1.12 s / 21 m |
+    | car: time to stop | 1.13 s | 1.08 s | 1.09 s | 1.10 s |
+
+    (At 1/30 the fix scales by 1: before and after are the same code there, 4.3 and 11 degrees are two runs of the
+    wobble's random phase.)
+
+    **Left: the bike still stops sooner at high frame rates.** With both wheels down it brakes at ~30 m/s^2 at any rate
+    (brake and grip per wheel are per second the same: `VCS_WHEEL_LOG`), but at 30 fps it pitches further forward
+    (forward z -0.26 against -0.13 at 240) and in some runs its rear wheel leaves the ground for ~0.5 s, braking at
+    half that. The pitch torques per second by caller (springs, dampers, the front brake) match between 30 and 144, and
+    the stopping time moves smoothly with the step: explicit integration of a stiff suspension at the PS2's 1/30 s, like
+    the jump heights above - not a per-frame term. Not corrected.
 - **Moving platforms: `1 / max(step, 1.0)`** (found 2026-10-31 from GitHub issue 10: Vic fell out of the ferris wheel
   at 60 fps, not at 30). Objects that the game places itself each frame get the move speed `(new position - old) * 1 /
   max(ms_fTimeStep, 1.0)`, so that a ped standing on them moves with them. On the PS2 the step is 1.67 and the 1.0 never
@@ -328,9 +388,9 @@ the globals each frame:
 |---|---|---|
 | FOV global | `0x487484` (float, degrees) | written by `FUN_002653e0` (a `CDraw::SetFOV`); 45 in the frontend, 120 in the flyover, 70 in game |
 | Aspect global | `0x487488` (float) | written only by `FUN_002653f0` (`CDraw::CalculateAspectRatio`) |
-| Aspect choice | `FUN_002653f0` | widescreen preference on: 16/9, or 5/3 when `[0x6f4d14]` is set; off: 4/3, or 1.25 when set. `[0x6f4d14]` is 0 in the frontend and 1 in game (not a PAL flag) |
-| Widescreen preference | `*(int *)(*(0x48F3D0) + 0x30)` | getter `FUN_002af658` (`lw v0, 0x30(a0)`); the object at `[0x48F3D0]` (prefs / menu manager) is created by `FUN_00470fa8` |
-| View window | `FUN_001ab9e0(camera a0, raster rect a1, tan f12, aspect f13)` | x = tan(FOV/2), y = x / aspect, raster 640x448 (null rect), then `FUN_0018f2d8` = RwCameraSetViewWindow. Called at `0x21cdd4` with the aspect global, at `0x21f9c8` with a fixed 16/9 (same camera `[0x51E490]`; probably the letterboxed cutscene view) |
+| Aspect choice | `FUN_002653f0` | widescreen preference on: 16/9, or 5/3 when `[0x6f4d14]` is set; off: 4/3, or 1.25 when set (re3's `CDraw::CalculateAspectRatio`). `[0x6f4d14]` = `TheCamera (0x6F44D0) + 0x844`, m_WideScreenOn: set by cutscenes and SWITCH_WIDESCREEN (5a), not a PAL flag. An earlier note here, "0 in the frontend and 1 in game", was read during the opening cutscene |
+| Widescreen preference | `*(int *)(*(0x48F3D0) + 0x30)` | getter `FUN_002af658` (`lw v0, 0x30(a0)`), setter `FUN_002af660` (`sw a1, 0x30(a0)`); the object at `[0x48F3D0]` (the menu's prefs) is created by `FUN_00470fa8`. Everything it changes: 5a |
+| View window | `FUN_001ab9e0(camera a0, raster rect a1, tan f12, aspect f13)` | x = tan(FOV/2), y = x / aspect, raster 640x448 (null rect), then `FUN_0018f2d8` = RwCameraSetViewWindow. Called each frame at `0x21cdd4` with the aspect global. The call at `0x21f9c8` with a fixed 16/9 is in `FUN_0021f950` (AppEventHandler, case 0 of the table at 0x4AC7A0 = rsCAMERASIZE, from RenderWare's event dispatcher `FUN_002d78e0`): a resize-time default the per-frame call replaces, not a cutscene camera |
 
 - The game's own widescreen is **Vert-**: same horizontal view, vertical view cut, for a TV that
   stretches the anamorphic picture. The HUD does not change with it (the radar keeps its shape); the
@@ -358,6 +418,49 @@ the globals each frame:
   wide: its side planes at 16:9 are (-+0.73095, -0.68243), the same 43.0 degrees as the widened entity planes.
 - `FUN_0039fc48` (3D point to screen for sprites: coronas, light glows) only rejects by near / far; it sizes the
   sprite with the aspect global (`0x39fd2c`: 448 / z x 1.4286 / aspect), which Hor+ leaves at the game's 4:3 value.
+
+### 5a. The game's own widescreen option, all of it (2026-11-06)
+
+Reported by the user: with the pause menu's Display > Widescreen on, cutscenes lose their black bars. Found by reading
+every call of the getter `FUN_002af658` in the generated code (`jal func_2AF658`, encoding `0x0C0ABD96`: ~100 calls in
+35 functions; each one's a0 checked to be the prefs object, loaded with `lw a0, -0xC30(lui 0x49)` = `0x48F3D0`) and the
+setter's callers. Coordinates are the 2D pass's 480x272 units. With the preference on (1):
+
+| Effect | Where | Detail |
+|---|---|---|
+| 3D aspect | `FUN_002653f0` | 16/9 instead of 4/3 (5/3 instead of 1.25 while m_WideScreenOn): Vert-, the FOV global unchanged |
+| **No cutscene letterbox** | `FUN_002804c8(cutscene manager)` | from the 2D pass `FUN_0021f348` at 0x21f404 only. While the manager `*0x48F820` +0x34 != 0 (1 at load `0x427120`, 2 when loaded `0x427600` - HAS_CUTSCENE_LOADED tests 2 -, 0 at CLEAR_CUTSCENE `0x427a8c`) **and the preference is 0** it fills two black rects (`FUN_002bf1d8` rect, `FUN_003287d8` colour 0,0,0,255, `FUN_003e0b10` fill): 0..34 and 238..272 (12.5% each: a 16:9 picture on a 4:3 screen). Fixed size, nothing else drawn |
+| HUD squeezed for a stretching TV | `FUN_0031db20` health, `FUN_0031e3f8` armour, `FUN_0031e168` / `FUN_002af7c8` meters, `FUN_0031eb18` money, `FUN_0031ed10` clock, `FUN_0031ef08` digit glyphs, `FUN_0031fdf0` stars, `FUN_0031f478` weapon icon, `FUN_0031f270` radar width, `FUN_003209d0` / `FUN_00320c08` / `FUN_00320f28` counters and timer, `FUN_00321cf8` help box, `FUN_00322c08` pager, `FUN_00323018` scope / binocular / camera overlays, `FUN_00319058` free-aim circle | widths x0.75 (radar 64 -> 48, help box 220 -> 165, pager 128 -> 96, the overlays about x 240) or about x0.8 (bars 0.85 -> 0.68 of their length, glyphs 11 -> 9 with advance 9 -> 7, stars 13.5 -> 11, weapon icon 54 -> 45.5); the right-side HUD moved 10-15 units right (health / armour 360 -> 375, money / clock 373 -> 386), the weapon icon's right edge 470 -> 465. Heights never change, nothing is hidden |
+| Text | `FUN_00262580` | the font's horizontal scale 0.75 (else 1.0), used by glyph placement `FUN_00261600` and the string widths `FUN_002625f0` / `FUN_00262818`: all text 3/4 wide |
+| Pause map and radar blips | `FUN_00114758` / `FUN_00114978` (map <-> screen, x factor 1 instead of 4/3), `FUN_0026ba60` (map background), `FUN_00118360` (26 calls: the map's markers, offsets 3/4), `FUN_00115788` (blips, also on the HUD radar) | 3/4 wide |
+| Menu layouts | `FUN_003b58d8` (index + 6), `FUN_003b5a48` (name + `"_WIDE"`, string 0x4BC970), `FUN_003b85f8` (the page's layout through `FUN_003b7898`) | the `*W.PSP` / `_WIDE` page layouts (CONTROLS_PAGE_WIDE) |
+| Scope / camera mask | `FUN_0021f348` (0x21f69c) | with the HUD's +0x2C28 (SET_BINOCULARS_MODE 0x049C) or a sniper / camera weapon: side bars 70 units instead of 30 (top / bottom 0..40, 232..272 either way) |
+| Saved | `FUN_003ac9c8` (save, block +0x80; +0x84 music, +0x88 effects, +0x6D subtitles) / `FUN_003acef0` (load: setter at 0x3ad0f8) | a save carries it; boot sets 0 (`FUN_0021c980`, 0x21ca34, with subtitles +0xC) |
+| Dead reads | `FUN_0029c280` / `FUN_0029dab0` / `FUN_0029faf0` (camera modes), `FUN_00371a98` | the result is overwritten at once (re3's `ViewPlaneWidth` with the test compiled away) |
+
+- The pause menu's option is **id 14**: `FUN_002ae958` (value -> text, table 0x4B1FF0) and `FUN_002aef38` (set; table
+  0x4B2040, case 14 at 0x2af068: the setter with value != 0, then `FUN_00471400` -> `FUN_003b85a0` -> `FUN_003b85f8`
+  to lay the page out again), from the menu widgets `FUN_004109d8` (set) / `FUN_00410a40` (get), option id at widget
+  +0x2C. The row is `wide_scr_MI` on DISPLAY_PAGE (6m).
+- **SWITCH_WIDESCREEN is opcode 0x01AE** in VCS (handler `FUN_001e2f88`, table 0x4BEAF0): non-zero -> SetWideScreenOn
+  `FUN_0037c7b8` (`TheCamera+0x844` = 1, the HUD's +0x242C = 0); 0 -> `TheCamera+0xB05` = 1 and SetWideScreenOff
+  `FUN_0037c800` (+0x8BC = +0x844, the HUD's +0x242C = 1). StartCutscene `FUN_00428170` calls SetWideScreenOn, the
+  cutscene's delete `FUN_00427820` SetWideScreenOff (0x427a78). SET_DISPLAY_WIDESCREEN_MODE (0x049D) only sets the
+  HUD's +0x2C30.
+- **The camera's own borders are dead**: DrawBordersForWideScreen `FUN_00376ca0` (from 0x21f3e0 when +0x844 is set)
+  draws 0..pct x 1.36 and 272 - pct x 1.36..272 with pct = `TheCamera+0x824`, but ProcessWideScreenOn `FUN_0037bef0`
+  (camera update, 0x378f08) only ever stores 0 there and nothing else writes it. So scripted SWITCH_WIDESCREEN outside a
+  `.CUT` cutscene shows no bars; the cutscene bars are `FUN_002804c8`'s alone. (Read from the code; in mission 50's
+  opening cutscene, skipping `FUN_002804c8` leaves no black at the top or bottom, so no other bars are drawn there.)
+- Cutscene subtitles (`FUN_0031ca80`, y 217 in 24..456) do not read the preference.
+
+Handling (`src/game/vcs_display.cpp`, the user's decision 2026-11-06, DECISIONS.md): the preference is the PS2's
+answer to a TV that stretches the picture; on a PC each of its effects but the bars fights the Hor+ view and the
+renderer's HUD squeeze, so it is **kept at 0** - the setter is hooked (a save's 1 is dropped: `[display] the game sets
+its widescreen preference 1 (ra=0x3ad100): kept at 0`), the frame kick puts 0 back after a direct write, and the
+pause menu's row is hidden (6m). The bars are the setting Display > **Cutscene black bars** (default On; always on
+at 4:3, where they are the original picture): off, the whole of `FUN_002804c8` is skipped. `VCS_WIDESCREEN=1` forces the PS2's mode, `=game` leaves the preference to the game
+(both show the row again). Regression check: `tools/regress.py` step "widepref".
 
 ## 6. Renderer
 
@@ -503,9 +606,11 @@ I = 1/256) . normal + 0.5, times the vertex's Q from the output, written over th
 the same output (colours, XYZF2, Q unchanged) again with tag 50: PRIM 0x25c - strip, Gouraud, textured, blended,
 no fog, **context 2** (the environment texture set by the game's own GS packets). The kick tag's x lane is the
 packet header's .w via ILW + MFIR - sign-extended (0xffff80nn). Reproduced (`envKicks` in vcs_hle_world.cpp) and
-checked against the VU's three kicks: 27,243 packets over the reference scenes, all exact; native drawing: pass 1
-as a rigid lit model on the GPU, the TEXFLUSH and the second pass as the VU's kicks (PATH1). Clipped table-0x13
-packets stay on the VU1.
+checked against the VU's three kicks: 27,243 packets over the reference scenes, all exact; native drawing: all
+three as the reproduction's kicks (PATH1). Until 2026-11-06 pass 1 was a rigid lit model on the GPU
+(`PS2X_HLE_ENV_PASS1=native`): its own transform put vertices a Z unit or 1/16 pixel away from pass 2's, and pass
+2 (GEQUAL) failed in bands - stripes on car paint (6g). Clipped table-0x13 packets go through the C++ clipper, both
+passes as kicks.
 
 **Code images.** The code below 0x2700 is not fixed either: VCS uploads different variants of the transform
 (0x07f0) and clip test (0x0c38) per pass - every reproduction is tied to a hash of the exact code it was read from.
@@ -633,7 +738,7 @@ Found from frame dumps (`PS2X_HW_DUMP`, draw lists with depth) during the widesc
 - The radar is drawn straight onto the screen (corrected 2026-10-24 from a frame dump at Fort Baxter: there is no
   off-screen radar target - the 128x128 at FBP 420 is the reflection map, 6g): the round outline is a fan at far Z
   (GEQUAL, Z write on) and the map tiles (128x128 T4 textures, far Z, GEQUAL) are clipped by the **scissor** to the
-  radar's rectangle (37,336 - 120,412 at 4:3). Menu labels are scissored too.
+  radar's rectangle (37,336 - 120,412 at 4:3). Menu labels are scissored too - to their own text (2026-11-06, F12 draw log of the pause menu at 4:3): "stats" has the scissor 413..545 and its first glyph's quad starts at GS x 412.5 (the Im2D half-pixel bias), its shadow 414 / 414.5. On the GS that loses nothing (pixel 413 is the first the quad covers); a renderer above 640x448 must put the scissor's edge at 412.5 too, or the letter's edge is cut (PS2RECOMP_PATCHES.md, the scissor fix).
 - Pause menus have no depth-tested geometry below the far plane (that is how "3D frame" vs "2D
   frame" is told apart for the widescreen presentation).
 
@@ -737,7 +842,8 @@ jumped between left, middle and right, and the radar sometimes left its corner; 
   1/16 pixel, minus 8: the half-pixel bias; z 32-bit). Every PATH2 packet that draws in normal play has this shape
   except a few effect strips.
 - **Effect strips** in A+D packets: `PRIM`, then per vertex `UV` / `RGBAQ` / `XYZ2` register writes (the full-screen
-  flat quads, 20 strips of 6 vertices; the reflection map's copies of FBP 140 into FBP 420, context 2, `PRIM 0x35C`
+  flat quads, 20 strips of 6 vertices; the reflection map's copies of FBP 140 into FBP 420, context 2, `PRIM 0x31C` (corrected 2026-11-06 from
+  `FUN_002f39d8`, 6g; `0x35C` is the offset passes of the blur in `FUN_001ed220`)
   with UV). Packets that set other registers before their `PRIM` (TEX0, ALPHA, TEST, ...) are state.
 - The rest of PATH2 is A+D register setting and texture uploads (IMAGE).
 
@@ -750,6 +856,36 @@ routine `FUN_003DFF20` (raster from `FUN_0021DBF0`), the loading texts (`*0x486E
 frame). It is called from many load paths (`0x346BAC`, `0x3C817C`, `0x45F3E4`, `0x46FE98`, `FUN_0021E950` when a game
 is being loaded). **There is no title menu**: with an empty card the game goes from the loading screens straight into
 the opening sequence (the reference scenes' "flyover"), where Start does nothing; the frontend menu is the pause menu.
+
+**Scope mask** (2026-11-06, the user's request to check the sniper scope at 16:9): the 2D pass `FUN_0021F348` draws a
+black mask before `CHud::Draw` (0x21f768) when the HUD's +0x2C28 is set (SET_BINOCULARS_MODE) or the weapon is 0x12,
+0x1E, 0x1F or 0x27 in camera mode 7, 8, 0x27, 0x28, 0x2E or 0x2F (5a's table). Each bar is a rect built by
+`FUN_002BF1D8` (+0 left, +4 bottom, +8 right, +0xC top - stored from f12, f15, f14, f13) and filled by `FUN_003E0B10(rect,
+colour, 1)` (one Im2D call). Top / bottom: 0..40 and 232..272 for the camera (0x27) or binoculars, off screen otherwise.
+Sides: rect(0, 240 - s1) and rect(240 + s1, 480), s1 210 (170 with 5a's preference) - the fills returning to 0x21f6f0 /
+0x21f728. The scope itself (`FUN_00323018`, from CHud::Draw) is four textured quadrant quads around (240, 136), half-width
+280 for the sniper rifle: past the 4:3 screen. In widescreen the side bars and the scope were both squeezed into the
+middle 4:3 and clipped to it, so the 3D world showed in the strips beside them (seen with the sniper rifle and the
+camera at 16:9: those strips reached 253 of 255). `vcs_hud.cpp` widens the two side bars to the screen edges and draws
+them unsqueezed (anchor Stretch): left 0 .. 240 + (right - 240) s, right 240 + (left - 240) s .. 480, s the HUD squeeze
+- the inner edge stays where the squeezed bar's was. 4:3 and HUD Stretch (s = 1) are untouched; `VCS_SCOPE_FILL=0` =
+before. Regression check: `tools/regress.py` step "scopemask" (fails with `VCS_SCOPE_FILL=0`).
+
+**Tunnel vision** (2026-11-10, GitHub issue 93: GON_C3 "Purple Haze"'s haze left the sides of a 16:9 picture clear):
+`SET_TUNNEL_VISION_INTENSITY` (0x0488, one int, 0 off .. 255; the mission's values are in `$G15B2[12]`) turns on a dark
+haze that closes in from the edges. It is drawn by **`FUN_00323FE8(hud)`**, the first call of CHud::Draw (return
+0x31C6D4; decompiled): the sprite at hud + 0x2BFC as **eight quarter-screen quads**, two layers of four - rects
+(0, 136, 240, 0), (240, 136, 480, 0), (0, 272, 240, 136), (240, 272, 480, 136) in 480x272 units from `FUN_002BF1D8` -
+through the sprite routine `FUN_003DFF80` (rect, colour and four UV pairs; its Im2D call returns to 0x3DFFC0, its own
+return address is at sp + 8 there), colour (255, 255, 255, 200), the texture mirrored per quarter and shifted by
+`0x481CE0` / `0x481CE4` x 1/3 (the second layer 0.05 further): the slow drift of the haze. Seen in the draw list as
+6-vertex textured draws in the HUD layer. Quarter screens are not full-width draws, so the HUD's widescreen grouping
+(resolveAnchors) merged them - and every HUD element they touch, i.e. all but the radar - into one element as wide as
+the screen and kept it at 4:3 in the middle: the haze covered the middle 720 of 960 pixels and the clock / weapon
+cluster moved in from the right edge with it (`[hud-anchor] x 0..640 ... prims 31 -> centre`). `vcs_hud.cpp` names the
+Im2D calls whose sprite routine was called from FUN_00323FE8 (the saved return address) as a screen effect
+(`Part::Screen`): never grouped, anchor Stretch. `VCS_HAZE_FILL=0` = before. Found with `VCS_TRACE_HUDANCHOR`,
+`VCS_TRACE_IM2D` + `VCS_TRACE_IM2D_STACK`, then `tools/eedecomp.py 0x324100`. Check: `tools/haze_check.py`.
 
 ### 6g. How a frame is put together (draw-list dumps, 2026-10-23)
 
@@ -783,10 +919,52 @@ UV mapping per primitive fitted from the vertices, u = du/dx * x + offset in tex
   sampling, tap offsets of a texel), added into 140 at FIX 100 (bilinear upsample, 0.4 x 0.57 texels per pixel).
 - Trails: 640x448 -> 512x512 at FBP 384 (bilinear, 1.25 x 0.875), blended back at FIX 7 from 103 strips with offsets
   of up to 11 texels (a smear), then added at FIX 128 with a tint colour (0x10 0x03 0x09 at noon).
-- A 128x128 sample of the picture (5 x 3.5 texels per pixel, no offset) goes into the corner of FBP 420, blended
-  with what is there at FIX ~6-19 (a running average), plus an additive sun / glow sprite (64x64); right after,
-  3D draws (vehicles, z ~0.001, blend FIX 6) are textured from that 128x128 corner - a reflection map refreshed
-  every frame. After the bloom (which overwrites FBP 420) the sample is added again for the next frame.
+- A 128x128 sample of the picture (5 x 3.5 texels per pixel, no offset) goes into the corner of FBP 420, plus an
+  additive sun / glow sprite (64x64); right after, 3D draws (vehicles, z ~0.001) are textured from that 128x128
+  corner - a reflection map refreshed every frame. After the bloom (which overwrites FBP 420) the sample is drawn
+  again for the next frame.
+- **The reflection map, corrected 2026-11-06** (user reports of flickering car reflections; F12 draw log of a parked
+  car at Fort Baxter, 12:00, and the game's code). The map is built by `FUN_002f39d8`: FRAME / TEX0 for a 2^n x 2^n
+  target (here 128x128) reading the frame, then one A+D packet - XYOFFSET_2, TEST_2 0x30003, SCISSOR_2 0..w / 0..h,
+  **PRIM 0x31C** (strip, Gouraud, textured, UV, context 2, **no ABE**) - and `FUN_002f3bf8` writes the vertices: one
+  quad, 640x448 onto 128x128, bilinear. It is **not** a running average, as 6g said before: blending is off, so the
+  map is overwritten every frame. The ALPHA_2 the draw log shows on it (`(Cs-Cd)*FIX+Cd`, FIX 6-19) is left over from
+  the trails pass and has no effect. The map is therefore a 4-tap bilinear sample of every ~5 x 3.5 block of the frame,
+  with no prefilter. The vehicles' second pass (stage table 0x13, 6d) blends the map in **decal**, ALPHA
+  `(Cs-Cd)*FIX+Cd` with FIX 19 (~15%) or 0 (no reflection) per draw. Its ST comes from the view-space normal, so a flat
+  panel has a nearly constant ST: a whole panel shows **one map texel** (seen: s/q 0.0426..0.0430 over a door), i.e.
+  the frame's colour at one fixed spot on screen. When the camera moves, what is under that spot changes (sky, wire,
+  a pole) and the whole panel's colour jumps. That is the flicker, and the PS2 has it too. The renderer reproduces it
+  at every internal resolution: render targets that are not read 1:1 are read one target pixel per PS2 texel
+  (`fetchTexel` in gs_draw.hlsl), so the window-scaled map (`gsHwSetTargetRole(420, 2, ..., true)`) is read only at
+  its 128x128 PS2 texel centres. Match window with and without `PS2X_HW_REFLECTION_SCALE=0`: car paint differs by a
+  mean 0.13 / 255 (frame-to-frame noise 0.04). What higher resolutions change is how visible it is: the rest of the
+  picture stops shimmering, and the panels' jumps stand out.
+- **Car reflections: Smooth** (2026-11-06; always Auto, no setting: Smooth when the frame is above 1x by its height, so
+  1x 16:9 (853x448) stays Original; `VCS_REFLECTIONS=0|1|2` = Original / Smooth / Auto for one run). The game's copy
+  into FBP 420 / FBW 2 (`gsHwSetTargetFilter`) is marked as a filtered copy (`markFiltered`: axis-aligned, more than
+  1.5 source texels per target pixel). With Smooth, the shader (`sampleRtFiltered`) gives each map texel a tent over
+  its whole footprint and its neighbours' (±5 x ±3.5 frame pixels, up to 16 taps per axis at the frame's resolution),
+  instead of four bilinear taps. The other pixels of a map drawn above 1x keep the four taps: the paint never reads
+  them. Measured:
+  - A map texel's swing under sub-pixel camera motion, simulated on three frames at 1.5x: Original 4.7-6.8, Smooth
+    2.0-2.5 (out of 255).
+  - Spatial roughness of in-frame maps while circling the barracks at 3x: 7.4 -> 4.5. In Original, poles break into
+    dashes and the fence into moiré, which crawl when the camera moves; in Smooth they are whole.
+  - GPU: ~0.2 ms per copy at 4x3 on the GTX 1080 Ti (Original 0.04). Filtering every map pixel had cost 1.1 ms.
+
+  The reflection's strength (FIX 19), the sun glow and what is reflected are unchanged. Checked: Auto at 1x 16:9 never
+  filters (no `[gs-hw] filtered copy` line in the log); Smooth forced at 1x does (footprint 5.00 x 3.50).
+- **Stripes and moiré on car paint: a port bug, fixed 2026-11-06** (a player's screenshot: diagonal hatching and
+  lines over a pickup's hood and door, crawling with the camera). The reflection is a second pass over the paint
+  (stage table 0x13, 6d) with ZTST GEQUAL. On the PS2 both passes are the same VU output, so pass 2's depth equals pass
+  1's everywhere. The port drew pass 1 natively (the GPU's own transform, FTOI4 imitated in float) and pass 2 from the
+  reproduction's VU-exact kick. Some vertices came out a Z unit or 1/16 pixel apart, and pass 2 failed its depth test
+  in bands. Pass 1 now goes out as the reproduction's kick too (`drawNativeEnv`; `PS2X_HLE_ENV_PASS1=native` = the old
+  way). Seen at 1080p Match window, a parked car's door and fender: native pass 1 hatched, 34% of paint pixels more
+  than 4 off from all-VU drawing (`PS2X_HLE_ENV=0`); now no hatching, 17.5% - the rest edges, where the car had
+  settled a fraction of a pixel elsewhere in the other run (two shots of one run: 8.9%). It was there at every
+  resolution and with either reflections setting.
 
 **Pixel centres** (found from the copies above, fixed 2026-10-23): the GS samples a pixel at its integer position,
 D3D at +0.5. Our renderer had drawn without the offset, so the copies (u = x + 0.5) read halfway between two texels:
@@ -1194,7 +1372,7 @@ planes leave in the sky (seen outside the Little Havana Empire site, 08:28, 16:9
   kicks showed PATH2 and no ADC; `VCS_TRACE_IMMEDIATE=1` (callers of the Im2D / Im3D entries, `vcs_overrides.cpp`)
   named `0x245904` in the trail renderer.
 
-### 6l. Distance fog: where its range and colour come from (2026-11-02)
+### 6t. Distance fog: where its range and colour come from (2026-11-02)
 
 Found while giving the fog settings (`src/game/vcs_fog.cpp`) a home: read from the recompiled code's disassembly
 comments, then measured live with the rig (`fogstate`, `peekf 0x742B28 2`) and `VCS_TRACE_FOG=1`.
@@ -1221,7 +1399,7 @@ comments, then measured live with the rig (`fogstate`, `peekf 0x742B28 2`) and `
 - So scaling the setter's two arguments moves the fog in every renderer path at once (VU1, CPU HLE, the native
   vertex shaders' `nativeFog`, the clipper), with the time cycle's colour; at 100 % the game's own values go in.
 
-### 6m. Fire: GS sprites lost to the pixel shader's depth on D3D11 (2026-11-03)
+### 6u. Fire: GS sprites lost to the pixel shader's depth on D3D11 (2026-11-03)
 
 Reported by the player: no flames at all - the flame-thrower's, molotovs', explosions', burning cars'; their smoke was
 there. Reproduced by `tools/fire_check.py` (a car set to health 200, the flame-thrower fired, a molotov thrown; fire
@@ -1249,7 +1427,7 @@ pixels counted) and found with F12 draw logs, a read-back of the depth buffer ju
   a 0..1 depth range, and early depth rejection back on. `fire_check.py` passes: fire pixels in the best frame from
   0-12 to hundreds (flame-thrower) and thousands (molotov).
 
-### 6n. Render lists, small props, and foliage: The 30m GS fillrate clamp (2026-11-06)
+### 6v. Render lists, small props, and foliage: The 30m GS fillrate clamp (2026-11-06)
 
 Reported by the player: bushes, road signs, rooftop antennas, and building storefront signs still popped in very
 close (~20m–30m) even with View Distance extended to 350%–1000%. Reverse-engineering `ScanSectorList` (`FUN_0035fae8`),
@@ -1297,6 +1475,187 @@ close (~20m–30m) even with View Distance extended to 350%–1000%. Reverse-eng
     - Require `rd32(veh + 0x384u) != 0` (valid driver) so parked cars never store headlight beam shadows, never have active beam slots in `0x0051E510`, and never process 2DFX light coronas.
   - **Never hook `FUN_0035E590`**: in `FUN_0035E590`, `$f12` is the Z coordinate of the seabed ground plane (`-100.0f`), not a distance. Tampering with it projects rays 20km away and explodes sector scanning to all 2,500 sectors, crippling the CPU and flooding CStreaming.
   - Authenticity: when `viewFactor == 1.0f` (0 on slider, 100% default), zero flags are modified and authentic PS2 culling is strictly preserved.
+### 6l. Fire and explosions (2026-11-04, GitHub issue 4)
+
+- Found with the rig (Fort Baxter card, `prime`, teleport to 575,175, ADD_EXPLOSION 0x013C type 1 next to the player)
+  and F12 / `PS2X_HW_DUMP_ALLVERTS=1` a second after the blast. The flames are GS **sprites** (6 vertices each in the
+  HW renderer, Q 1, the Z of the second vertex) from the 0x02c0 re-draws, made on the CPU (`vcs_hle_world.cpp`): texture
+  `48cd3e4b597ff6e` 64x64, ALPHA `0221` (Cs * FIX + Cd, FIX 128: additive), ZTE on, **ZTST GEQUAL, ZMSK 1** (tested,
+  never written), Z ~0.0016-0.0036 of the Z24 range a few metres from the camera. The blast's first frame adds a
+  fireball (`49584e5615607949` 32x32, also additive, triangles reaching ~2.4 screens past the left edge) and the smoke
+  is `6d7b8c6d9cc1201e` (`0101`, alpha blend, dual-source in the renderer). The ground they sort against is the native
+  world (vs_world) and the models (vs_lit), whose depth the GPU computes; the sky's pixels keep the frame's depth fill
+  (Z 0), so fire that loses to every written depth still shows over the sky - the AMD symptom of issue 4
+  (DECISIONS.md 2026-11-04).
+
+### 6m. The pause menu ("frontend"): pages, items, input (2026-11-05)
+
+Found for the menu's keyboard / mouse (`src/game/vcs_frontend.cpp`, CONTROLS.md): RAM reads of the running menu
+through the rig (`peek`, the item lists below dumped page by page) and `tools/eedecomp.py` of the routines named here.
+- **The manager** at `0x729480` (`FUN_00471400` returns it, built once by `FUN_003b45e8`; `0x4CD7B0` its "made" flag):
+  +0 the tab bar's page "MASTER" (items Map_t, Brief_t, Game_t, Stats_t, Controls_t, Audio_t, Display_t), +4 / +8 a
+  vector of 29 pages (MAP_PAGE, BRIEF_PAGE, LOAD_PAGE (the Game tab), STATS_PAGE, CONTROLS_PAGE, AUDIO_PAGE,
+  DISPLAY_PAGE, CONTROLS_PAGE_WIDE, the load / save / delete slot pages, the Yes / No pages, the result / "...ing" /
+  no-card pages), +0x14 / +0x18 the help bars (popups), +0x24 the page shown (s8; -1 none), +0x25 the help bar shown,
+  **+0x28 non-zero while the tab bar has the focus** (0: the page has it; `FUN_003b5ba8` = the page with the focus),
+  **+0x40 non-zero while the menu is up** (`FUN_003b5130`), +0x4C the draw state (0 on the tab bar: the page shown,
+  the tab bar, a help bar; 3 in a page: the page and a help bar - the tab bar is hidden).
+- **A page**: +0 its name, +0x1C the name of the item focused when it opens, +0x2C / +0x30 a vector of items, **+0x3C
+  the focused item**, +0x18 the input latch, +0x40 the last up / down.
+- **An item** (0xF0+ bytes): +0 its name, **+0x10 x, y, w, h** (ints, in the PSP's 480x272 units; w / h are a layout
+  box, not the text: the tabs are 100 wide 53 apart), +0x24 visible (byte), **+0x28 the class** (vtable: +0xC is-a,
+  +0x14 draw, +0x18 update, +0x2C draw focused, +0x3C input(dir) = `FUN_00411e70`, which runs the direction's
+  actions). **+0x6C + d x 0x10, d = 0..6: a vector of actions** for left, right, up, down, select (Cross), back
+  (Triangle), getting the focus. An action: +0 type, +4 / +8 a string (begin, end) and more after. Types seen: **0
+  focus the item named** (the D-pad's moves between items, all of them - the tabs wrap around: Map left = Stats),
+  1 / 2 turn the item named up / down (slider or choice), 3 open a page, 5 open the tab's page (the tabs' select), 6
+  back, 7 (scroll lists' focus), 9 / 10 / 14 / 15 / 16 / 20 / 21 / 22 / 23 the game's new / delete / save / load
+  steps. The tabs' focus actions (d = 6) are type 3: moving along the tab bar shows each page.
+- **Classes**: `0x490A58` text item (tabs, menu lines, choices: +0xEC the number of choices, +0xED the one shown),
+  `0x490680` slider (**+0xDC the value 0..1, +0xE8 its steps**: Music / SFX volume 8), `0x4905E8` the map (below),
+  `0x48F9A8` scroll list (Brief, Stats), `0x48F4B0` save slot, `0x4905A0` the screen-position frame, `0x48FE10` a
+  page's backdrop (0, 0, 480, 272), `0x491F68` the pad picture, `0x48FDC8` radio icons, `0x48F3D8` / `0x48F420` /
+  `0x48F468` animated icons.
+- **Input**, once a frame: `FUN_003cdff8(page)` asks `FUN_003b5758` for a direction - the left stick past 16 / 26 or the
+  D-pad's press (0 left, 1 right, 2 up, 3 down), **Cross's press 4, Triangle's release 5** - and, if none was given
+  the frame before (the latch +0x18), runs the focused item's input with it. So a held D-pad moves once: the pad must
+  be let go a frame between steps. `FUN_003b5138` (the menu's update): **Start's press opens and closes the menu from
+  any page; Triangle's release closes it while the tab bar has the focus** (CPad 0 at `0x5147A8`: +0x22 / +0x52 Start
+  new / old, +0x28 / +0x58 Triangle, +0x2A / +0x5A Cross).
+- **Drawing**: `FUN_0021f7d8` (each frame) -> `FUN_003b53f8` (the menu) -> `FUN_003cdf20(page)` for each page drawn,
+  which calls each visible item's draw (+0x2C for the focused one of the page with the focus); then `FUN_003e0b10` (a
+  full-screen overlay, the brightness). Items draw through Im2D in the full 640x448 (x 4/3, y 1.647 of the units), and **that
+  drawing is the picture**: the menu's 640x448 coordinates map 1:1 onto the 4:3 area the frame shows it in (the
+  presenter's `fitRect(4:3, game aspect)`; in a wide frame the HUD squeeze puts it in the middle 4:3). An earlier note
+  here said the picture shows it shrunk to 480x360 (80 + 0.75x, 44 + 0.804y): that was a hidden run's 16:9 letterbox
+  inside its 4:3 window (120 / 66 of 960 x 672) read as the game's - and screenshots of a hidden run are 960x672 while
+  its window is 640x448. Checked by drawing `menustate`'s boxes over a screenshot (they sit on the text) and by
+  `tools/menu_check.py`'s window check. The Save menu a safehouse
+  opens (`ACTIVATE_SAVE_MENU`) is this menu on SURE_SAVE_GAME_PAGE, the same layout and no 3D behind.
+- **DISPLAY_PAGE** (2026-11-06, the page's items dumped through the rig; built once at boot, the same addresses each
+  time the menu opens): Background, the title `UnNamed Asset4` (20, 10), then the rows at x ~248, h 40: `Brightness_MI`
+  y 40 (slider, 8 steps), `Subtitles_MI` 65, `wide_scr_MI` 89 (option 14, the game's widescreen, 5a), `RADAR_MODE_MI`
+  116, `HUD_MODE_MI` 141, `Trails_MI` 166, `screen_pos_MI` 191 (full width; its select focuses `screen_pos_MA`, the
+  screen-position frame at 186, 238). Up / down are type-0 actions naming the row above / below, Screen position's down
+  wrapping to Brightness; the page opens on Brightness_MI (+0x1C). An action is 0x24 bytes: +0 the type, +4 a std::string
+  (begin, end, 0, capacity end), +0x14 a second one (empty for focus moves). `vcs_frontend.cpp` hides `wide_scr_MI`
+  (visible byte 0, the two actions that name it trade strings with its own, the four rows below up by 27) - a swap, so
+  each string buffer keeps its one owner.
+- **The map item** (`FUN_0026be00`, its update): +0xE4 / +0xE8 the map's offset in units, +0xF0 the zoom (100..580,
+  +0x104 / +0x108; it opens at 400), +0x100 the zoom's step a frame (8; L1 out, R1 in while held), +0xF4 / +0xF8 the
+  D-pad's scroll. **The D-pad scrolls the offset only while |offset - (240, 114)| <= zoom - 100** (measured at the
+  smallest zoom, 392 and 576: x -236.6..715.9 and y -362.6..589.9 at 576); written past that, the map's tiles are drawn
+  wrong (the 3D world shows through). Cross toggles the legend, Square the target (the crosshair).
+
+### 6n. Button prompts: control tokens, the font's button glyphs, the menu's button pictures (2026-11-07)
+
+Found for button prompts by input device (keyboard / Xbox glyphs): `tools/eedecomp.py` of the routines named here, a
+search of the generated code for a function comparing with both `~` (0x7E) and `k` (0x6B), the GXT text, and RAM read
+through the rig (font objects, the menu's help-bar items, and every `C<n><ACTION>` text out of the running game's table:
+`vcs.exe`'s `prompts text <KEY>` command). **`build/analysis/text/american.txt` is not the PS2's text**: 26 of the 244
+control texts differ from the game's table in RAM (C*VEWE2 is "~S~ + ~X~" there and "R1 button" in the game, C*DOARM
+"L1 and R1" / "L2 and R2", C*FLUP "left analog stick up" / "up directional button" ...) - read text from the game. A
+prompt reaches the screen by one of three paths:
+
+**1. Text: `~k~ ~ACTION~` -> the controller configuration's text.** GXT strings name a control by action, never by
+button: `Press~h~ ~k~ ~TGSUB~ ~w~to ...` (149 uses). **`FUN_003aff20`** (re3's InsertPlayerControlKeysInString; a
+256-character UTF-16 buffer rewritten in place) finds each `~k~`, and **`FUN_003afd78`** reads the action's name up to
+the next `~` and looks up the GXT key **`C<n><ACTION>`** with n = **CPad 0 +0x92** (`FUN_002852a8(0)` = 0x5147A8 + pad x
+0xD4; the Controls page's configuration, 0..3). 61 actions x 4 configurations (C0..C3); the text is either one face
+button token (`~X~`, `~O~`, `~S~`, `~T~`; never two) or words ("R1 button", "L2 and R2 buttons", "L2 button + R2
+button", "left analog stick", "up directional button", "SELECT button", "left analog stick, or directional buttons" -
+about 45 phrases). "left button" / "right button" / "up button" / "down button" are the D-pad's (C0AMLEF "left button",
+C1AMLEF "analog stick left"). PSP leftovers remain: "L button" (C*ANS, C*PDLO1, C*SNSLO) and "R button" (C2 / C3VEHB,
+where C0 / C1 say "R1 button" - so taken as L1 / R1), and the Memory Stick texts. The full list, per configuration, as
+the game has it: `prompts text C0<ACTION>` (2026-11-07 dump in the change that added the button prompts). Strings with a face button token of
+their own: `LDWAIT` "Press ~X~ to continue.", `MAP_OMM` "Hold ~X~ to display the map options.", the PSP-only SS_* and
+MP_*. Callers of the expander:
+- `FUN_0031c180` (CHud's set-help-message): **once**, into the HUD's own buffer (+0x2470) - the help box keeps the
+  expanded text while it is up.
+- `FUN_003aee80` (big / small messages, from the 2D pass): **every frame**, into a stack buffer.
+- `FUN_001574e0` (the Brief page's list): when the line is built (0x4FF5C8).
+
+**2. The font: `~c~` tokens and the button glyphs.** Text is drawn by `FUN_00261be8` (render, 6f). `FUN_00262370`
+returns c for a `~c~` (three UTF-16 units; any 16-bit value) and the renderer switches on it: `Y b g h l p r t w y` are
+colours (`FUN_00262398`: h and t cyan 1E,FF,FF, w white, y / Y pink-ish ED,82,B4, r red AE,0,0 or the y colour when
+`*0x487480`, g green, b blue, p purple, l black), `n` a new line; **any other c is looked up in the font's button-glyph
+table** (`FUN_003e5e58`) and, when found, drawn by `FUN_00261af8` in white with the text's alpha, scale **1.33**
+(`0x3FAA3D71`) for X / O / T / S and 1.0 for others, through the same glyph routine as letters (`FUN_00261600` ->
+`FUN_003b8ea0` -> an Im2D quad, `FUN_003dfce8`). The string width (`FUN_002625f0`, `FUN_00262818`, used for centring and
+wrapping) looks the glyph up the same way, so a glyph's width in the table is its width in the layout.
+- **Font object** (`*(*0x48A1D8 + style x 4)`): +0 u16 letters, **+2 u16 button glyphs**, +4 / +6 u16 line heights,
+  +8 the letters' table, **+0xC the button glyphs' table**, +0x10 u8 encoding, +0x18 / +0x1A u16 the atlas size, +0x2C
+  the name. A table entry is 14 bytes: s16 left, s16 width, s16 right, u16 height, **u16 the character**, u16 u, u16 v
+  (texels; the quad samples (u + 0.5 .. u - 0.5 + (left + width + right) / scale) / atlas width).
+- Read at Fort Baxter: style 0 "Fanc" (144 letters), **style 1 "Game" - the only font with button glyphs: 4, all 29 x
+  23 texels in its 256 x 256 atlas: T at (213, 207), S (0, 230), X (22, 230), O (44, 230)**, style 2 "BigT" (74), style
+  3 "Page" (173). So L1 / R1 / sticks have no glyph: the text says them in words.
+
+**3. The pause menu's help bars: pictures.** The help-bar pages (manager +0x14 / +0x18, 6m: MASTER_BUTTONS,
+UPDOWN_BUTTONS(_WIDE), SELECT_BUTTONS, MAP_BUTTONS, AUDIOCTRL_BUTTONS(_WIDE)) hold image items (class `0x48FE10`, the
+same as a page's backdrop; 12 x 12 units) named ButtonCross, ButtonTriangle, ButtonSquare, ButtonUp / Down / Left /
+Right, ButtonL1, ButtonR1, beside text items ("back", "select", "move", "Zoom", "Legend"). An image item's **+0xDC is
+its RwTexture** (name at +0x10) and +0xE0 the dictionary's name, `frontend1`: textures **btn_cross_psp,
+btn_triangle_psp, btn_square_psp, btn_up_psp, btn_down_psp, btn_left_psp, btn_right_psp, btn_l_psp, btn_r_psp**.
+- The Controls page's controller picture (class `0x491F68`, with labels such as FEC_EXV "Exit vehicle") is a fourth,
+  not yet read.
+
+**What the button prompts do with it** (`src/game/vcs_prompts.cpp`, 2026-11-07; checked by `tools/prompts_check.py`):
+- `FUN_003afd78` replaced: the same GXT text, each phrase turned into a token per control - `~` U+E000 + context x
+  0x40 + control `~` (context: on foot, in a vehicle - actions VE*, FL*, HE*, TAXJU, CVEIW, FIREH -, the menu). The font
+  takes any 16-bit character for a token (`FUN_00262370`) and looks it up in the glyph table as a 16-bit compare
+  (`FUN_003e5e58`); `FUN_00261af8` tests only the low byte for X / O / T / S (a 1.33 texel scale - harmless here).
+- The glyph table moved: font +0xC pointed at a copy in the EE kernel's area (0x61000; free aim uses 0x60000) with the
+  four originals and 99 token entries (height 23, u = 2 x index, v = 255 - no glyph of the 256x256 atlas starts in that
+  row), font +2 its count. Widths are written per glyph set at the frame kick; the game lays out with them.
+- **A glyph in the font's batch** (`FUN_003dfce8` appends 4 vertices and 6 indices a glyph to 0x709650 / 0x70C650,
+  `FUN_003dfdd8` draws them with `FUN_002fbe68(3, ...)` at the end of each render call, return 0x3DFE24): the vertex u /
+  v are `(int)(f x 32768 + 0.5)` (`FUN_003e0888`: 1.0 = 32768), u starting half a texel in (`(u + 0.5) / 256`), v not
+  (`v / 256`). So the quad's smallest u / 128 - 0.5 and v / 128 name its table entry.
+- **The drop shadow** (`FUN_003f3d88` renders twice, the shadow first with t3 = 1) draws button glyphs in white too, the
+  same as the text's own pass (`FUN_00261be8` gives them colour 255,255,255 with the text's alpha).
+
+### 6o. Draw distance: the LOD scale and the two far planes (2026-11-07, Enhancements > World)
+
+Found reading the generated code's disassembly for the far plane's setters and readers and the camera update's LOD
+maths, then checked in the game (`tools/world_check.py`, the free camera).
+
+- **RwCamera**: +0x78 near, +0x7C far, +0x80 fog distance; setters `FUN_0018F3B0` / `FUN_0018F400` (far) /
+  `FUN_0018F4A8` (fog), getters `FUN_0018F448` / `FUN_0018F3F8` / `FUN_0018F4B8`. `Scene.camera` = `*0x51E490`
+  (TheCamera keeps it at +0x7F4). Init `FUN_003B99F8` (far 2000, near 0.9); indoors (`currArea` not 0 / 4)
+  `FUN_0029DAB0` sets near 0.3, far 1000.
+- **Far plane, every frame**: `FUN_0021E950` sets 2000 at `0x21EBA4` (`RwCameraSetFarClipPlane`, returns to
+  0x21EBB8), then the fog distance from the timecycle's fog start (`*(*0x486838 + 0x3310)`). `CCamera::Process`
+  (`FUN_00378DD8`, `0x37B044` / `0x37B058`) copies near / far into `0x4CD130` / `0x4CD12C`, which
+  `CCamera::IsSphereVisible` and the sprite projection `FUN_0039FC48` read - so world sectors (6b) and entities are
+  cut at the RwCamera's far.
+- **The VU projection's far is a second, separate 2000**: `RwCameraBeginUpdate` (`FUN_0018EE48`) calls
+  `FUN_002F57A0(tan f12, aspect f13, near f14 = cam+0x78, far f15 = the constant 2000)` at 0x18F088, which writes
+  `0x742AC0` (the view window of 5) and the clip-plane qwords 59-64 (the VU clipper's w < 2000, 6h). The fog end is
+  the RwCamera's far: `FUN_002F6008(fog start, cam+0x7C)` at 0x18F0E8 sets VU qword 53 (fog = clamp(53.w * w + 53.z)).
+- **The timecycle's far clip** (`*0x486838 + 0x330C`, interpolated per hour by `FUN_001CCF20` as VC does) is
+  computed and never read: VCS's far plane does not change with the hour or the weather, only the fog start does.
+- **LOD scale**: `CCamera::Process` computes LODDistMultiplier (`TheCamera+0x7DC` = `0x6F4CAC`): 70 / FOV
+  (0x37AEE4), times 1 + (z - 55) / 60 above z 55, at most 2.0 (0x37B01C); copies it to GenerationDistMultiplier
+  (+0x7D0, which the spawners use: cars appear at 110 x it, 12d) at 0x37B068; then **multiplies it by `0x4887F8`**
+  (0x37B06C). `0x4887F8` is 1.0 in the executable, read there only and written nowhere - the counterpart of VC's
+  `CRenderer::ms_lodDistScale`. Every model's LOD distances (CSimpleModelInfo +0x2C, three floats; `FUN_003A52F8`
+  GetAtomicFromDistance, `FUN_003A5380`, `FUN_003A53E0`) and the entity visibility test (`FUN_0035EFD8`, VC's
+  SetupEntityVisibility, constants 330 / 300 / 30 / 20 / 50) scale with LODDistMultiplier.
+- **In the game** (world_check, Little Haiti street at noon, 30 fps): scale 3 doubles the frame's draws (530 -> about
+  1,000: peds, cars and props further down the street), game thread +1 ms, render worker +1.5 ms, GS stage +0.7 ms;
+  the packet buffer stayed at 70-220 KB of 921 KB driving (VCS_TRACE_PACKETS agrees), far from the 0x12BFF-free limit
+  where the game drops sectors. Seen from 250 m up the scale changes little: the height factor already raised it.
+- **Moving the far plane** (`VCS_FAR_CLIP`, a test: both 2000s replaced, so the fog end moves too): more of the
+  distant city and a bridge show through thinner haze, but the far water and land the PS2 kept in the fog are drawn
+  as dark brown-black patches, and the hazy look of the city goes. Not offered in the menu (DECISIONS.md 2026-11-07).
+- `vcs_world_detail.cpp` writes `0x4887F8` (Enhancements > Draw distance) as set, nothing held back. It reports the
+  packet use at the frame kick = (cursor `+0x18` - (half start - 0x10)) + (half end - data `+0x1C`), as
+  `FUN_00476770` computes it (`worlddetail`: packets / peak).
+- **Cars drawn further than the game keeps them**: PossiblyRemoveVehicle (12d) removes a car on screen beyond 160 m x
+  GenerationDistMultiplier. On the PS2 that is past where cars are drawn; with the LOD scale up they are drawn beyond
+  it, and cars about 175 m ahead vanished while driving (16:9, Draw distance 300%, even at 100% traffic: 6 in 3 min).
+  The module skips that removal for a car in view within 160 m x GenerationDistMultiplier x the draw distance.
 
 ## 7. Textures: `.XTX`
 
@@ -2204,6 +2563,8 @@ keeps its order in a hidden `.ps2x-order` file (PS2RECOMP_PATCHES.md).
   Successful." before the world loads at the save point.
 - `FUN_003adae0()` (generic load) runs from world init `FUN_00255308` when a load was requested; it
   reads through `FUN_002759e8` (`sceMcRead`).
+- A save carries the menu's prefs (`FUN_003ac9c8` writes them, `FUN_003acef0` reads them back): +0x6D subtitles, +0x80
+  the widescreen preference (5a: kept off, the setter hooked), +0x84 music, +0x88 effects (9c).
 - `VCS_TEST_SAVE=<s>` (`src/game/vcs_overrides.cpp`) runs the save sequence as guest tail calls from
   `scePadRead`. A direct host call of a guest function is not safe: a scheduler checkpoint inside it
   unwinds the call and the rest of the routine never runs.
@@ -2511,6 +2872,68 @@ mission's runtime IP is 0x3CAE3 + (IP - its start)) and reproduced with the rig.
   end (no credits script), the main script's references to `START_CREDITS`, the raw label search, the LoadingScreen /
   menu hooks traced (not called), and the F12 draw log.
 
+### 11h. Purple Haze stuck on "Loading..." above 30 fps (2026-11-10, GitHub issue 41)
+
+The report: in GON_C3 "Purple Haze" (mission 94) the game stays on "Loading..." after the van reaches the meeting place
+and the cutscene starts - at 60 fps, not at 30. Reproduced with the rig (`tools/haze_check.py`): every run with original
+timing at 60 fps; independent timing at 60 / 144 fps got through, by luck (below).
+
+- **The mission**: its state is `$G1504`, one GOSUB per state from the loop at 0x19D199 (IPs as the disassembler prints
+  them; mission start 0x199CF6): 10 set-up, 15 go to the lock-up (`$G159D $G15A0 $G15A3`, the garage opens under a fixed
+  camera), 20 get into the van `$G1513`, 40 drive it to the meeting place (`$G159B $G159E $G15A1`), **50 the cutscene
+  there** (0x19DBF0), 60 on foot to the phone (`$G159C $G159F $G15A2`; Vic has come to in the haze), 70 the call, 74 /
+  78 / 80 the bikers, 90 the van back to the lock-up, 300 the end, 320 failed, 330 over. All its cutscenes are
+  scripted (fixed cameras, `CALL 35033 / 35064 <ms>` = fade out / in and wait - main script 0x88D9 / 0x88F8 -,
+  `CALL 35126 <ms>` = wait, true when skipped).
+- **State 50**: fade out, models; the truck `$G151E` (model 216) is created 60 m up the street, the van put on the
+  marker, fade in; `SET_CAR_FORWARD_SPEED truck 25`, `SET_CAR_RAM_CAR truck van`, 0.8 s, two camera cuts, a line
+  (`CALL -7834 50`); **fade out 500 ms** (0x19DE87); the two thugs `$G1602` / `$G1603` (model 22) are created at
+  (301.8, -652.9) and (304.1, -653.2) (0x19DE98, +0x41A2); `WAIT 500`; only then (0x19DF14 .. 0x19DF57, +0x4229) the truck
+  is parked - ground height, `SET_CAR_COORDINATES truck $G15AB $G15AC $G15AD` (296.2, -673.6), heading 177.7, status 3,
+  no mission, speed 0, frozen - and the van put at (302.4, -657.5); Vic is warped out and lies on the ground; `CALL
+  -7479 402` loads the next lines; `WAIT 600`; fade in; the thugs talk and drive off.
+- **What differs with the frame's length** (rig `trace` of both vehicles every frame; time from the truck's start):
+  at 2.74 s the truck (14.9 m/s) hits the van. **At 30 fps** one frame takes the truck to 8.7 m/s and the van to 8.9,
+  the van's heading turns 9 degrees one way over the next 0.7 s, and the two slow down together to a stop by 3.5 s,
+  the truck at (308.0, -643.9) behind the van. **At 60 fps** (either timing) the hit takes two frames (14.9 -> 11.0 ->
+  9.1; the van 6.5 -> 8.0), the van turns 18 degrees *the other way* and stops within 0.4 s, and the truck, its heading
+  knocked 9 degrees aside, rolls on past the van at 8 - 9 m/s: at 3.5 s, when the thugs are created, it is 8 m from the
+  first thug and heading for him, and 0.4 s later its nose is on him. With original timing at 60 he died every time
+  (health 0, state 0x39 / 0x3A); with independent timing at 60 he was knocked down (health 64, state 0x2D) and got up.
+  The contact itself differs with how far the truck gets into the van in one step (0.5 m at 30 fps, 0.25 m at 60) -
+  the engine's collision response, not a constant to patch; **open** (section 13).
+- **Why a dead thug stops the mission**: mission audio goes through five slots of the main script, `$G606[5]` (1 free,
+  2 loading, 4 loaded, 8 playing, +32 locked, +64 cancel; the line's name in `$G60B[]`, its text in `$G610[]`, the
+  speaker's handle in `$G615[]`), kept by the script **AUDIMON** (0xAF7F; its loop 0xAF9C .. 0xB0A6): loading ->
+  loaded when `HAS_MISSION_AUDIO_LOADED`, playing -> loaded / free when finished, and **any slot whose speaker
+  `IS_CHAR_DEAD` -> free** (0xB065 .. 0xB08F). A mission asks for a line with 0xAA14 (43540) and, when it wants to wait,
+  calls **0xA9E1 (43489): find the line's slot, then `while (NOT IS_ANY_BIT_SET 4 $G606[slot]) WAIT 0`** (0xA9F9 ..
+  0xAA0B) - the slot is looked up once. `CALL -7479 402` loads the thugs' lines this way with the first thug as the
+  speaker; he is dead, AUDIMON frees the slot, and the loop waits for "loaded" on a free slot for ever. The screen was
+  faded out before the thugs were created, and a faded-out screen is the game's "Loading..." (11g). The same loop held
+  MAR_A1 "Shakedown" when its shopkeeper was deleted (section 12).
+- **Fixed** (`src/game/vcs_script_fixes.cpp`, `VCS_SCRIPT_FIXES=0` off), two hooks on script handlers (opcode table
+  0x4BEAF0: 0x048F IS_ANY_BIT_SET -> **0x100908**, 0x003E CREATE_CHAR -> **0x4120D8**; read with rig `peek`):
+  - the wait loop's mask becomes 5 (the byte at IP 0xA9FC, patched when the handler meets the instruction: loaded, or
+    free again). Checked in a stuck game by poking that byte: the mission went on to state 60 in 8 s - the script then
+    plays the scene without the dead man's lines, as it does when a speaker dies after his line has loaded (the play /
+    wait helpers 0xAAC4 / 0xAC65 find no slot and return). At every frame rate: it changes nothing unless a slot is
+    freed under a waiting script, which on a PS2 is this hang.
+  - Purple Haze's truck is parked before the thugs are created: when the mission reaches the first CREATE_CHAR
+    (+0x41A2, its bytes and the park block's checked), a script of our own (rig `startCodeScript`, from the next frame)
+    runs the park block's commands - with `SET_CAR_COORDINATES x y -100` (the command finds the ground) in place of
+    `GET_GROUND_Z_FOR_3D_COORD`, which writes the height into `$G15AD`: run twice, the mission's own block found the
+    next surface down and parked the truck under the street (z 1.7 for 10.7; seen in the first try). The screen is
+    black then and the mission parks the truck again 0.5 s later, so nothing else changes. Only while the frame is not
+    the PS2's (independent timing, or a cap other than 30): at 30 fps the truck stands behind the van by then.
+- Checked: `tools/haze_check.py` (original timing, 60 fps, 16:9): state 60 reached, both thugs at health 100, the truck
+  at (296.2, -673.6, 10.7) from their creation on; the same at independent 60 and 144 fps and at original 30 (no
+  truck fix there); with `VCS_SCRIPT_FIXES=0` it sticks as before. The whole mission then passes (state 330, +$1000) at
+  60 and 144 fps.
+- How it was found: the mission's state and the scripts' IPs polled from the rig (stuck at 0xAA0B: the audio wait),
+  the slots read (all free), the thugs' peds from their handles (one dead), a poll of both vehicles and both thugs
+  through the cutscene at 30 and 60 fps, then the per-frame trace; MAIN.SCM's listings for the mission and AUDIMON.
+
 ## 12. Player, areas and the world
 
 - **Player ped**: `*(0x4E4910)` = `CWorld::Players[0].m_pPed` (`FUN_00237fb0(ped)` returns `&Players[0]` for the
@@ -2584,7 +3007,8 @@ mission's runtime IP is 0x3CAE3 + (IP - its start)) and reproduced with the rig.
   bRemoveFromWorld go to FUN_00198408, which removes and deletes them); FUN_00210780 =
   CPed::FlagToDestroyWhenNextProcessed (sets bRemoveFromWorld, gets the ped out of a vehicle); FUN_001f4bf0 =
   CPed::ProcessControl (at 0x1f4cfc: if bFadeOut, alpha -= 8 and FlagToDestroy below 0); FUN_00430148 =
-  CPopulation::Update (FUN_00430290 adds peds); FUN_00433008 / FUN_00433378 = CCarCtrl::RemoveDistantCars /
+  the random-car step (CCarCtrl::GenerateRandomCars; FUN_00430290 adds one car - not peds, as this line said until
+  2026-11-07; peds: FUN_002B17A8, 12d); FUN_00433008 / FUN_00433378 = CCarCtrl::RemoveDistantCars /
   PossiblyRemoveVehicle (a removed car deletes its occupants); FUN_0014ca80 = CAutomobile::ProcessControlInputs (with
   the player's controls disabled it brakes and calls FUN_00237c30, which destroys the player's off-screen random near
   peds and makes the others flee). The script command at 0x2b0b9c (FUN_002b0200) sets bFadeOut on many peds at once
@@ -2633,6 +3057,19 @@ mission's runtime IP is 0x3CAE3 + (IP - its start)) and reproduced with the rig.
 - **Driving buttons**, measured with a car on a straight street (575, 175): Cross accelerates (forward speed 0.28 after
   2 s), R1 is the handbrake (0.12 to 0 in 0.7 s; coasting 0.28 to 0.20), Square brakes, then reverses. Vehicle +0x140
   is its velocity (units per 1/50 s), +0x10 its forward vector.
+- **The radio** (2026-11-10, GitHub issue 90; the injected gamepad, `VCS_MUSIC_LOG=1` for the streams the game opens,
+  and a diff of the vehicle's bytes around a station change): **L1 is the only station button** - the game's own help
+  says so ("You can change the radio station you're tuned in to with L1") - and it only steps forwards; the D-pad does
+  nothing in a car. The station is the vehicle's **+0x2BA** (u8): 0..8 the nine stations (music streams 0..8), 9 off
+  (stream 9, the one that plays on foot), then 0 again. Each L1 clicks and is counted; **30 frames after the last
+  press** the count is added to the vehicle's station and the radio retunes (the name, then the stream within 2 s; the
+  byte still read the old station right after the press and the new one 0.7 s later). Writing the byte alone changes
+  nothing that is heard (8 kept playing with 7 written) until the next retune, which starts from the written value:
+  7 -> 5 written, then L1, gave 6. While stream 0x21 plays (an announcement about 15 s after getting into a car in the
+  test save, 20 - 25 s long) L1 is ignored and the presses are dropped; afterwards the vehicle's station resumes.
+  `vcs_input.cpp` puts the mouse wheel on this while driving: a notch down is L1, a notch up writes the station two
+  back and presses L1 (one forward from there); when the station is still where it was put 40 frames after the last
+  press the presses were not taken and the old station is written back.
 
 ### 12b. The camera and the mouse (2026-10-29)
 
@@ -2664,7 +3101,8 @@ mission's runtime IP is 0x3CAE3 + (IP - its start)) and reproduced with the rig.
   pad read adds the mouse's turn to beta and turns +0x220 / +0x230 about the player by the same angle (exact: 300
   counts in 30 moves -> -0.750 rad, 400 counts a radian), and does the same for the pitch: alpha += the tilt, and
   +0x220 / +0x230 turned up / down by it about the target point +0x1A0 (90 counts -> +0.225 rad; 120 counts -> +0.3
-  two frames later, and it stays). Other cameras (vehicles, aiming, lock-on) get the mouse's speed as the right stick,
+  two frames later, and it stays). The camera behind a vehicle is turned directly too (below); other cameras (the
+  other vehicle cameras, lock-on) get the mouse's speed as the right stick,
   past the dead third. Checked by `tools/controls_check.py` (the `mouse dx dy` control command moves the mouse in
   hidden runs).
 - **Why up / down was slower than left / right** (2026-10-31, FUN_0029dab0 decompiled again; until then the mouse's
@@ -2679,6 +3117,117 @@ mission's runtime IP is 0x3CAE3 + (IP - its start)) and reproduced with the rig.
   neither 0 nor 4), read from the ELF: +0 0.6 (target height), +4 2, +8 0.15 (pitch offset), +0xC 2, +0x10 4, +0x14 0.8
   (alpha ease), +0x18 0.1 (its cap a step), +0x1C 0.5, +0x20 0.8 (the speeds' smoothing), +0x24 0.1 (the speeds' cap),
   +0x28 0.1, +0x2C 0.02, +0x30 1, **+0x34 0.7854 up / +0x38 1.4835 down** (indoors 0.7854 both).
+- **The camera behind a vehicle** (2026-11-03, FUN_0029FAF0 decompiled with `tools/eedecomp.py` for the mouse; modes 18
+  and 22, a0 the CCam, a1 the point it looks at; CCam +0x70 the vehicle). It is a camera on a string: at the start it
+  measures its heading and pitch from Front = the point looked at - **+0x220** (where it stood, placed from beta and the
+  pitch at the end of the last update), so a vehicle moving across the view drags it after itself. Then it turns that
+  heading toward the direction the vehicle moves (its move speed +0x140 past 0.02 units a step; its nose for a boat,
+  type +0x354 == 4) by a share `min(|the move speed across the view| x row +0x28 x step, 1)` of the gap, capped at
+  **row +0x2C x step** (`0x487C14` + class x 0x3C), makes that a speed with `/ max(step, 1)` (0x2A0790, patched in
+  section 4), adds the stick's term (|x| x x x 4.9e-5 x 0.000893 x FOV x row +0x30, only while **CCam +0x74 == 3**), caps
+  it at row +0x24 and smooths it into +0x140 (pow(row +0x20, step)); beta += +0x140 x step. A change of beta or alpha
+  below a small step is snapped back to the last update's (`0x487E8C` / `0x487E88`). The pitch is measured the same
+  way from +0x220 and kept between row +0x38 below and a limit from the vehicle's size (else row +0x34) above; alpha eases toward it.
+  At the end the source points are rebuilt from beta and that pitch, then the line of sight pushes Source (+0x20) in.
+  The rows: `0x487BE8` + class x 0x3C, 9 classes picked from the model and the vehicle
+  type (bikes, boats, ...); FUN_0029FAF0 is the only reader (a search of the generated code for the base's low half).
+  So the stick turns it at the stick's top speed while the vehicle's motion pulls it back: the mouse through the stick
+  was slow and fought the car (the user's report). **The mouse there** (src/game/vcs_carcam.cpp): a hook before
+  FUN_0029FAF0 moves the source points by the vehicle's displacement since the last update (no drag), sets row +0x2C
+  to 0 for every class (no pull), zeroes the speeds and turns beta, alpha, their last values and the source points
+  about the point looked at by the mouse's angle: measured, the heading is exactly where the mouse put it (400 counts
+  -1.000 rad) and stays there, at 30 / 60 / 144 fps, standing or driving. After Car camera return (1.5 s) without the
+  mouse the hook eases beta toward behind the vehicle (the same rule the game uses: opposite its motion, else its nose)
+  and the pitch back to before (1 - e^(-t / 0.6 s) of what is left, at most 2 rad/s), still with no drag or pull so it
+  is as slow driving as standing, then gives the rows back; the game's camera carries on from there. The look-behind
+  button (`0x6F4D4C`), CCam +0x74 != 3, a frame without this camera and the right stick (gamepad or camera keys) end it
+  at once. The stick could not turn it while held or returning: its term goes through +0x140, zeroed there every
+  update and smoothed from 0 (about a fifth of its speed), and steps below `0x487E94` are snapped back (the user's
+  report: the gamepad did nothing until the camera was back behind the car).
+- **On foot: the stick, the camera on its string, walls** (2026-11-11; found for a mouse camera of its own on
+  foot, which was built and taken out again the same day - the last point, and DECISIONS.md. By reading the decompile
+  of FUN_0029dab0 again - `build/analysis/decomp/followped.c` - and the disassembly listing for the callers of the
+  pad's stick getters and the readers of `0x6F4CB8`, then measured in hidden runs with the rig's `trace`).
+  - **How the stick becomes his heading.** The player's control **FUN_00232DE8** (called from CPlayerPed::
+    ProcessControl **FUN_00230640**, a0 the ped, at 0x231494 / 0x231550 / 0x2315A8 / 0x2315C0) reads the left stick
+    through FUN_00285690 (x) and FUN_002857E8 (y) and sets **ped +0x8E4 (the heading he turns to; +0x8E0 the current
+    one) = LimitRadianAngle(atan2(-x, -y) - `*(float *)0x6F4CB8`)** (the load at 0x232E34, atan2 at 0x232F3C).
+    **`0x6F4CB8` = TheCamera +0x7E8 is the camera's heading** (VC's `Orientation`): written by FUN_0037B2C8 (called
+    by CCamera::Process at 0x37ADC0, after the CCam's update) as atan2 of the frame camera's forward, then + pi by
+    CCamera::Process for a look behind (0x37B1B4 / 0x37B284). Its other readers: the fight control FUN_00233728
+    (0x2337CC), CPed::ProcessControl FUN_001F4BF0 (0x1F7760 / 0x1F7944), FUN_002339D0 (0x233A00; reached only with
+    `0x488EB4` set), and three that place things around the camera: FUN_0018CD88 (0x18CD98), FUN_003E4270 /
+    FUN_003E4528 (0x3E4430 / 0x3E46D8), FUN_0036AFD0 (0x36B118). The order in CGame::Process (FUN_003BA8D8): the pad
+    0x3BA93C, FUN_003E3720 0x3BAAB8, FUN_0018CD88 0x3BAB98, **CWorld::Process 0x3BABD0** (the player's control, with
+    the heading the last frame's camera left), **FUN_0036AFD0 0x3BABF4**, **CCamera::Process 0x3BAC38**. So the mouse
+    steers him: whatever turns the camera turns the stick's meaning. The stick's size: `sqrt(x^2 + y^2) / 60`, a walk
+    below 1, a run from 2 (120 units) - read in the listing (FUN_00231C20), not measured: a diagonal is no faster.
+  - **The game's own turn behind a walking player** (followped.c 396-435): a share `min(his speed x table +0x28 x
+    step, 1)` of the gap between the camera's heading and behind his nose, capped at **table +0x2C x step**
+    (`0x487B5C` outdoors, `0x487B98` indoors; 0.02: 1 rad/s), none when the gap is over 2.967 (170 degrees: running at
+    the camera leaves it in front of him). `0x487E10` set makes it a fixed turn instead (x `0x487E64` / `0x487E68`):
+    **L1** (FUN_00286630 = CPad +0xA: "camera behind him", which also levels the pitch) and a shot from the hip with
+    some guns (x 2.5; seen with the AK, type 28: the camera 1 rad off came behind him while he fired; not with the
+    Micro SMG, 24, or the pistol, 19) latch it until he moves or the camera is there. All of it goes through the one cap, so
+    0 there switches every automatic turn off (the table has no other reader). Not through the table: while he runs
+    at a camera more than 90 degrees off, the pitch is eased toward a limit that shrinks to 0.349 rad with the camera
+    right in front (453-469).
+  - **Walls, and why the mouse's camera stopped at a building** (the user's report; fixed, the end of this point).
+    The update first asks whether
+    the camera stick is in use: CPad +6 / +8 (the right stick) or +0xA (L1) non-zero. **Stick at rest** and
+    `0x487E58` 0: five lines (FUN_001908C0, buildings only) from beside the player - 0.3 behind the point looked at,
+    0.17 apart across the view - to the camera's Source; while he moves, each blocked one adds `(i - 2) x 0.03` to
+    **`0x487E54`**, which is added to beta every frame and falls by 5% a frame (the camera turns away from a wall he
+    walks along; per frame, not per time step). **The line of sight that pulls Source in toward him (followped.c
+    635) runs only when the stick is in use, when all five lines are blocked, or while `0x487E58` > 0** - the game
+    sets it to 2 after a pull-in and counts it down, so a pulled-in camera stays pulled in. A mouse turn is none of
+    these: Source is put at the full distance inside the wall, and FUN_002A4EC8 - the near plane's fit, as read in
+    the listing: a sphere at Source + Front x near against the world, pushed out up to four times, the near clip
+    shrunk to 0.15, else **the last good position kept** (CCam +0x90, `0x487E14` set) - leaves the camera where it
+    last fitted. Measured at the Fort Baxter barracks door (-1648.87, -261.0; a wall behind him: the stick's camera
+    is pulled in from 4.5 m to 2.3-3.4 m between 240 and 300 degrees): standing, 400 counts of mouse toward the wall
+    turned beta the whole radian
+    (3.690 -> 4.690) while the camera stood still from 3.945 on, 0.744 rad behind its heading, at 4.41 m; `0x487E54`
+    stayed 0 (a standing ped's move speed is exactly 0) and `0x487E58` 0. The other calls of the update change
+    neither beta nor the source points: FUN_002A4D38 (the pull-in's offset from the wall: tan(FOV / 2) x near x
+    1.15), FUN_002A5590 (Source kept 0.5 above water), FUN_0029F960 (a ped the camera is inside), read in the
+    listing. Nothing outside FUN_0029DAB0 reads `0x487E54` / `0x487E58` / `0x487E10`. **The fix** (2026-11-11,
+    src/game/vcs_input.cpp, where the mouse turns the camera at the pad read): while the mouse turns the on-foot
+    camera, and for 300 ms of game time after its last turn, `0x487E58` is set to 1 when it is 0 - before the
+    camera's update of the same frame, which then takes the stick's path: no five lines, the pull-in. The 300 ms
+    are for a slow hand: frames without a mouse count between frames with one would otherwise be the game's own turn
+    away from a wall he walks along. Measured at the same wall at 30 / 60 / 144 fps, 400 counts toward it at 10 a
+    frame, 2 a frame and 1 every third frame: the camera 0.001 rad from its heading, pulled in to 3.19 m, and still
+    there 2 s later (the game keeps a pulled-in camera pulled in). `VCS_FOOT_WALL=0`: 0.744 rad behind its heading
+    at 4.41 m, as before. Check: `tools/controls_check.py` ("at a wall the camera follows the mouse and is pulled
+    in"; the stick's camera at the same wall is its reference).
+  - **The update starts afresh** (beta from his heading, the source points rebuilt) while CCam +0xAC (its first
+    update), `0x6F4528` (TheCamera +0x58: "behind him") or `0x6F4D28` (+0x858: "in front of him") is set; all three
+    are 32-bit. After a teleport from far away it also starts at its lowest pitch (-1.483, above him looking down:
+    0.39 m from him across the ground); L1 puts it level behind him (-0.056).
+  - **A camera on a string, and why a sideways runner circles.** The update measures its heading and pitch from
+    where the camera stood (the source points, placed around him at the end of the last update) to where he is now,
+    and eases beta toward that. So when he moves across the view the camera pivots after him at his speed over its
+    distance - a run's 4.5-5 m/s at 4.5 m - and since the stick follows the camera he runs a circle about it:
+    measured with the gamepad's stick held to the right, 2.7-2.8 rad in 2 s (1.4 rad/s) at 30 / 60 / 144 fps. The
+    capped turn above adds little to that. Source points moved along with him each frame (and the cap at 0, the speed
+    +0x140 cleared) take the string away: the heading then stays where it is, to 0.000.
+  - **Tried and taken out the same day** (the user's decision; three commits, 6948b7a / 993d670 / ea5628e, and their
+    revert): a module that was the camera's heading on foot for the keyboard and mouse, by a pre-hook on FUN_0029DAB0.
+    What it showed about the game: (1) **`0x487E58` set to 1 before the update gives the mouse's turn the stick's
+    path** - no five lines, the pull-in: at the barracks door the camera then stood 0.001 rad from its heading,
+    pulled in to 3.2 of 4.5 m, where it had stood 0.744 rad behind it (this part came back on its own: the fix
+    above). (2) The cap at 0 in both table rows, the
+    source points moved with him and the speeds +0x140 / +0x130 cleared before every update hold the heading exactly
+    where it is put (as behind a vehicle); `0x487E60` / `0x487E5C` are the last update's beta / alpha, and a change
+    under 0.0001 from them is undone. (3) **Replacing `0x6F4CB8` before FUN_00230640 and putting the camera's own
+    back before FUN_0036AFD0 gives his control any heading for the stick** without touching the pad report: his
+    heading held to +0.000 through a radian of camera turn. It falls as beta rises (4.713 - beta with the camera
+    behind him). (4) `0x487E10` set means the game is turning the camera behind him itself (L1; the AK fired from the
+    hip); with the cap at 0 that turn does nothing. (5) Three ways to use these were played and none kept: the keys
+    keeping one direction through every turn of the camera (the mouse then did not steer: "disconnected"), the keys
+    following a camera that held still and then turned slowly, and the camera coming round behind where he travels
+    with the keys keeping their heading through that turn only.
 - **The camera update** (2026-10-30, for the trainer's free camera; FUN_00378dd8 decompiled with `tools/eedecomp.py`):
   FUN_00378dd8 = CCamera::Process. At `0x378FC0` it calls **FUN_00294540 = CCam::Process** on the active CCam
   (`TheCamera + 0x70 + ActiveCam x 0x270`, ActiveCam = byte `TheCamera + 0x50`; the only caller), then
@@ -2817,6 +3366,149 @@ hidden run (rig `peek` / `poke`, snapshots diffed).
   scored by HAS_OBJECT_BEEN_DAMAGED (+100; -200 when `$G1590[i]` is set - presumably the board not to shoot, not
   checked), the score `$G15A6`, the round's target `$G15A7`; their
   origin is at the board's foot (aim ~0.6 m above it).
+- **A gun on a vehicle: Farewell To Arms** (2026-11-03; mission 95 `GON_C4`). The mission puts Vic in its helicopter's
+  door (`$G1632`, a heli: SET_HELI_ORIENTATION) with `ATTACH_CHAR_TO_CAR(02B6) $G2A5 $G1632 1.6 1 0 3 70 34` (offset,
+  direction 3 = facing the vehicle's right, 70 deg either side, weapon 34 the M249; 0x1A09C2, called from 0x1A66E2 about
+  45 s after the launch) and `SET_ATTACHED_PLAYER_VERTICAL_CAMERA_ANGLE_MAX / MIN_LIMIT(04D0 / 04CF)` 55 / 10 (seen:
+  10 deg up, the rest down); DETACH_CHAR_FROM_CAR(02B7) at its ends. It is not the free aim: no bit 51 / 53, no dummy
+  (+0x820 0), ped state 0x16, **+0x858 the vehicle**, **+0x760 the limit either side** (1.222 = 70 deg), **+0x780 the
+  direction** (u16), and the camera **mode 45** (VC's HELICANNON_1STPERSON) with the free-aim circle in the middle. Its
+  update is the scopes' FUN_00297CB8: attached (FUN_0020C310(ped) and +0x858 set) alpha / beta start at 0 (+0xAC, the
+  camera's first frame), the left stick turns them (0.0005 x FOV a step at full tilt, eased through +0x140 / +0x130),
+  and **beta is the turn from the direction Vic faces, signed** - clamped to +-(+0x760) when that is below pi (wrapped
+  by FUN_00369178 otherwise), alpha to FUN_00297BC8's limits; the view is the vehicle's matrix turned by the direction
+  (1 +pi/2, 2 pi, 3 -pi/2) and beta, tilted by alpha. Not attached, the scopes' beta is the world heading in 0..2 pi.
+  Found by logging the player and the active CCam every second through the mission (window shown), then the decompile.
+  The scopes' mouse (vcs_input.cpp) wrapped beta into 0..2 pi, so the first turn right of the middle (beta just below
+  0) became ~6.27 and the clamp made it +1.222, the left limit: the user's snap to the left. vcs_input.cpp keeps it
+  signed when attached, and vcs_aim.cpp takes the mounted gun over when free aim is on (the mouse / right stick turn
+  beta / alpha before the update, the left stick centred, the gamepad's R1 as Circle). The shots go down the camera's
+  line as they are (a man under the circle hit, one 2 m beside him not: controls_check `mounted_gun`). The same
+  attachment to a car (model 211) gives the same state and camera - how the check sets it up. JER_A1 attaches Vic to a
+  car too (`0 0 0 0 360 0`: no weapon, not seen in its camera).
+- **NPC drive-bys fire one shot every frame** (2026-11-08; the user saw NPCs in cars fire SMGs far too fast, faster
+  at high frame rates). Found by following the drive-by shot (FUN_002CB7C0) and CWeapon::Fire's callers in the
+  generated code, the decompiles (`build/analysis/decomp/weapon_fire_core.c`, `ped_carfire.c`, `ped_driveby.c`,
+  `ped_burst_helpers.c`, `ped_cartarget.c`), then a per-frame trace of the shooter's weapon (rig `trace`).
+  - The weapon in a ped's slot (ped + 0x574 + slot x 0x1C): +4 type, +8 state (0 ready, 1 firing, 2 reloading), +0xC
+    clip, +0x10 ammo (not counted down at 25000 or more), +0x14 timer (CTimer ms). Weapon info
+    (`*(*(0x712770) + 4) + type * 0x70`): **+0xC the firing rate in ms**, +0x10 the reload time, +0x14 the clip size.
+    Read in the game: pistol (19) 209 / 450 / 17; Micro SMG (24) 120 / 500 / 50; Scorpion (25), Mac 10 (26), SMG (27)
+    90 / 500 / 30; rifle (28) 89 / 1000 / 30.
+  - **FUN_002C0F98 = CWeapon::Fire(weapon, shooter, source)** fires whenever the state is 0 or 1 - it never checks
+    the timer. Afterwards it sets the timer to now + firing rate for the other types (shotguns, thrown, ...); for the instant-hit
+    guns (types 19, 20, 24-29, 34, 35, 37: FireInstantHit) it sets **timer = now**, no delay: on foot the firing
+    animation paces those guns.
+  - **The NPC drive-by**: FUN_002163B8 (a ped in a vehicle, every frame) runs it when ped + 0x1D8 bit 3 is set
+    (`SET_CHAR_DRIVEBY_MODE` 0442 sets it), the gun is one of types 24-27 (the SMGs: the only guns NPCs drive-by
+    with) and **ped + 0x468, the threat** (set by the threat scan FUN_001EFFB0 through FUN_002186E8 for the ped types in
+    the shooter's threat mask + 0x2AC - `SET_CHAR_THREAT_SEARCH`) is set. It plays the drive-by animation and
+    **FUN_00216768** fires: when **FUN_00216690**, a burst gate, says so, it calls CWeapon::Fire - with no timer check
+    of its own. The gate: ped + 0x6D4 the burst's end, + 0x6D0 the pause's end; a burst lasts 500-999 ms
+    (FUN_00203BA0; + 0x4F0 / ×1.5 per ped when set), a pause 500 ms (FUN_00203A98; + 0x4F4). During a burst it
+    answers "fire" **every frame**. So the passenger fires once a frame until the clip is empty, then reloads.
+  - Measured (a parked car, a passenger with an SMG, `SET_CHAR_DRIVEBY_MODE` and `SET_CHAR_THREAT_SEARCH` player 1,
+    `VCS_TIMESTEP`, 20 game seconds each; scratch script, not a tool): exactly one shot a frame while firing - **30
+    shots/s at 30 fps** (the PS2), 60 at 60, 144 at 144 (a 30-round clip gone in 0.2 s). Averaged with pauses and
+    reloads: 12.9 / 22.0 / 31.7 shots a game second at 30 / 60 / 144 fps. The gun's own rate is 90 ms: 11.1 shots/s.
+  - **On the PS2 this is already the game's bug, not a choice**: 2.7x the SMG's rate at 30 fps. The player's own
+    drive-bys check the timer and set a delay - FUN_002CEBE0 (driver, looking left / right) `now + rate`, FUN_002CF078
+    / FUN_002CF4A8 (passenger / bike) a fixed `now + 70` ms - before FUN_002C1BB0 (CWeapon::FireFromCar, which, like
+    Fire, does not check it). The NPC path was left with Fire's on-foot "no delay" and no animation to pace it, and
+    its burst lengths are in milliseconds, so at the PS2's fixed 30 fps the number of shots in a burst came out as
+    "a frame each". Above 30 fps it gets worse with the frame rate.
+  - **On foot the attack animation is the pace** (found 2026-11-09: CWeapon::Fire's callers by `jal` scan, then
+    `tools/eedecomp.py`). **FUN_001D26C8** (the ped attack, CPed::Attack; called from FUN_001F4BF0) reads the gun's
+    animation times from weapon info **+0x44 loop start, +0x48 loop end, +0x4C fire point** (+0x50..+0x58 the crouched
+    set; seconds), calls Fire on the frame the attack animation's time (assoc + 0x28; + 0xC the frame's step) passes
+    the fire point, and once it passes the loop end, with the trigger held and ammo left, sets it back to the loop start
+    (FUN_0018EB70, SetCurrentTime). One shot per loop. Read in the game: SMG / Scorpion / Mac 10 (25-27) loop
+    0.3667-0.4667 s, fire 0.4333 - 0.1 s a loop, ~10 shots/s (rate +0xC says 90 ms); Micro SMG (24) 0.3667-0.5000 s,
+    ~7.5/s (+0xC 120 ms). NPCs on foot go through the same function.
+  - **The player's drive-by skips the reload** (an original-game bug, found 2026-11-10 from a player's report that
+    drive-bys fire faster than on foot). FireFromCar (FUN_002C1BB0), on the last round of the clip, sets state 2 and
+    the timer to `now + reload time` (weapon info + 0x10), but its caller then sets the timer again - FUN_002CEBE0 to
+    `now + rate`, FUN_002CF078 / FUN_002CF4A8 to `now + 70` - so the reload ends one shot gap later and the clip is
+    full again. Measured (Vic with an SMG, Circle held through the injected gamepad, driver looking left with L2;
+    scratch script, `gamepad` control command): the gap between shots is the same as on foot at 30 fps (99 ms:
+    the 90 ms rate, rounded up to the frame - 10.1 shots/s; on foot the animation loop gives 99 ms too), but on foot
+    the reload is 2.3 s and in the car 0.1 s - 6.9 against 10.1 shots a second overall. At 144 fps: on foot 104 ms
+    (9.6/s), driver 91-97 ms (10.5/s; the 90 ms is rounded up to a shorter frame). The NPC drive-by hook
+    (vcs_driveby.cpp) does not touch the player's paths. The passenger path was not measured (L2 + Circle in an
+    autodriven car fired nothing).
+  - **Fixed as an option** (Enhancements > Combat: **Drive-by fire rate**; `src/game/vcs_driveby.cpp`): a hook on
+    CWeapon::Fire for the two NPC calls (return addresses **0x2168B4** in FUN_00216768, **0x2169D4** in FUN_002168E8)
+    lets a call through only when the shooter's next shot is due and otherwise returns 0, so the burst gate and the
+    animation run every frame as before. "As on the PS2" (default): one shot per 1/30 s at any frame rate (every frame
+    at 30 fps: the original). "The gun's own rate": weapon info +0xC. `VCS_DRIVEBY_HOOKS=0`: the original. A shot is
+    told by the weapon's timer equalling the time of the call let through - not by the state: the weapon's own update
+    puts state 1 back to 0 once the timer has passed, so after Fire's "timer = now" the gun reads ready again the very
+    next frame (the first version waited for state 1 and never held a shot back). Measured within bursts: PS2 30.0 /
+    30.0 / 29.9 shots/s at 30 / 60 / 144 fps, the gun's rate 10.8 / 11.0 / 11.1 (PROGRESS.md).
+  - Setting up a drive-by in a test: `SET_CHAR_OBJ_KILL_CHAR_ANY_MEANS` makes the passenger of a standing car get
+    out and fire on foot (animation-paced: a few shots a second); the threat search keeps him seated.
+
+### 12d. Population: density, caps, spawn chance (2026-11-07, Enhancements > World)
+
+Found from the density opcodes' handlers (0125 SET_CAR_DENSITY_MULTIPLIER -> `0x3D20F8`, 0264
+SET_PED_DENSITY_MULTIPLIER -> `0x417848`; the VCS numbers, not GTA III's), the spawners' decompile
+(`tools/eedecomp.py 0x430290 0x2b17a8 0x430148`), a grep of the generated code for every access to each global, and
+probes in the game (rig, `worlddetail`).
+
+- **Script multipliers**: CarDensityMultiplier `0x48A968`, PedDensityMultiplier `0x487FF8` (floats, 1.0). Scripts set
+  them about 280 times (MAIN.SCM and 49 missions: 0 to clear the streets, 10 in the credits, 0.1..100 elsewhere);
+  `FUN_00253F98` / `FUN_002AFCE8` / `FUN_004379E0` / `FUN_00437AE8` / `FUN_0024C428` put them back to 1.0, and
+  `FUN_00426220` / `FUN_00427820` copy both into and out of a block (+0x90 / +0x94; a save or replay).
+- **Cars**: `FUN_00430148` (CGame::Process, 0x3BAC88) calls the spawner `FUN_00430290` six times a frame while
+  NumRandomCars (`0x48A96C`) < 30. The spawner returns when:
+  - zone cars (`0x4E4A54`, u16 = zone value x the zone factor at `0x4E4A58`) x CarDensityMultiplier x **`0x48A680`
+    (0.7)** <= NumRandomCars;
+  - the counters `0x48A96C + 970 + 974 + 978 + 980 + 984` reach **`0x48A9A8` (16)** (`0x48A97C` is not in the sum;
+    6 in the city - parked cars?);
+  - the heap at `0x51D6A0` (free = +0x10 - +0xC - +0x14, `FUN_002BC1A8`) has less than 0x19000 bytes (it had
+    650-900 KB in every probe; a ped takes about 6 KB of it);
+  - no road spot is found at 110 m x GenerationDistMultiplier ahead (`FUN_00268880`, `FUN_00267928`) or the spot is
+    taken (`FUN_0043C938`);
+  - **a random 0..15 is above the road's class in `0x487498` = {0, 4, 7, 15}** (the smaller of the segment's two
+    nodes, node flags >> 12 & 3): most tries end here.
+  Standing in Little Haiti at noon, 6 random cars live at once while the zone allows 12.6: the spawn spots, not the
+  density, set the number.
+- **Peds**: `FUN_002B17A8` (from `FUN_002AFE80`, 0x3BAB44): allowed = min(zone peds x zone factor x
+  PedDensityMultiplier x **`0x48A67C` (0.4)** (min(2 x it, 1) in a zone type `FUN_002AFC20(pos, 1)` marks) x (1 -
+  0.8 sqrt(`0x4CD144`, the rain)), cap **`0x488004` (25)** outdoors / **`0x488008` (30)** elsewhere); it spawns while
+  the ped count `0x4CD550` is below. Its spot search `FUN_00268048` uses the same class table (path nodes).
+- **Who reads what** (grep of the generated code for each address's `lui` / offset pair): `0x48A680` only
+  `FUN_00430290`; `0x48A67C` and `0x488004` / `0x488008` only `FUN_002B17A8`; `0x48A9A8` the two spawners and
+  `FUN_0043BE00`; `0x487498` `FUN_00430290` and `FUN_00268048`. None is written by the game (`FUN_003B4588` writes
+  `0x72A67C`, another `lui`).
+- Pools: peds 70, vehicles 40 (the vehicle pool's size, not in 12 before). A random car's driver is a ped.
+- **Removal** (2026-11-07, after the user saw cars vanish in front of them with more traffic; decompiled):
+  - `FUN_00433008` = RemoveDistantCars: every vehicle every frame through `FUN_00433378` = PossiblyRemoveVehicle.
+    Not for mission / kept cars (`FUN_0043B4A0`, flag +0x260 bit 43, `FUN_003E69F0` / `FUN_002612E8`); the limit is
+    60 m (2D, from the player) when `FUN_003C4318(car)` is 0 - not on screen - and a set of camera / state conditions
+    hold, else 160 m x GenerationDistMultiplier (`0x6F4CA0`); 70 m when the camera looks straight down
+    (`0x6F44E8` < -0.9); x 1.5 with +0x260 bit 55. Beyond it the car goes unless `FUN_0025D998(pos)` - not a
+    visibility test: inside one of the areas in the 0xD0-byte records from `0x50DF80` (types 0xE..0x10, 0x16..0x1E).
+    Wrecks / abandoned cars (status 2 / 3) go after 5 s beyond 22 m off screen; status 5 after 60 s beyond 6.5 m.
+  - **`FUN_00433188` = RemoveCarsIfThePoolGetsFull**: every 8th frame (`0x4CD124 & 7 == 2`), with fewer than 8 vehicle
+    slots free (`FUN_0047FC30` counts them), the deletable car **closest to the camera** (`0x6F4500`) is deleted -
+    on screen or not. **`FUN_002B0C00` = RemovePedsIfThePoolGetsFull** does the same for peds (`& 7 == 4`,
+    `FUN_004793E8`, deletable = `FUN_001FFA80`); it runs first in `FUN_002AFE80`, the ped step.
+  - Both delete through `FUN_0018FA50(entity, 1)` (CWorld::Remove) and the entity's vtable +0x10 (delete).
+  - **`FUN_0025A428` = CTheScripts::ClearSpaceForMissionEntity**, called by CREATE_CAR (`0x3D03B0`): the entities
+    overlapping the new car's collision (`FUN_00195380`) are removed (CWorld::Remove from 0x25A780) - a random car
+    right in front of the camera vanishes when a script makes a car on its spot. The game's own behaviour, at every
+    setting; the rig's `autodrive` does it too (found 2026-11-07: the two cars that vanished 4-6 m from the camera in
+    the first seconds of test drives; reproduced by making a car on a released one's spot, the log naming 0x25A788).
+- **Enhancements > World** (`vcs_world_detail.cpp`): Traffic / Pedestrian density scale 0.7 / 0.4 (so a script's 0
+  stays 0 and its 10 becomes 10 x the setting), raise the caps (cars at most 28, peds 45), and give each spawner the
+  class table with every chance ((v + 1) / 16) times the setting, class 0 unchanged - written before each spawner
+  runs, since both read the one table. Each spawner's cap is set right before it runs from the pools as they are:
+  above the original only while 16 slots stay free in each (2 more peds for a car's driver), so the extra traffic
+  never brings the game to its pool-full deletion. And PossiblyRemoveVehicle is skipped for a car in view within the
+  distance cars are drawn at (6o). Measured (world_check): peds at the Little Haiti spot about 25 -> 40 at 300%; random cars while driving
+  about 9-10 -> 10-13 - the spawn spots stay the limit. With peds at 300% the random cars standing there fell to 0-5
+  in one probe (cause not found; the heap was not it).
 
 ## 13. Open questions / next research targets
 
@@ -2827,6 +3519,10 @@ hidden run (rig `peek` / `poke`, snapshots diffed).
 - Mission-passed flags (storyline globals) - for reaching late-game states.
 - Cheat handlers (weapons, health, vehicles, weather) - the script commands cover these for now.
 - Collision: VU0 program 0 (section 6c), collision streaming - the fall-through bug.
+- Vehicle against vehicle at shorter frames (11h): the same hit pushes a parked van at 30 fps and turns it at 60 (the
+  impulse spread over two frames, the torque's sign reversed), and the ramming truck's AI brakes to a stop at 30 but
+  rolls on at 60. Not found where: the contact point's depth per step, or the car AI's "have I hit my target" test.
+  Players also report cars taking damage faster above 30 fps (GitHub issue 17's comments).
 - HUD / font / sprite call sites (CHud, CFont, CSprite2d, CSprite) - milestone 3 (2D at the RW level).
 - Sound driver command protocol in full (section 9) - milestone 6.
 - Threads and their priorities.

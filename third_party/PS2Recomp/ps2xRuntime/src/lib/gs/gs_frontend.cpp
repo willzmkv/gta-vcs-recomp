@@ -244,7 +244,7 @@ namespace
 
 void GS::setGpuRenderer(GSGpuRenderer *gpu, bool gpuOnly)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     m_gpu = gpu;
     m_gpuOnly = gpu && gpuOnly;
 }
@@ -264,7 +264,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 
 void GS::reset()
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     if (m_gpu)
         m_gpu->reset();
     std::memset(m_ctx, 0, sizeof(m_ctx));
@@ -367,7 +367,7 @@ const uint8_t *GS::lockDisplaySnapshot(uint32_t &outSize)
 
 GSDebugSnapshot GS::getDebugSnapshot() const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
 
     GSDebugSnapshot snapshot{};
     snapshot.ctx[0] = m_ctx[0];
@@ -407,7 +407,7 @@ GSDebugSnapshot GS::getDebugSnapshot() const
 
 std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
 
     std::vector<GSDebugHistoryEntry> out;
     out.reserve(m_debugHistoryCount);
@@ -421,7 +421,7 @@ std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 
 void GS::clearDebugHistory()
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     m_debugHistoryWrite = 0;
     m_debugHistoryCount = 0;
     m_debugNextSeq = 1;
@@ -431,13 +431,13 @@ void GS::clearDebugHistory()
 
 bool GS::isDebugHistoryPaused() const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     return m_debugHistoryPaused;
 }
 
 void GS::setDebugHistoryPaused(bool paused)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     m_debugHistoryPaused = paused;
 }
 
@@ -617,7 +617,7 @@ void GS::recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp
 
 bool GS::getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     if (!m_hasPreferredDisplaySource)
     {
         outSource = {};
@@ -670,7 +670,7 @@ void GS::latchHostPresentationFrame()
 {
     GSPresentationRequest request{};
     {
-        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
         if (!m_backend || !m_privRegs)
         {
             std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
@@ -712,7 +712,7 @@ void GS::latchHostPresentationFrame()
 
     if (hasFrame)
     {
-        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
     }
 }
@@ -792,7 +792,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     if (ps2_render_worker::gsStage() && data && sizeBytes >= 16u && toGsStage(kGsGif, data, sizeBytes, 0u, 0u)) // [gta-recomp]
         return;
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16 || !m_backend)
         return;
     if (m_gpu)
@@ -914,7 +914,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     if (ps2_render_worker::gsStage()) // [gta-recomp] in order with the GS stage
         ps2_render_worker::gsDrain();
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16u || !m_backend)
         return false;
     if (m_gpuOnly)
@@ -961,7 +961,7 @@ bool GS::submitPackedKick(const uint8_t *data, uint32_t sizeBytes) // [gta-recom
 {
     if (ps2_render_worker::gsStage() && data && toGsStage(kGsPackedKick, data, sizeBytes, 0u, 0u)) // the fallback runs on
         return true;                                                                            // the GS stage
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16u || !m_backend || m_gpu)
         return false;
     const uint64_t tagLo = loadLE64(data), tagHi = loadLE64(data + 8);
@@ -1247,7 +1247,7 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
 {
     if (ps2_render_worker::gsStage()) // [gta-recomp] in order with the GS stage
         ps2_render_worker::gsDrain();
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     if (m_gpu && data && sizeBytes)
     {
         gpuUploadImage(*m_gpu, bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
@@ -1533,7 +1533,7 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
     if (ps2_render_worker::gsStage() && toGsStage(kGsRegister, nullptr, 0u, regAddr, value)) // [gta-recomp]
         return;
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     if (m_gpu)
     {
         m_gpu->reg(regAddr, value);
@@ -2116,7 +2116,7 @@ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
     if (ps2_render_worker::gsStage()) // [gta-recomp] in order with the GS stage
         ps2_render_worker::gsDrain();
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
 }
 
@@ -2124,7 +2124,7 @@ bool GS::clearActiveFramebuffer(uint32_t rgba)
 {
     if (ps2_render_worker::gsStage()) // [gta-recomp] in order with the GS stage
         ps2_render_worker::gsDrain();
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
 }
 
@@ -2132,7 +2132,7 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
     if (ps2_render_worker::gsStage()) // [gta-recomp] in order with the GS stage
         ps2_render_worker::gsDrain();
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     if (m_gpuOnly)
         return m_gpu->readTransfer(dst, maxBytes);
     return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
@@ -2143,7 +2143,7 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
     if (!backend)
         backend = std::make_unique<GSCpuBackend>();
 
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
     if (m_backend)
     {
@@ -2169,13 +2169,13 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 
 uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     return m_backend ? m_backend->ReadVram(psm, base, bw, x, y) : 0u;
 }
 
 void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     if (m_backend)
         m_backend->WriteVram(psm, base, bw, x, y, value);
 }
@@ -2196,7 +2196,7 @@ bool GS::submitNative(uint64_t prim, const GSNativeDraw &draw)
         if (toGsStage(kGsNative, &draw, sizeof(GSNativeDraw), draw.vertices ? 1u : 0u, prim, draw.vertices, vertexBytes))
             return true;
     }
-    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);
     if (!m_backend || m_gpuOnly)
         return false;
     writeRegisterUnlocked(GS_REG_PRIM, prim);

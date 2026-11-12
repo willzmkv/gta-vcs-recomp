@@ -45,7 +45,7 @@ choices).
 | Path | What |
 |---|---|
 | `src/main.cpp` | Launcher: ISO, settings registration, runtime start |
-| `src/game/` | Game-specific code: overrides / hooks (`vcs_overrides.cpp`), native draw HLE (`vcs_hle_world.cpp`), display (`vcs_display.cpp`), the trainer (`vcs_trainer.cpp`), frame timing (`vcs_framerate.cpp`, per-frame mission meters `vcs_script_timing.cpp`), the player's controls (`vcs_input.cpp`; free aim `vcs_aim.cpp`), the game's music / effects levels as settings (`vcs_volume.cpp`) |
+| `src/game/` | Game-specific code: overrides / hooks (`vcs_overrides.cpp`), native draw HLE (`vcs_hle_world.cpp`), display (`vcs_display.cpp`), the trainer (`vcs_trainer.cpp`), frame timing (`vcs_framerate.cpp`, per-frame mission meters `vcs_script_timing.cpp`), the player's controls (`vcs_input.cpp`; free aim `vcs_aim.cpp`; the pause menu's keys and mouse `vcs_frontend.cpp`), the game's music / effects levels as settings (`vcs_volume.cpp`), button prompts by device (`vcs_prompts.cpp`, its glyphs `vcs_glyph_art.cpp`), traffic / pedestrian density and draw distance (`vcs_world_detail.cpp`), the NPC drive-by's fire rate (`vcs_driveby.cpp`), mission scripts stuck above 30 fps (`vcs_script_fixes.cpp`) |
 | `src/render/`, `src/rhi/`, `src/platform/` | Presenter + shaders (HLSL; DXBC by fxc, SPIR-V by `tools/hlsl_spirv.py`), the RHI (backends `d3d11/`, `vulkan/`, `null/`; only they see a graphics API), SDL3 platform layer |
 | `src/sound/` | Sony's libsd on the host (the native sound driver in `src/game/vcs_sound.cpp` drives the SPU2 through it) |
 | `src/settings/`, `src/ui/` | Settings registry + vcs.ini, the in-game settings menu (F2), the trainer menu (F5) |
@@ -76,13 +76,14 @@ python tools/doctor.py [--json]              # folder, compiler, disc, build sta
 python tools/build_dir.py [check|set P|reset] # the build folder elsewhere (.vcs-build-dir, VCS_BUILD_DIR): tc.BUILD follows;
                                              # the test tools keep writing to build\ in the source folder
 python tools/release.py [--ref vX | --worktree]   # the Windows release zip (build/dist); refuses game files. The number is
-                                             # VERSION (root; 0.2.0): bump it before tagging - the tag must match;
+                                             # VERSION (root; 0.2.3): bump it before tagging - the tag must match;
                                              # the notes: docs/releases/<tag>.md (else GitHub generates them)
 python3 tools/release.py --platform linux [--worktree --allow-new-glibc]   # the Linux AppImage (CI builds it on
                                              # Ubuntu 22.04 for glibc 2.35; a v* tag publishes zip + AppImage together)
 python tools/deps.py list|fetch|check        # the libraries CMake downloads; deps/ makes the build offline
 python tools/backup.py create|list|restore   # memory card backups (VCS_DATA_DIR honoured: test on copies)
 python tools/setup_vs.py status|install [--dry-run]   # Visual Studio Build Tools (+ clang) from Microsoft, elevated
+python tools/hlsl_dxbc.py ... [--check-fxc FXC]       # HLSL -> DXBC through Windows' d3dcompiler_47.dll (no Windows SDK)
 python tools/update.py check|apply [--zip F]  # a release folder to the newest GitHub release (not a clone)
 python tools/rip_disc.py list|rip E: OUT.iso  # a PS2 disc in a DVD drive to an .iso; report.py zips logs for bug reports
 python tools/framerate_audit.py [--steps 15,30,60,100]   # behaviour per simulated second at forced time steps
@@ -100,7 +101,11 @@ import spots; spots.put(g, "police"|"havana")                  # (tools/spots.py
                                                               # of the city: pavement facing the street, camera behind the player
 python tools/saves.py [OUT]                                   # save / Load Game / Delete Game through the menus
 python tools/soak.py [OUT] --hours 3                          # hours of autodrive: crash / hang / leak / falling
+python tools/memcheck.py [OUT] [--minutes 15]                 # memory over a route that streams a lot must level off
+                                                              # (the RSL recordings' limit, GitHub issue 115)
 python tools/shakedown.py [OUT]                               # mission 50: cutscene + shop entry (the "Loading..." hang)
+python tools/haze_check.py [OUT] [--timing 1 --fps 144]       # mission 94 at 60 fps: the cutscene that stuck on "Loading...",
+                                                              # the haze across a 16:9 picture
 python tools/soundcheck.py all OUT [--mission N]             # native sound vs the emulated IOP: record, replay, compare
 python tools/trainer_check.py [OUT] [--vehicles all]          # every trainer feature, checked in the game's memory
 python tools/finale_check.py [OUT] [--story] [--full]         # Last Stand's end from the trainer: final cutscene, credits
@@ -123,6 +128,10 @@ python tools/carmod_verify.py FOLDER [--native]               # converted VC veh
 python tools/weaponmod_check.py [OUT] [--folder DIR]          # a PC weapon mod in the game: each weapon in Vic's hand (front, side), the HUD icon
 python tools/weaponfit.py --vc VC/models/gta3.img [--check]   # where VCS holds each weapon against VC: the converters' WEAPON_PLACES
 python tools/fire_check.py [OUT] [--variant NAME=ENV=VAL]      # fire on screen: a burning car, the flame-thrower, a molotov (fire pixels counted)
+python tools/menu_check.py [OUT]                              # the pause menu: Escape / Enter, the mouse (hover, click, sliders,
+                                                              # map drag), the gamepad as before
+python tools/prompts_check.py [OUT]                           # button prompts: each glyph set in help text and the menu, the
+                                                              # device switch, Original unchanged
 python tools/irxdis.py --decompile X.IRX OUT.c                # an IOP module as C (headless Ghidra; analysis only)
 python tools/eedecomp.py 0x2f7d58 [...] [--out FILE]          # game functions as C (the analysed EE project; analysis only)
 ```
@@ -130,7 +139,8 @@ python tools/eedecomp.py 0x2f7d58 [...] [--out FILE]          # game functions a
 The rig (`src/debug/rig.cpp`, `tools/rig.py`) drives the game through its own script VM: `Game.teleport`,
 `set_time`, `weather`, `invincible`, `mission(n)` and raw `scm(bytes)` (assembler: `rig.Scm`, VCS opcode numbers
 from the Sanny Builder Library, checked against the handler table - game-internals.md 11). `build/rig/saves/` holds
-card copies to start from (never the user's live card).
+card copies to start from (never the user's live card): the test tools take `fortbaxter/`, else `user/` (a copy of the
+player's card; `rig.default_save`).
 
 - Test runs are **hidden** (the user's choice, 2026-10-24): no window, physical input ignored, sound on (the user
   mutes the game in Windows); all launches go through `toolchain.test_window`; the rig passes `run.py --hidden`.
@@ -152,6 +162,14 @@ card copies to start from (never the user's live card).
   which one it is. `pgo` / `lto` relink slower and are for measuring and releases. A PGO profile from older code still
   builds; retrain (`--opt pgo --train`, ~30 min) after large changes. Never edit sources while a build or the PGO
   pipeline is compiling them.
+- Windows compiler (DECISIONS.md 2026-11-03): llvm-mingw, the default (`toolchain.WINDOWS_TOOLCHAIN_DEFAULT`): clang +
+  lld + libc++, the GNU driver like Linux; pinned in `toolchain.LLVM_MINGW_DOWNLOADS`, downloaded into
+  `build/build-tools`; no Visual Studio, no Windows SDK. `VCS_TOOLCHAIN=msvc` builds with Visual Studio's clang-cl, kept
+  for comparison. Shaders come from `tools/hlsl_dxbc.py` either way (no fxc). Switching compilers sets the tree up from
+  scratch (`toolchain.drop_other_compiler`); compare the two in their own folders (`VCS_BUILD_DIR=build/msvc`). Code
+  that differs: `__MINGW32__` / CMake's `MINGW`; `_MSC_VER` means clang-cl only. libc++ on Windows has a slow
+  `steady_clock::now`, timed waits that spin their last millisecond and a CRITICAL_SECTION `recursive_mutex`: hot code
+  uses `ps2x::hostNow` / `waitUntil` / `waitFor` / `RecursiveMutex` (`runtime/ps2_host_std.h`, PERFORMANCE.md 29).
 - A successful build writes `iso=<disc>` into the `vcs.ini` next to `vcs.exe` when that file has none, so the exe
   started on its own finds the disc.
 - The launcher (`launcher/`, docs/LAUNCHER.md) only runs `tools/`: build logic stays in Python, so a change to the
@@ -162,6 +180,31 @@ card copies to start from (never the user's live card).
   its cost; `--self-test` is CI's check. The launcher's UI is immediate mode: never open a file dialog inside a frame
   (`screens::runPending`), and keep it idle - no animation that runs forever while nothing happens, except Home's
   backdrop (the user's wish, 2026-11-01: 30 fps, off while the game runs and with reduce motion; DECISIONS.md).
+
+## Release notes
+
+Each release's notes are `docs/releases/v<VERSION>.md`. CI publishes them as the release's text and sets the title
+itself ("GTA Vice City Stories Launcher vX"), so the file has no heading. Follow `docs/releases/v0.2.1.md`'s format
+(the user's choice, 2026-11-04):
+
+- **Sources:** `git log <previous tag>..HEAD`, with the commit bodies. Group the changes by what a player notices, not
+  by commit. Leave out anything a player never sees (tools, CI, docs, test rigs) unless it changes how they build,
+  update or report a problem.
+- **Layout:** the first line is `**Full Changelog**: https://github.com/gothamor/gta-vcs-recomp/compare/vPREV...vNEW`.
+  Sections are plain lines, not Markdown headings, each followed by bullets. The biggest change comes first as
+  `New: <what it is>`. Then come sections named by topic (`The car camera`), then `Fixes`, then `Launcher` (or `Also`).
+  The last line is an `Updating:` paragraph: the Windows steps in the launcher, that saves aren't touched, extracting
+  into a new folder as the other way, and the Linux AppImage.
+- **Writing:** write for players, in plain words. Say what they see or do now, and what it was like before ("Before,
+  it moved slowly and fought you."). Name settings in bold with where to find them ("the game's settings (F2) →
+  Keyboard: **Car camera sensitivity**") and give their defaults. Put a GitHub issue at the end of its bullet as
+  `(#N)`. Prefix a bullet that only applies to one platform or one mission with its name (`Linux:`, `Farewell To
+  Arms:`). Never use function names, addresses, environment variables or internal file names.
+- **Be honest:** if a fix couldn't be reproduced here, say it's hoped to fix the problem. Tell updaters about costs:
+  a full rebuild, a large download (with its size), or a feature they'll only see from the next update on.
+- **Before tagging:** bump `VERSION` to the tag's number, and commit the notes in the same commit. Never put `[skip ci]`
+  in the message of the commit the `v*` tag points at: GitHub then skips the tag's workflow, so no release is made.
+  If that happens anyway, `gh workflow run launcher.yml --ref vX` builds and publishes it.
 
 ## Rules that keep things working
 
@@ -195,6 +238,10 @@ card copies to start from (never the user's live card).
 - Saves written but never found: card directory order (game-internals.md 10c).
 - A mission stuck after a ped should talk, or peds vanishing: check the mission audio slots and who deletes the ped
   (`VCS_TRACE_PED_REMOVE`, game-internals.md 12); Shakedown's was the recompiler's 32-bit compare-with-zero branches.
+- "Loading..." for ever in the middle of a scripted cutscene, at 60 fps and not at 30: the mission script waiting for
+  an audio line whose speaker died behind the fade (its script sits at 0xA9F9 - 0xAA0B; Purple Haze's thug run over by
+  a truck that only keeps rolling at shorter frames - game-internals.md 11h, `src/game/vcs_script_fixes.cpp`). The
+  wait ends by itself now (`[script-fix] mission audio slot ... was freed` in the log): look for what killed the speaker.
 - Something wrong only above 100 fps: a `ms_fTimeStep < 0.5` branch the PS2 never takes (game-internals.md 4).
 - A mission bar / meter / timer faster at high frame rates: the mission script adds a fixed amount every frame; add
   the instruction to `src/game/vcs_script_timing.cpp` (game-internals.md 11f has the survey and how to read a mission).
@@ -203,7 +250,8 @@ card copies to start from (never the user's live card).
   slot` in the log).
 - "Loading..." over black after a mission's last cutscene, the game running behind it (clock and scripts move): the
   screen left faded out for a script that never comes - Last Stand out of story order waits for the credits
-  (game-internals.md 11g). F12's draw log shows the black quad and the text; the active scripts show who is missing.
+  (game-internals.md 11g). F12's draw log (`PS2X_HW_DUMP_KEY=1`) shows the black quad and the text; the active scripts
+  show who is missing.
 - `ninja: error: manifest 'build.ninja' still dirty after 100 tries`: files dated after the clock (a zip from another
   time zone); `build.py` sets them to now (`toolchain.fix_future_files`, docs/LAUNCHER.md).
 - A tool fails within a second, its log empty (a player's report, 2026-10-31): a crash before the first line - the log
@@ -215,12 +263,19 @@ card copies to start from (never the user's live card).
   store, or a failed card write - the game deletes its save folder after one (game-internals.md 10f). The card is
   zipped into `<data>/backups/auto-*.zip` before every change (`[MC] card backup` in the log).
 - No fire (flame-thrower, molotovs, explosions, burning cars) while their smoke shows: GS sprites lost in the D3D11
-  renderer - the pixel shader's depth output was the cause once (game-internals.md 6m); `tools/fire_check.py`.
+  renderer - the pixel shader's depth output was the cause once (game-internals.md 6u); `tools/fire_check.py`.
 - Decorative crowds or traffic appearing close to the player or replacing real peds/cars, or distant lights missing:
   read `docs/T2_POPULATION_AND_DISTANT_LIFE_PLAN.md` before touching `vcs_distance.*`, `vcs_distant.*`, or proxy draws
   in `vcs_hle_world.cpp`. Never clamp `pedDistance()` or `carDistance()` when `Distant crowds` / `Distant traffic` are
   enabled, never read `0x006F4CA0` directly inside `CWorld::Process`, and keep all decorative proxies strictly beyond
   the real population band (`>= 320-350 m`).
+- `Could NOT find Python3` in configure.log: CMake left to find a Python of its own (a release's is in `python/`,
+  not on PATH); the build passes its own (`toolchain.python_defines`, DECISIONS.md 2026-11-05). A build that stops
+  with no log in a long folder (Quiver's): MAX_PATH while unpacking a tool (`toolchain.long_path`).
+- Memory growing by gigabytes over hours of play (GitHub issue 115): a cache keyed by guest address with no bound - the
+  game streams the same model in at another address, so such keys never stop coming. The RSL recordings were one
+  (bounded since 2026-11-10, `VCS_RSL_RECORDINGS_MB`); `VCS_RSL_WORLD_LOG=1` prints what they hold, `tools/memcheck.py`
+  is the check (PERFORMANCE.md 31).
 - First things to grep in a log: `[ee] thread N -> dormant`, `[guest-branch:unlisted-resume]`.
 
 ## Working style for long autonomous runs

@@ -70,7 +70,8 @@ def main():
     files.append(os.path.join(tc.ROOT, "generated", "recompile_stamp.json"))
     files += sorted(glob.glob(os.path.join(tc.BUILD, "run", "*.log")), key=os.path.getmtime, reverse=True)[:4]
     files = [p for p in files if os.path.isfile(p)]
-    doctor = subprocess.run(tc.PY + [tc.tool("doctor.py"), "--json"], capture_output=True, text=True, cwd=tc.ROOT)
+    doctor = subprocess.run(tc.PY + [tc.tool("doctor.py"), "--json"], capture_output=True, cwd=tc.ROOT,
+                            encoding="utf-8", errors="replace")  # the tools print UTF-8 (toolchain)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for path in files:
             # the build folder's files under build/ in the zip, wherever it is

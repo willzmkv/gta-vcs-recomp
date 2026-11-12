@@ -42,7 +42,7 @@ def record(out, seconds=40, mission=None):
             os.remove(os.path.join(out, name))
     env = {"VCS_NATIVE_SOUND": "0", "PS2X_RPC_RECORD": os.path.join(out, "rpc.bin"), "PS2X_RPC_RECORD_SIDS": SIDS,
            "PS2X_SPU2_TRACE": os.path.join(out, "ref"), "PS2X_AUDIO_DUMP": os.path.join(out, "ref.wav")}
-    g = rig.Game.start(save=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"), name="soundcheck", port=47662,
+    g = rig.Game.start(save=rig.default_save(), name="soundcheck", port=47662,
                        data_dir=os.path.join(ROOT, "build", "soundcheck", "data"), env=env)
     try:
         g.wait_ingame()

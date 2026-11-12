@@ -12,8 +12,14 @@
 // fix buildings, peds and cars at the screen edges vanish in widescreen. The test is wrapped: before it runs, side
 // planes the game has rebuilt are widened to the Hor+ view (edge at tan h x r). VCS_WIDE_CULL=0: the game's planes.
 //
-// The game's own widescreen preference is Vert- (same horizontal view, vertical view cut) and stays as the game has
-// it; VCS_WIDESCREEN=0|1 forces it (testing only).
+// The game's own widescreen preference (pause menu Display, option 14; *(*0x48F3D0 + 0x30)) is the PS2's anamorphic
+// mode for a TV that stretches the picture: a Vert- 16:9 aspect, the HUD, text, pause map and menu layouts squeezed to
+// 3/4 width, and no cutscene letterbox (game-internals.md 5a). On a PC every part of it but the bars fights the Hor+
+// view and the renderer's HUD squeeze, so it is kept off (the user's decision, DECISIONS.md 2026-11-06): its setter
+// FUN_002AF660 stores 0 - the pause menu's row is hidden (vcs_frontend.cpp) and a save's 1 (block +0x80, restored
+// at 0x3AD0F8) is not taken - and the frame kick puts 0 back if anything wrote the field directly. The bars are a
+// setting of their own (Display > Cutscene black bars): FUN_002804C8, which draws only them, is skipped when off.
+// VCS_WIDESCREEN=1 forces the PS2's mode on (comparisons), VCS_WIDESCREEN=game leaves it to the game (before).
 #include "game/vcs_display.h"
 
 #include "ps2_runtime.h"
@@ -40,7 +46,8 @@ namespace vcs
         constexpr uint32_t kLeftPlane = 0xB70u;
 
         std::atomic<float> g_widening{1.0f};
-        std::atomic<int> g_gamePreference{-1}; // -1: leave the game's preference alone
+        std::atomic<int> g_gamePreference{0}; // the value the game's preference is kept at; -1: left to the game
+        std::atomic<bool> g_cutsceneBars{true};
         bool g_wideCull = true;
 
         // Per camera object, its side planes as the game built them and as they were widened (game thread only: the
@@ -139,11 +146,48 @@ namespace vcs
             prepareSphereTest(rdram, GPR_U32(ctx, 4));
             FUN_003816f8_0x3816f8(rdram, ctx, runtime);
         }
+
+        // FUN_002AF660(prefs a0, value a1): the widescreen preference's setter (a leaf: sw a1, 0x30(a0)). Callers: the
+        // pause menu's Display page (0x2AF06C) and the save load (0x3AD0F8).
+        PS2_GUEST_CC void setWidescreenPreference(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const int wanted = g_gamePreference.load(std::memory_order_relaxed);
+            if (wanted >= 0 && static_cast<int>(GPR_U32(ctx, 5)) != wanted)
+            {
+                static bool logged = false;
+                if (!logged)
+                    std::fprintf(stderr, "[display] the game sets its widescreen preference %u (ra=0x%x): kept at %d\n",
+                                 GPR_U32(ctx, 5), GPR_U32(ctx, 31), wanted);
+                logged = true;
+                SET_GPR_U32(ctx, 5, static_cast<uint32_t>(wanted));
+            }
+            FUN_002af660_0x2af660(rdram, ctx, runtime);
+        }
+
+        // FUN_002804C8(cutscene manager a0): the cutscene letterbox - two black bars, 0..34 and 238..272 of the 2D pass's
+        // 272, while the manager's +0x34 is set and the widescreen preference is off. Draws nothing else.
+        PS2_GUEST_CC void cutsceneBars(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (!g_cutsceneBars.load(std::memory_order_relaxed))
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
+            FUN_002804c8_0x2804c8(rdram, ctx, runtime);
+        }
     }
+
+    void setCutsceneBars(bool on) { g_cutsceneBars.store(on, std::memory_order_relaxed); }
 
     void setAspectWidening(float r) { g_widening.store(r, std::memory_order_relaxed); }
 
     float aspectWidening() { return g_widening.load(std::memory_order_relaxed); }
+
+    // The reflection map is the 128x128 copy of the frame into FBP 420 that car paint samples (game-internals.md 6g): a
+    // flat panel shows one of its texels, so the GS's four taps out of ~5 x 3.5 frame pixels make the panel jump as the
+    // camera moves. Smooth reads the copy through the renderer's filter (gsHwSetTargetFilter); the bloom at FBP 420 is
+    // 256 wide (FBW 4), so only the reflection map's draws are filtered.
+    void setReflectionFilter(int mode) { gsHwSetTargetFilter(420u, 2u, mode == 1 ? 1 : mode == 2 ? 2 : 0); }
 
     void installDisplayHooks(PS2Runtime &runtime)
     {
@@ -151,8 +195,11 @@ namespace vcs
         if (const char *e = std::getenv("VCS_WIDE_CULL"); e && *e == '0')
             g_wideCull = false;
         runtime.replaceFunction(0x003816F8u, &sphereVisible); // VCS_TRACE_VISIBLE replaces it again, calling prepareSphereTest
-        if (const char *e = std::getenv("VCS_WIDESCREEN"); e && *e) // testing: force the game's own (Vert-) preference
-            g_gamePreference.store(*e == '0' ? 0 : 1, std::memory_order_relaxed);
+        if (const char *e = std::getenv("VCS_WIDESCREEN"); e && *e) // testing: the PS2's own (Vert-, anamorphic) mode
+            g_gamePreference.store(std::strcmp(e, "game") == 0 ? -1 : *e == '0' ? 0 : 1, std::memory_order_relaxed);
+        if (g_gamePreference.load(std::memory_order_relaxed) >= 0)
+            runtime.replaceFunction(0x002AF660u, &setWidescreenPreference);
+        runtime.replaceFunction(0x002804C8u, &cutsceneBars);
         // VCS's render targets by what they are (game-internals.md 6g; docs/FULLY_NATIVE.md step 3d). The reflection map
         // is only ever sampled (vehicles' paint), so it follows "Internal resolution: Match window" like the picture.
         gsHwSetTargetRole(140u, 10u, "frame", false);

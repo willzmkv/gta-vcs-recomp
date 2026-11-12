@@ -167,6 +167,7 @@ namespace launcher
             sigemptyset(&none);
             ::sigprocmask(SIG_SETMASK, &none, nullptr);
             ::signal(SIGPIPE, SIG_DFL);
+            closeInheritedFdsOnExec(); // only 0-2 (and the exec-error pipe until exec) reach the program
             int err = 0;
             if (!cwd.empty() && ::chdir(cwd.c_str()) != 0)
                 err = errno;

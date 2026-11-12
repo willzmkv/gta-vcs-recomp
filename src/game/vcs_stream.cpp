@@ -31,6 +31,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include "runtime/ps2_host_std.h"
 
 namespace vcs
 {
@@ -472,7 +473,7 @@ namespace vcs
                     request = r.queue.front();
                     r.queue.pop_front();
                 }
-                const auto start = std::chrono::steady_clock::now();
+                const auto start = ps2x::hostNow();
                 IPS2DiscImage *disc = ps2_disc::image();
                 const uint32_t dest = request.dest & PS2_RAM_MASK;
                 const uint32_t bytes = std::min<uint32_t>(request.bytes, PS2_RAM_SIZE - dest);
@@ -498,7 +499,7 @@ namespace vcs
                 r.reads.fetch_add(1, std::memory_order_relaxed);
                 r.bytes.fetch_add(bytes, std::memory_order_relaxed);
                 r.nanoseconds.fetch_add(static_cast<uint64_t>(
-                                            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()),
+                                            std::chrono::duration_cast<std::chrono::nanoseconds>(ps2x::hostNow() - start).count()),
                                         std::memory_order_relaxed);
                 {
                     std::lock_guard<std::mutex> lock(r.mutex);
@@ -511,10 +512,10 @@ namespace vcs
         void report()
         {
             static const bool log = std::getenv("VCS_STREAM_LOG") != nullptr;
-            static auto last = std::chrono::steady_clock::now();
-            if (!log || std::chrono::steady_clock::now() - last < std::chrono::seconds(5))
+            static auto last = ps2x::hostNow();
+            if (!log || ps2x::hostNow() - last < std::chrono::seconds(5))
                 return;
-            last = std::chrono::steady_clock::now();
+            last = ps2x::hostNow();
             Reader &r = reader();
             std::fprintf(stderr, "[stream] %llu reads, %.1f MB, %.1f ms reading (last 5 s)\n",
                          static_cast<unsigned long long>(r.reads.exchange(0)), r.bytes.exchange(0) / 1048576.0,
@@ -555,7 +556,7 @@ namespace vcs
             if (busy)
             {
                 std::unique_lock<std::mutex> lock(r.mutex);
-                busy = !r.doneCv.wait_for(lock, std::chrono::milliseconds(20),
+                busy = !ps2x::waitFor(r.doneCv, lock, std::chrono::milliseconds(20),
                                           [&] { return pending.load(std::memory_order_acquire) == 0u; });
             }
             SET_GPR_U64(ctx, 2, busy ? kBusy : 0u);

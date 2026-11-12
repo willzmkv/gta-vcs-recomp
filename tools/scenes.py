@@ -46,9 +46,9 @@ SCRIPT = [
     (88.0, "press", "Shift", False),            # Cross: skip the cutscene
     (106.0, "shot", "gameplay_hud", False),
     (108.0, "perf", "gameplay", False),
-    (110.0, "press", "Return", False),          # Start: pause menu (map)
+    (110.0, "press", "Escape", False),          # Start: pause menu (map)
     (116.0, "shot", "pause_map", True),
-    (118.0, "press", "Return", False),
+    (118.0, "press", "Escape", False),          # back out of it (Triangle on the tab bar)
     (124.0, "shot", "gameplay_resumed", False),
 ]
 STATIC_TOLERANCE = 2.0  # mean absolute difference (0-255) a static scene may have

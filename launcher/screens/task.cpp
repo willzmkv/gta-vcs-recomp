@@ -28,7 +28,9 @@ namespace screens
             if (t.kind == "tools")
                 return t.result["message"].str().empty() ? "The build tools are installed." : t.result["message"].str();
             if (t.kind == "update")
-                return "Updated to " + t.result["version"].str() + ". Restart the launcher, then update the build.";
+                return t.result["restart"].boolean()
+                           ? "Updated to " + t.result["version"].str() + ". Restart the launcher to use it, then update the build."
+                           : "You already have the newest release (" + t.result["version"].str() + ").";
             if (t.kind == "install")
                 return "The game's files are in place.";
             if (t.kind == "rip")
@@ -220,6 +222,19 @@ namespace screens
                 }
                 core::cutRight(actions, px(8));
                 ok = ui::button("Close##done", core::cutRight(actions, ui::buttonWidth("Close")), ButtonStyle::Ghost);
+            }
+            else if (!t.cancelled && t.kind == "update" && t.result["restart"].boolean())
+            {
+                // the new release is in place, this launcher is the old one: it starts the new one and closes
+                const float w = ui::buttonWidth("Restart", theme::icon::kRefresh);
+                if (ui::button("Restart##done", core::cutRight(actions, w), ButtonStyle::Primary, theme::icon::kRefresh) || enter)
+                {
+                    restartLauncher(app);
+                    popReveal();
+                    return;
+                }
+                core::cutRight(actions, px(8));
+                ok = ui::button("Later##done", core::cutRight(actions, ui::buttonWidth("Later")), ButtonStyle::Ghost);
             }
             else
             {

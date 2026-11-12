@@ -145,6 +145,8 @@ namespace ui
             if (settings::overridden(s.key))
                 text += " Locked: the environment variable " + s.env + " sets it for this run (tools/run.py sets some for "
                         "test runs); start the game without it to change it here.";
+            else if (s.locked && s.locked())
+                text += " " + s.lockedNote;
             if (s.type == settings::Type::Key && s.optional)
                 text += " Click, then press a key or mouse button or turn the wheel (Esc: cancel). Right-click: clear.";
             return text;
@@ -211,14 +213,18 @@ namespace ui
         void row(const settings::Spec &s, std::string &focusedNow)
         {
             const ImGuiStyle &style = ImGui::GetStyle();
-            const bool locked = settings::overridden(s.key);
-            int v = settings::value(s.key);
+            const bool byEnv = settings::overridden(s.key);
+            const bool bySetting = !byEnv && s.locked && s.locked(); // another setting decides it for now
+            const bool locked = byEnv || bySetting;
+            int v = bySetting ? s.lockedValue : settings::value(s.key);
             ImGui::TableNextRow(ImGuiTableRowFlags_None, ImGui::GetFrameHeight() + style.CellPadding.y * 2.0f);
             ImGui::TableNextColumn();
             const float top = ImGui::GetCursorScreenPos().y - style.CellPadding.y;
             ImGui::AlignTextToFramePadding();
-            if (locked) // greyed out with the reason beside it, so a click that does nothing doesn't look like a bug
+            if (byEnv) // greyed out with the reason beside it, so a click that does nothing doesn't look like a bug
                 ImGui::TextDisabled("%s (%s)", s.label.c_str(), s.env.c_str());
+            else if (bySetting) // the reason is in the help line (lockedNote)
+                ImGui::TextDisabled("%s", s.label.c_str());
             else
                 ImGui::TextUnformatted(s.label.c_str());
             if (restartPending(s))

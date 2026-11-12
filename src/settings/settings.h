@@ -56,6 +56,12 @@ namespace settings
         // false: not in vcs.ini - the value lives elsewhere (a mod's priority in modloader.ini): `read` gives it at load
         // and refresh, onChange stores it
         bool saved = true;
+        // Optional: another setting decides this one for now (e.g. the cutscene bars at 4:3). The menu greys the row
+        // out, shows `lockedValue` and adds `lockedNote` to its help; the saved value stays and applies again once
+        // unlocked. Whatever applies it decides the locked effect itself (value() still returns the saved value).
+        std::function<bool()> locked;
+        int lockedValue = 0;
+        std::string lockedNote;
 
         // Key: 0 (unbound) is a valid value. A control binding; the menu clears one with a right click.
         bool optional = false;

@@ -9,7 +9,7 @@
 #endif
 #include <windows.h>
 #include <d3d11_1.h>
-#include <dxgi1_5.h>
+#include <dxgi1_6.h>
 #include <wrl/client.h>
 
 #include "imgui.h"
@@ -85,6 +85,109 @@ namespace rhi
             if (n > 1)
                 WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
             return s;
+        }
+
+        // DXCore (dxcore.dll, Windows 10 2004+) tells whether a card is the CPU's integrated chip; DXGI doesn't. Its
+        // header isn't in llvm-mingw, so the methods used are declared here, in the order of the Windows SDK's
+        // dxcore_interface.h (the rest of each vtable is never called). Loaded at run time: an older Windows just
+        // goes without the "(integrated)".
+        struct IDXCoreAdapterMin : IUnknown
+        {
+            virtual bool STDMETHODCALLTYPE IsValid() = 0;
+            virtual bool STDMETHODCALLTYPE IsAttributeSupported(REFGUID attribute) = 0;
+            virtual bool STDMETHODCALLTYPE IsPropertySupported(uint32_t property) = 0;
+            virtual HRESULT STDMETHODCALLTYPE GetProperty(uint32_t property, size_t size, void *data) = 0;
+        };
+        struct IDXCoreAdapterFactoryMin : IUnknown
+        {
+            virtual HRESULT STDMETHODCALLTYPE CreateAdapterList(uint32_t count, const GUID *attributes, REFIID riid, void **list) = 0;
+            virtual HRESULT STDMETHODCALLTYPE GetAdapterByLuid(const LUID &luid, REFIID riid, void **adapter) = 0;
+        };
+        constexpr GUID kIID_IDXCoreAdapterFactory = {0x78ee5945, 0xc36e, 0x4b13, {0xa6, 0x69, 0x00, 0x5d, 0xd1, 0x1c, 0x0f, 0x06}};
+        constexpr GUID kIID_IDXCoreAdapter = {0xf0db4c7f, 0xfe5a, 0x42a2, {0xbd, 0x62, 0xf2, 0xa6, 0xcf, 0x6f, 0xc8, 0x3e}};
+        constexpr uint32_t kDXCoreIsHardware = 11, kDXCoreIsIntegrated = 12; // DXCoreAdapterProperty
+
+        // A DXCore bool property of the card with this LUID: 1 / 0, or -1 when DXCore can't tell.
+        int dxcoreFlag(const LUID &luid, uint32_t property)
+        {
+            static ComPtr<IDXCoreAdapterFactoryMin> factory = [] {
+                ComPtr<IDXCoreAdapterFactoryMin> f;
+                if (HMODULE dll = LoadLibraryExW(L"dxcore.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+                {
+                    using Create = HRESULT(WINAPI *)(REFIID, void **);
+                    if (auto create = reinterpret_cast<Create>(reinterpret_cast<void (*)()>(GetProcAddress(dll, "DXCoreCreateAdapterFactory"))))
+                        create(kIID_IDXCoreAdapterFactory, reinterpret_cast<void **>(f.GetAddressOf()));
+                }
+                return f;
+            }();
+            ComPtr<IDXCoreAdapterMin> adapter;
+            bool value = false;
+            if (!factory || FAILED(factory->GetAdapterByLuid(luid, kIID_IDXCoreAdapter, reinterpret_cast<void **>(adapter.GetAddressOf()))) ||
+                !adapter->IsPropertySupported(property) || FAILED(adapter->GetProperty(property, sizeof(value), &value)))
+                return -1;
+            return value ? 1 : 0;
+        }
+
+        // The graphics cards (rhi::listGpus), the fastest first: DXGI's high-performance ranking (IDXGIFactory6,
+        // Windows 10 1803+; DXGI's plain order before that), software adapters (Microsoft Basic Render Driver) left out.
+        struct Card
+        {
+            ComPtr<IDXGIAdapter1> adapter;
+            Gpu gpu;
+        };
+        std::vector<Card> enumerateCards()
+        {
+            std::vector<Card> cards;
+            ComPtr<IDXGIFactory1> factory;
+            if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+                return cards;
+            ComPtr<IDXGIFactory6> ranked;
+            factory.As(&ranked);
+            for (UINT i = 0;; ++i)
+            {
+                ComPtr<IDXGIAdapter1> adapter;
+                const HRESULT hr = ranked ? ranked->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter))
+                                          : factory->EnumAdapters1(i, &adapter);
+                if (FAILED(hr))
+                    break;
+                DXGI_ADAPTER_DESC1 d{};
+                adapter->GetDesc1(&d);
+                if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+                    continue;
+                Card card;
+                card.adapter = adapter;
+                card.gpu.name = narrow(d.Description);
+                card.gpu.vendorId = d.VendorId;
+                card.gpu.deviceId = d.DeviceId;
+                card.gpu.integrated = dxcoreFlag(d.AdapterLuid, kDXCoreIsIntegrated) == 1;
+                cards.push_back(std::move(card));
+            }
+            std::vector<Gpu> gpus;
+            for (const Card &c : cards)
+                gpus.push_back(c.gpu);
+            numberGpus(gpus);
+            for (size_t i = 0; i < cards.size(); ++i)
+                cards[i].gpu = gpus[i];
+            return cards;
+        }
+
+        // The graphics card the player chose (Graphics > Graphics card, GitHub issue 112): the card with that id, else
+        // the fastest - on a laptop the dedicated card rather than the integrated chip Windows hands out by default.
+        // Null when DXGI lists none: D3D11CreateDevice then takes Windows' default adapter. The log names every card.
+        ComPtr<IDXGIAdapter1> pickAdapter(int id)
+        {
+            const std::vector<Card> cards = enumerateCards();
+            const Card *chosen = cards.empty() ? nullptr : &cards[0];
+            for (const Card &c : cards)
+                if (c.gpu.id == id)
+                    chosen = &c;
+            std::string names;
+            for (const Card &c : cards)
+                names += (names.empty() ? "" : ", ") + c.gpu.name + (c.gpu.integrated ? " (integrated)" : "") + " [" +
+                         std::to_string(c.gpu.id) + "]";
+            std::fprintf(stderr, "[rhi] graphics cards, fastest first: %s; using %s\n", names.empty() ? "none" : names.c_str(),
+                         chosen ? chosen->gpu.name.c_str() : "Windows' default");
+            return chosen ? chosen->adapter : nullptr;
         }
 
         D3D11_BLEND blendFactor(BlendFactor f)
@@ -207,19 +310,34 @@ namespace rhi
                 if (desc.debug)
                     flags |= D3D11_CREATE_DEVICE_DEBUG;
                 const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+                // PS2X_RHI_WARP=1: Windows' software rasteriser instead of the GPU - a third implementation to compare a
+                // picture against when it differs between GPU vendors (slow: a few frames a second)
+                const char *warp = std::getenv("PS2X_RHI_WARP");
+                const D3D_DRIVER_TYPE driver = warp && *warp && *warp != '0' ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE;
+                // the graphics card for desc.gpu (pickAdapter); a card that can't make the device (no feature level
+                // 11_0) leaves it to Windows' default one, as it was before the choice
+                ComPtr<IDXGIAdapter1> chosen = driver == D3D_DRIVER_TYPE_HARDWARE ? pickAdapter(desc.gpu) : nullptr;
                 HRESULT hr = E_FAIL;
-                for (int attempt = 0; attempt < 3 && FAILED(hr); ++attempt)
+                for (int pass = chosen ? 0 : 1; pass < 2 && FAILED(hr); ++pass)
                 {
-                    // retry without the debug layer (not installed) and without 11_1 (old runtimes reject it)
-                    const D3D_FEATURE_LEVEL *first = attempt == 2 ? levels + 1 : levels;
-                    const UINT count = attempt == 2 ? 1u : 2u;
-                    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, first, count, D3D11_SDK_VERSION,
-                                           &m_device, nullptr, &m_context);
-                    if (FAILED(hr) && (flags & D3D11_CREATE_DEVICE_DEBUG))
+                    IDXGIAdapter *adapter = pass == 0 ? chosen.Get() : nullptr;
+                    for (int attempt = 0; attempt < 3 && FAILED(hr); ++attempt)
                     {
-                        std::fprintf(stderr, "[rhi] D3D11 debug layer not available\n");
-                        flags &= ~D3D11_CREATE_DEVICE_DEBUG;
+                        // retry without the debug layer (not installed) and without 11_1 (old runtimes reject it)
+                        const D3D_FEATURE_LEVEL *first = attempt == 2 ? levels + 1 : levels;
+                        const UINT count = attempt == 2 ? 1u : 2u;
+                        // a given adapter takes D3D_DRIVER_TYPE_UNKNOWN only
+                        hr = D3D11CreateDevice(adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : driver, nullptr, flags, first, count,
+                                               D3D11_SDK_VERSION, &m_device, nullptr, &m_context);
+                        if (FAILED(hr) && (flags & D3D11_CREATE_DEVICE_DEBUG))
+                        {
+                            std::fprintf(stderr, "[rhi] D3D11 debug layer not available\n");
+                            flags &= ~D3D11_CREATE_DEVICE_DEBUG;
+                        }
                     }
+                    if (FAILED(hr) && pass == 0)
+                        std::fprintf(stderr, "[rhi] D3D11: no device on the chosen graphics card (%s): Windows' default one\n",
+                                     hex(hr).c_str());
                 }
                 if (FAILED(hr))
                 {
@@ -227,6 +345,10 @@ namespace rhi
                     return false;
                 }
                 m_context.As(&m_annotation);
+                if ((flags & D3D11_CREATE_DEVICE_DEBUG) && SUCCEEDED(m_device.As(&m_infoQueue))) // its messages: drainDebugMessages
+                    std::fprintf(stderr, "[rhi] D3D11 debug layer on\n");
+                if (driver == D3D_DRIVER_TYPE_WARP)
+                    std::fprintf(stderr, "[rhi] D3D11 on WARP (software)\n");
 
                 ComPtr<IDXGIDevice> dxgiDevice;
                 ComPtr<IDXGIAdapter> adapter;
@@ -791,6 +913,33 @@ namespace rhi
                 m_cache = {};
                 if (gpuTiming())
                     m_timer.endFrame(*this);
+                drainDebugMessages();
+            }
+
+            // PS2X_RHI_DEBUG=1: the D3D11 debug layer's messages go to OutputDebugString only; print each kind once (by
+            // message ID, with how often it came) to the log as `[rhi] d3d11`
+            void drainDebugMessages()
+            {
+                if (!m_infoQueue)
+                    return;
+                const UINT64 n = m_infoQueue->GetNumStoredMessages();
+                for (UINT64 i = 0; i < n; ++i)
+                {
+                    SIZE_T size = 0;
+                    if (FAILED(m_infoQueue->GetMessage(i, nullptr, &size)) || !size)
+                        continue;
+                    std::vector<char> buf(size);
+                    auto *m = reinterpret_cast<D3D11_MESSAGE *>(buf.data());
+                    if (FAILED(m_infoQueue->GetMessage(i, m, &size)))
+                        continue;
+                    const uint64_t seen = ++m_debugMessagesSeen[static_cast<int>(m->ID)];
+                    if (seen == 1u || seen == 100u || seen == 10000u)
+                        std::fprintf(stderr, "[rhi] d3d11 %s #%d (%llu times): %.*s\n",
+                                     m->Severity <= D3D11_MESSAGE_SEVERITY_ERROR ? "error" : m->Severity == D3D11_MESSAGE_SEVERITY_WARNING ? "warning" : "info",
+                                     static_cast<int>(m->ID), static_cast<unsigned long long>(seen), static_cast<int>(m->DescriptionByteLength),
+                                     m->pDescription);
+                }
+                m_infoQueue->ClearStoredMessages();
             }
 
             // ---- Dear ImGui ---------------------------------------------------------------------------------------
@@ -954,6 +1103,8 @@ namespace rhi
             ComPtr<ID3D11Device> m_device;
             ComPtr<ID3D11DeviceContext> m_context;
             ComPtr<ID3DUserDefinedAnnotation> m_annotation;
+            ComPtr<ID3D11InfoQueue> m_infoQueue; // PS2X_RHI_DEBUG
+            std::unordered_map<int, uint64_t> m_debugMessagesSeen;
             ComPtr<IDXGISwapChain1> m_swapchain;
             ComPtr<ID3D11RenderTargetView> m_backRtv;
             UINT m_swapFlags = 0;
@@ -1016,5 +1167,13 @@ namespace rhi
         if (!device->create(desc, error))
             return nullptr;
         return device;
+    }
+
+    std::vector<Gpu> listD3D11Gpus()
+    {
+        std::vector<Gpu> gpus;
+        for (const Card &c : enumerateCards())
+            gpus.push_back(c.gpu);
+        return gpus;
     }
 }

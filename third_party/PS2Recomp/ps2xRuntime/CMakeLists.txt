@@ -356,6 +356,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_vif1_interpreter.cpp
     src/lib/ps2_render_worker.cpp
     src/lib/ps2_write_watch.cpp
+    src/lib/ps2_host_std.cpp
     src/lib/ps2_iop_native.cpp
     src/lib/vu/ps2_vu1_core.cpp
     src/lib/vu/ps2_vu1_upper.cpp

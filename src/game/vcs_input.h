@@ -25,6 +25,16 @@ namespace vcs::input
     // Stops any vibration now (the game paused in the background).
     void stopVibration();
 
+    // The device the player used last, for the button prompts (game/vcs_prompts.h): a bound key, a menu key or a mouse
+    // button pressed, or the mouse moved, against a gamepad button, or a stick / trigger past half way. Taken at the
+    // game's pad reads; the keyboard until the gamepad is used. Any thread.
+    enum class Device
+    {
+        Keyboard,
+        Gamepad,
+    };
+    Device lastDevice();
+
     // The free camera's controls (game/vcs_freecam.h; fixed keys, docs/CONTROLS.md), taken once per camera update on
     // the game thread. While the free camera flies the game's pad reads give it nothing, and the mouse is left for this.
     struct FreeCamInput

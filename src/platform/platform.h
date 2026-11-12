@@ -196,10 +196,23 @@ namespace platform
     bool keyDown(int key);
     bool keyPressed(int key); // main thread: went down at the last pumpEvents
     bool mouseDown(MouseButton button);
+    // The cursor in drawable pixels from the window's top-left (windowSize's units); false while it is not over the
+    // window, the mouse is captured or the window is hidden.
+    bool mousePosition(float &x, float &y);
     bool gamepadConnected();
     bool gamepadButton(GamepadButton button);
     float gamepadAxis(GamepadAxis axis);
     const char *gamepadName(); // "" without a gamepad (main thread)
+    // What kind of gamepad it is, from its maker's layout (any thread; None without one): the button prompts' glyphs.
+    enum class GamepadFamily : int
+    {
+        None,
+        Xbox,
+        PlayStation,
+        Nintendo,
+        Other,
+    };
+    GamepadFamily gamepadFamily();
     // Vibration, motors 0..1 (low = the large, slow motor; high = the small, fast one). Any thread; applied at the next
     // pumpEvents and held until changed (0, 0 stops).
     void gamepadRumble(float low, float high);

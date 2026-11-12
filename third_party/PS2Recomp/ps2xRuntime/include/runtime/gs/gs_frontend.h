@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "runtime/gs/gs_backend.h"
+#include "runtime/ps2_host_std.h"
 
 struct GSDebugSnapshot
 {
@@ -198,7 +199,7 @@ private:
     uint8_t *m_localMemoryStorage = nullptr;
     uint32_t m_localMemorySize = 0u;
     struct GSRegisters *m_privRegs = nullptr;
-    mutable std::recursive_mutex m_stateMutex;
+    mutable ps2x::RecursiveMutex m_stateMutex; // [gta-recomp] (runtime/ps2_host_std.h)
     GSGpuRenderer *m_gpu = nullptr; // [gta-recomp]
     bool m_gpuOnly = false;
     mutable std::mutex m_backendLifetimeMutex;

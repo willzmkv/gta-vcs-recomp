@@ -27,12 +27,14 @@ namespace vcs::aim
         constexpr uint32_t kFreeAimBit = 0x00080000u;
         constexpr uint32_t kForcedBit = 0x00200000u; // bit 53: a script's forced free aim (SET_PLAYER_FORCE_FREE_AIMING)
         constexpr uint32_t kEntityFlags = 0x48u;    // & 0xE: 6 ped, 8 object
+        constexpr uint32_t kPedAttachedTo = 0x858u; // the vehicle a script attached him to (ATTACH_CHAR_TO_CAR)
         // TheCamera and its CCams (game-internals.md 12b)
         constexpr uint32_t kTheCamera = 0x006F44D0u;
         constexpr uint32_t kActiveCam = kTheCamera + 0x50u;
         constexpr uint32_t kCams = kTheCamera + 0x70u, kCamSize = 0x270u;
         constexpr uint32_t kCamSource = 0x20u, kCamAlpha = 0x78u, kCamBeta = 0x7Cu;
         constexpr uint32_t kCamModeLockOn = 11;
+        constexpr uint32_t kCamModeMountedGun = 45; // first person behind a gun on a vehicle (VC's HELICANNON_1STPERSON)
         constexpr uint32_t kTimeStep = 0x004CD110u; // CTimer::ms_fTimeStep (1.0 = 1/50 s)
         // the camera's blend from one CCam to the next (game-internals.md 12c): a byte set while it runs, and its
         // durations in ms (400 into the lock-on / free-aim camera, 350 out of it)
@@ -80,6 +82,7 @@ namespace vcs::aim
                       // held: R1 up until it is let go or a gun is back in hand (then free aim again)
             Script,   // the game's own free aim a script started (a car's drive-by mode, the forced free aim on foot): the
                       // dummy is ours, no buttons
+            Mounted,  // a gun on a vehicle a script attached him to (Farewell To Arms' helicopter door): its camera is ours
         };
         // game thread
         State g_state = State::Idle;
@@ -136,6 +139,13 @@ namespace vcs::aim
         {
             return ped && freeAimBit(ped) && isObject(rd32(ped + kPedTarget)) &&
                    (rd32(ped + kPedVehicle) || (rd32(ped + kPedFreeAimWord) & kForcedBit));
+        }
+
+        // Attached to a vehicle by a script (ATTACH_CHAR_TO_CAR with a weapon) and behind its gun: Vic does not aim
+        // through the free aim there, the camera is the aim (game-internals.md 12c).
+        bool mountedGun(uint32_t ped)
+        {
+            return ped && rd32(ped + kPedAttachedTo) && (rd32(activeCam()) & 0xFFFFu) == kCamModeMountedGun;
         }
 
         float weaponRange(uint32_t ped)
@@ -390,6 +400,33 @@ namespace vcs::aim
             wrVec(ped + kPedAimPoint, at);
             return out;
         }
+
+        // A gun on a vehicle (game-internals.md 12c: Farewell To Arms puts Vic in its helicopter's door with an M249): the
+        // camera (mode 45, FUN_00297cb8) is the aim, its circle in the middle, and the left stick turns it - its heading
+        // (+0x7C) is the turn from the side Vic faces, signed, kept within the attachment's limit (70 deg there), its
+        // pitch within the script's. Here the mouse / right stick turn it instead (the left stick centred), the gamepad's
+        // R1 fires, as in a script's free aim; the camera's update keeps both in its limits.
+        Output mounted(uint32_t ped, const Input &in)
+        {
+            Output out;
+            if (g_state != State::Mounted)
+            {
+                if (g_state == State::Active)
+                    stop("a gun on a vehicle");
+                g_state = State::Mounted;
+                g_active = true;
+                std::fprintf(stderr, "[aim] a gun on a vehicle (attached to 0x%x)\n", rd32(ped + kPedAttachedTo));
+            }
+            out.camera = out.leftStick = out.padR1Fires = true;
+            const uint32_t cam = activeCam();
+            const float dt = std::clamp(rdf(kTimeStep), 0.05f, 3.4f) / 50.0f;
+            const float turn = in.turn + in.turnRate * kStickRate * dt;
+            const float tilt = in.tilt + in.tiltRate * kStickRate * dt;
+            // signed: wrapped into 0..2 pi a turn right of the middle became the limit on the left (the user's report)
+            wrf(cam + kCamBeta, std::remainder(rdf(cam + kCamBeta) + turn, 6.2831855f));
+            wrf(cam + kCamAlpha, rdf(cam + kCamAlpha) + tilt);
+            return out;
+        }
     }
 
     Output update(const Input &in)
@@ -400,9 +437,11 @@ namespace vcs::aim
             --g_handBack; // the camera hasn't come back to the follow camera in time: leave it
         if (in.on && scriptFreeAim(ped))
             return scripted(ped, in);
-        if (g_state == State::Script)
+        if (in.on && mountedGun(ped))
+            return mounted(ped, in);
+        if (g_state == State::Script || g_state == State::Mounted)
         {
-            std::fprintf(stderr, "[aim] the game's free aim off\n");
+            std::fprintf(stderr, g_state == State::Script ? "[aim] the game's free aim off\n" : "[aim] the gun on a vehicle off\n");
             g_state = State::Idle;
             g_active = false;
         }

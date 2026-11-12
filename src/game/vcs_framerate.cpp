@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
+#include "runtime/ps2_host_std.h"
 
 namespace vcs
 {
@@ -88,7 +89,7 @@ namespace vcs
         uint64_t hostNs()
         {
             return static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                std::chrono::duration_cast<std::chrono::nanoseconds>(ps2x::hostNow().time_since_epoch()).count());
         }
 
         // the cap in frames per second: display refresh and unlimited included, at most kMaxFps unless the floor is
@@ -194,6 +195,10 @@ namespace vcs
             g_origEnsure(rdram, ctx, runtime);
         }
 
+        void applyPresentRate();
+        // the cap applyPresentRate last gave the main loop, in mHz (fps x 1000)
+        std::atomic<int64_t> g_appliedFpsMilli{-1};
+
         // The end of a game frame in independent timing (the limiter's VBlank wait): present it, wait for the cap's
         // deadline on the host clock, bring the emulated clock up to real time, and end the limiter's wait.
         PS2_GUEST_CC void limiterWait(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -204,6 +209,11 @@ namespace vcs
             // for the next host frame: runtime/ps2_present.h); below it (30) the game's own deadline paces it
             static uint64_t deadline = 0;
             const double fps = effectiveFps();
+            // "Display refresh" read before there was a window (vcs.ini is applied before SDL starts: no display, so
+            // 60), or the window moved to a display with another rate: the main loop still ran at the old one, and the
+            // game with it (GitHub issue 64: 60 fps after every start until the cap was changed)
+            if (static_cast<int64_t>(fps * 1000.0) != g_appliedFpsMilli.load(std::memory_order_relaxed))
+                applyPresentRate();
             if (ps2WaitHostTick())
                 deadline = 0;
             else if (fps > 0.0 && !forcedStepFps())
@@ -327,6 +337,9 @@ namespace vcs
         void applyPresentRate()
         {
             const double fps = effectiveFps();
+            if (g_appliedFpsMilli.exchange(static_cast<int64_t>(fps * 1000.0), std::memory_order_relaxed) !=
+                static_cast<int64_t>(fps * 1000.0))
+                std::fprintf(stderr, "[framerate] cap %.2f fps (%s timing)\n", fps, independent() ? "independent" : "original");
             platform::setFrameRate(independent() ? (fps > 0.0 ? std::max(60.0, fps) : 1000.0) : 60.0);
             // the host runs at the cap: its frames can pace the game's (docs/PERFORMANCE.md 19)
             ps2SetHostPacedFrames(independent() && (fps <= 0.0 || fps >= 60.0) && !forcedStepFps());

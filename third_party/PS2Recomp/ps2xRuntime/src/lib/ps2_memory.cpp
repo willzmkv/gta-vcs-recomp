@@ -20,6 +20,7 @@
 #include "runtime/ps2_render_worker.h" // [gta-recomp]
 #include "runtime/ps2_chain_observer.h" // [gta-recomp]
 #include "runtime/ps2_write_watch.h"   // [gta-recomp]
+#include "runtime/ps2_host_std.h"
 
 namespace
 {
@@ -63,11 +64,11 @@ namespace
         };
         static std::map<std::string, Count> counts;
         static uint64_t chains = 0;
-        static auto last = std::chrono::steady_clock::now();
+        static auto last = ps2x::hostNow();
         if (chainStart)
         {
             ++chains;
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             if (now - last >= std::chrono::seconds(5) && chains > 1u)
             {
                 last = now;
@@ -2048,11 +2049,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         { // [gta-recomp] PS2X_DMA_HIST=1: VIF1 chain payload quadwords per 1 MB of guest RAM, every 5 s
                             static const bool hist = std::getenv("PS2X_DMA_HIST") != nullptr;
                             static uint64_t qwcByMb[32] = {};
-                            static auto last = std::chrono::steady_clock::now();
+                            static auto last = ps2x::hostNow();
                             if (hist && hasPayload && channelBase == 0x10009000u)
                             {
                                 qwcByMb[(dataAddr >> 20) & 31u] += tagQwc;
-                                const auto now = std::chrono::steady_clock::now();
+                                const auto now = ps2x::hostNow();
                                 if (now - last > std::chrono::seconds(5))
                                 {
                                     last = now;
@@ -2089,13 +2090,13 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     {
                         static int maxTags = 0, chains = 0;
                         static uint64_t sumTags = 0;
-                        static auto lastTags = std::chrono::steady_clock::now();
+                        static auto lastTags = ps2x::hostNow();
                         maxTags = std::max(maxTags, tagsProcessed);
                         sumTags += static_cast<uint64_t>(tagsProcessed);
                         ++chains;
-                        if (std::chrono::steady_clock::now() - lastTags > std::chrono::seconds(5))
+                        if (ps2x::hostNow() - lastTags > std::chrono::seconds(5))
                         {
-                            lastTags = std::chrono::steady_clock::now();
+                            lastTags = ps2x::hostNow();
                             std::fprintf(stderr, "[dma-tags] %d VIF1 chains, avg %llu tags, max %d\n", chains,
                                          static_cast<unsigned long long>(sumTags / std::max(chains, 1)), maxTags);
                             maxTags = chains = 0;

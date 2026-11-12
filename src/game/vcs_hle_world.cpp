@@ -30,6 +30,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "runtime/ps2_host_std.h"
 
 namespace
 {
@@ -545,7 +546,7 @@ namespace
         uint64_t envClipped = 0;           // ... of them through the clipper
     } g_stats;
 
-    auto g_reportAt = std::chrono::steady_clock::now();
+    auto g_reportAt = ps2x::hostNow();
 
     void report()
     {
@@ -1818,10 +1819,10 @@ namespace
                              g_pred.clipPackets.size(), vu.size(), memOk ? "ok" : "off");
             }
         }
-        static auto reportAt = std::chrono::steady_clock::now();
-        if (std::chrono::steady_clock::now() - reportAt >= std::chrono::seconds(10))
+        static auto reportAt = ps2x::hostNow();
+        if (ps2x::hostNow() - reportAt >= std::chrono::seconds(10))
         {
-            reportAt = std::chrono::steady_clock::now();
+            reportAt = ps2x::hostNow();
             std::fprintf(stderr, "[hle-verify] 0x02c0 re-draws: %llu exact, %llu memory off, %llu kicks off (shine: %llu clipped, %llu culled)\n",
                          (unsigned long long)g_redraw.exact, (unsigned long long)g_redraw.memBad, (unsigned long long)g_redraw.kicksBad,
                          (unsigned long long)g_redraw.shineClipped, (unsigned long long)g_redraw.shineCulled);
@@ -1906,7 +1907,7 @@ namespace
             else
                 ++s.fastBad;
         }
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - g_reportAt >= std::chrono::seconds(10))
         {
             g_reportAt = now;
@@ -1954,7 +1955,7 @@ namespace
             if (stats)
             {
                 static std::map<std::string, uint64_t> missed;
-                static auto at = std::chrono::steady_clock::now();
+                static auto at = ps2x::hostNow();
                 const IVec4 t38 = loadI(c.vuData, 38), t39 = loadI(c.vuData, 39), t40 = loadI(c.vuData, 40), t41 = loadI(c.vuData, 41),
                             t52 = loadI(c.vuData, 52);
                 char key[160];
@@ -1964,9 +1965,9 @@ namespace
                               t41.v[1] & 0xFFFF, t41.v[2] & 0xFFFF, t41.v[3] & 0xFFFF, t52.v[0] & 0xFFFF,
                               worldCodeResident(c.vuCode, c.codeGeneration) ? 1 : 0);
                 ++missed[key];
-                if (std::chrono::steady_clock::now() - at > std::chrono::seconds(10))
+                if (ps2x::hostNow() - at > std::chrono::seconds(10))
                 {
-                    at = std::chrono::steady_clock::now();
+                    at = ps2x::hostNow();
                     for (const auto &[k, n] : missed)
                         if (n > 100)
                             std::fprintf(stderr, "[hle-stats] passed over %8llu x %s\n", (unsigned long long)n, k.c_str());
@@ -2131,7 +2132,7 @@ namespace
         std::memcpy(vu + 52u * 16u + 8u, &variant, 4);
         (clipped ? g_native.clipped : g_native.drawn) += 1;
         g_native.vertices += nloop;
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - g_reportAt >= std::chrono::seconds(10))
         {
             g_reportAt = now;
@@ -2698,16 +2699,30 @@ namespace
             ++g_nativeEnv.clipped;
             return true;
         }
-        if (!envKicks(vu, c.top, kicks) || !drawNativeRigid(c))
+        // Pass 1 goes out as the reproduction's own kick (tag 49), like pass 2: both from the same VU-exact XYZF2, so pass
+        // 2's depth test (GEQUAL) passes over pass 1 everywhere, as on the PS2. Pass 1 drawn natively (the GPU's own
+        // transform; PS2X_HLE_ENV_PASS1=native, as until 2026-11-06) puts some vertices a Z unit or 1/16 pixel off: the
+        // reflection failed its depth test in bands - diagonal stripes and moiré on car paint that crawled with the camera
+        // (game-internals.md 6g)
+        static const bool nativePass1 = [] {
+            const char *e = std::getenv("PS2X_HLE_ENV_PASS1");
+            return e && std::strcmp(e, "native") == 0;
+        }();
+        if (!envKicks(vu, c.top, kicks) || (nativePass1 && !drawNativeRigid(c)))
         {
             ++g_nativeEnv.fallback;
             return false;
+        }
+        if (!nativePass1)
+        {
+            const int32_t variant = 698; // what drawNativeRigid leaves at 52.z for an unclipped packet (the VU's own write)
+            std::memcpy(vu + 52u * 16u + 8u, &variant, 4);
         }
         const int rounding = sseRounding();
         setSseRounding(g_callerRounding);
         gsSetPath1Producer(c.startPc, true); // draw sources: a C++ reproduction sends these
         gsSetCurrentGifPath(1u);
-        for (size_t i = 1; i < kicks.size(); ++i)
+        for (size_t i = nativePass1 ? 1 : 0; i < kicks.size(); ++i)
             sendKick(kicks[i]);
         gsSetCurrentGifPath(3u);
         setSseRounding(rounding);
@@ -3165,10 +3180,10 @@ namespace
                 std::fprintf(stderr, "[hle-verify] setup 0x%04x differs: kicks %s (%zu), %u qwords off from %u\n", c.startPc,
                              kicksOk ? "ok" : "off", g_pred.vuKicks.size(), bad, firstBad);
         }
-        static auto reportAt = std::chrono::steady_clock::now();
-        if (std::chrono::steady_clock::now() - reportAt >= std::chrono::seconds(10))
+        static auto reportAt = ps2x::hostNow();
+        if (ps2x::hostNow() - reportAt >= std::chrono::seconds(10))
         {
-            reportAt = std::chrono::steady_clock::now();
+            reportAt = ps2x::hostNow();
             std::fprintf(stderr, "[hle-verify] setup programs: %llu exact, %llu memory off, %llu kicks off\n",
                          (unsigned long long)g_setup.exact, (unsigned long long)g_setup.memBad, (unsigned long long)g_setup.kicksBad);
         }
@@ -3254,7 +3269,7 @@ namespace
         if (stats && !handled && (c.startPc == 0x30u || c.startPc == 0x2C0u))
         {
             static std::map<std::string, uint64_t> unhandled;
-            static auto reportAt = std::chrono::steady_clock::now();
+            static auto reportAt = ps2x::hostNow();
             char key[256];
             const IVec4 t38 = loadI(c.vuData, 38), t39 = loadI(c.vuData, 39), t40 = loadI(c.vuData, 40), t41 = loadI(c.vuData, 41);
             int len = 0;
@@ -3289,9 +3304,9 @@ namespace
                     std::fclose(f);
                 }
             }
-            if (std::chrono::steady_clock::now() - reportAt >= std::chrono::seconds(10))
+            if (ps2x::hostNow() - reportAt >= std::chrono::seconds(10))
             {
-                reportAt = std::chrono::steady_clock::now();
+                reportAt = ps2x::hostNow();
                 for (const auto &[k, n] : unhandled)
                     std::fprintf(stderr, "[hle] on the VU1: %8llu x %s\n", (unsigned long long)n, k.c_str());
             }

@@ -38,6 +38,22 @@ namespace screens
                 app.updateInfo = launcher::Json::parse(R"({"newer": true, "latest": "0.0.4", "url": "https://github.com"})");
                 return;
             }
+            if (demo == "updated") // an update put in place: Restart / Later
+            {
+                app.task = std::make_unique<launcher::Task>();
+                launcher::Task &t = *app.task;
+                const double now = ui::state.wall;
+                t.kind = "update";
+                t.title = "Updating";
+                t.stages = {{"download", "Downloading the new release", now - 40, now - 6},
+                            {"apply", "Putting the new release in place", now - 6, now}};
+                t.startTime = now - 40;
+                t.endTime = now;
+                t.finished = true;
+                t.result = launcher::Json::parse(R"({"result": "ok", "version": "0.2.1", "restart": true})");
+                app.updatedTo = "0.2.1";
+                return;
+            }
             if (demo == "stale")
                 return; // Home reads it: the build out of date
             if (demo == "gameerror")
@@ -409,6 +425,20 @@ namespace screens
             platform::minimize();
             shell.minimizedForGame = true;
         }
+    }
+
+    void restartLauncher(App &app)
+    {
+        if (shell.options.screenshot)
+            return;
+        std::string error;
+        if (!app.restart(error))
+        {
+            toast("Could not start the new launcher: " + error + ". Close this one and start it again.", theme::kRed);
+            return;
+        }
+        app.dismissTask();
+        shell.quitNow = true; // the new one waits for this one to end
     }
 
     void openSheet(Sheet sheet)

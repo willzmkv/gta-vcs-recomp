@@ -46,7 +46,7 @@ def read_anchors(log):
 def check(out, port=None):
     os.makedirs(out, exist_ok=True)
     env = {"VCS_ASPECT": "169", "VCS_HUD": "2", "VCS_TRACE_HUDANCHOR": "100000", "VCS_TRACE_IM2D_DELAY": "0"}
-    g = rig.Game.start(save=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"), name="hud_check", port=port,
+    g = rig.Game.start(save=rig.default_save(), name="hud_check", port=port,
                        env=env)
     try:
         g.wait_ingame()

@@ -52,7 +52,7 @@ def main():
     a = ap.parse_args()
     out = os.path.abspath(a.out or os.path.join(ROOT, "build", "soak", time.strftime("%Y%m%d-%H%M%S")))
     os.makedirs(out, exist_ok=True)
-    g = rig.Game.start(save=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"), name="soak",
+    g = rig.Game.start(save=rig.default_save(), name="soak",
                        seconds=a.hours * 3600 + 600, data_dir=os.path.join(out, "data"), port=a.port)
     pid = game_pid(g.proc.pid)
     rows, events = [], []

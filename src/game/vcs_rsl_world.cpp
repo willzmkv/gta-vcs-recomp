@@ -21,9 +21,11 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <utility>
 #include <vector>
+#include "runtime/ps2_host_std.h"
 
 namespace vcs::rslworld
 {
@@ -125,13 +127,17 @@ namespace vcs::rslworld
             std::vector<RefOp> refs;        // step 5b: the items' reference ops, by Item::refAt
             uint32_t chainBytes = 0;        // the copied chain's size
             uint32_t itemFrame = 0;         // the frame whose items these are (g_itemFrame)
+            uint32_t withdrawn = 0;         // the worker's latest batch of withdrawn confirmations this kick had applied
         };
         uint64_t g_chainSeq = 0; // game thread
 
         // step 4: the worker's word that a block's recording matches a copy (recording key, the chain it was in) - handed
-        // over at the end of each chain, read by the game thread at the next kick
+        // over at the end of each chain, read by the game thread at the next kick. A chain of kWithdrawn takes the word
+        // back: the recording is about to be dropped (trimRecordings), so the block must be copied again.
+        constexpr uint64_t kWithdrawn = ~0ull;
         std::mutex g_confirmMutex;
         std::vector<std::pair<uint64_t, uint64_t>> g_confirmPending;
+        uint32_t g_withdrawPosted = 0; // the latest batch of withdrawals in g_confirmPending (under g_confirmMutex)
         thread_local std::vector<std::pair<uint64_t, uint64_t>> t_confirm;
         std::atomic<uint64_t> g_skipped{0}, g_skipReplayed{0}, g_skipFallback{0};
         std::atomic<uint64_t> g_skipVerifySame{0}, g_skipVerifyDiffer{0};
@@ -217,7 +223,10 @@ namespace vcs::rslworld
             std::vector<Op> ops;
             bool setsMask = false, setsRow = false, setsCycle = false; // the block's STMASK / STROW / STCYCL
             uint32_t mask = 0, row[4] = {}, finalCycle = 0;             // the VIF mask / row / cycle it leaves
-            uint64_t used = 0; // g_recordingClock when last met (the oldest go first: evictRecordings)
+            // the memory bound (trimRecordings): the chain that last used it, the bytes it holds, and the batch it is
+            // being dropped with (0: none)
+            uint64_t lastUsed = 0;
+            uint32_t bytes = 0, dying = 0;
         };
 
         bool rawOps() // step 5e: VCS_RSL_RAW=0 refuses blocks with BASE / OFFSET / ITOP / MPG as before
@@ -339,40 +348,154 @@ namespace vcs::rslworld
         };
 
         std::unordered_map<uint64_t, Recording> g_recordings; // by (kind, address, length)
-        // Recordings are dropped once they are many, the least recently met first: they were never dropped, and blocks
-        // that move (the HD world's sector packets in their heap, 2026-11-12) left one behind per address - 28,000 in a
-        // 5-minute loop of the cruise route, ~32 KB each, 180 MB a minute; a 3-hour soak reached 6 GB and stopped. A
-        // dropped one is met again as "no recording": recorded anew (replaySkipped flattens the block from guest RAM).
-        constexpr size_t kMaxRecordings = 16384;
-        uint64_t g_recordingClock = 0, g_recordingsEvicted = 0;
 
-        void evictRecordings()
+        // ---- the recordings' memory (GitHub issue 115; PERFORMANCE.md 31) ---------------------------------------------
+        // The keys never stop coming: the game streams a model back in at another address and builds its own packets at
+        // other places in its buffer, and every (address, length) is a recording of its own - 2.3 GB an hour on a route
+        // across the map. So the least recently used ones go once the recordings hold more than VCS_RSL_RECORDINGS_MB
+        // (256; 0: no bound, as before).
+        //
+        // Dropping one takes two steps. The game thread may have decided - or may yet decide, from the confirmation it
+        // holds - to send the block without its bytes (step 4), and the worker would then have to read them from guest
+        // RAM while the game thread runs on. So first the confirmation is withdrawn (kWithdrawn in g_confirmPending); the
+        // game thread applies it at its next kick and names the batch in that chain's table. No chain from that one on
+        // skips the block unless the worker confirmed it again - which is a use, and a use keeps the recording
+        // (dying = 0). At the end of that chain the ones still dying are erased.
+        size_t g_recordingBytes = 0;   // what the recordings hold (the sum of Recording::bytes)
+        std::vector<uint64_t> g_dying; // the batch being withdrawn (one at a time)
+        uint32_t g_dyingBatch = 0;
+        uint64_t g_sweepAfter = 0;     // no sweep before this chain (the last one found too little to drop)
+        uint64_t g_evicted = 0, g_evictedBytes = 0, g_rescued = 0, g_sweeps = 0; // for the log
+        double g_sweepMaxMs = 0.0, g_trimMaxMs = 0.0; // the slowest choice of a batch / slice of erasing (VCS_RSL_WORLD_LOG)
+        double g_eraseMaxMs = 0.0;                    // the slowest single recording freed, its ops and bytes
+        size_t g_eraseMaxOps = 0;
+        uint32_t g_eraseMaxBytes = 0;
+        // VCS_RSL_WORLD_LOG: the dropped keys, to count those recorded again later (what the limit costs)
+        std::unordered_set<uint64_t> g_droppedKeys;
+        uint64_t g_returned = 0;
+        std::atomic<size_t> g_snapshotCount{0}, g_flatOkCount{0};                 // the game thread's maps, for the log
+
+        size_t recordingBudget()
         {
-            if (g_recordings.size() <= kMaxRecordings)
-                return;
-            std::vector<uint64_t> ages;
-            ages.reserve(g_recordings.size());
-            for (const auto &[key, rec] : g_recordings)
-                ages.push_back(rec.used);
-            auto mid = ages.begin() + ptrdiff_t(ages.size() / 2);
-            std::nth_element(ages.begin(), mid, ages.end());
-            const uint64_t cut = *mid;
-            for (auto it = g_recordings.begin(); it != g_recordings.end();)
-                if (it->second.used < cut)
-                {
-                    it = g_recordings.erase(it);
-                    ++g_recordingsEvicted;
-                }
-                else
-                    ++it;
+            static const size_t bytes = [] {
+                const char *e = std::getenv("VCS_RSL_RECORDINGS_MB");
+                return size_t(e && *e ? std::strtoull(e, nullptr, 10) : 256u) << 20;
+            }();
+            return bytes;
         }
+
+        // a recording's bytes: its ops with their data and meshes, itself and its place in the map - each allocation as
+        // the heap holds it (a header, sizes in steps of 16)
+        void account(Recording &rec)
+        {
+            const auto heap = [](size_t bytes) { return bytes ? ((bytes + 15u) & ~size_t(15)) + 16u : size_t(0); };
+            size_t n = heap(sizeof(Recording) + 32u) + heap(rec.ops.capacity() * sizeof(Op));
+            for (const Op &op : rec.ops)
+                n += heap(op.data.capacity()) + heap(op.mesh.vertices.capacity());
+            const uint32_t now = static_cast<uint32_t>(std::min<size_t>(n, 0xFFFFFFFFu));
+            g_recordingBytes += now;
+            g_recordingBytes -= rec.bytes;
+            rec.bytes = now;
+        }
+
+        // the end of a chain (the processing thread): `seq` its kick, `withdrawn` the batch its kick had applied
+        void trimRecordings(uint64_t seq, uint32_t withdrawn)
+        {
+            if (!g_dying.empty() && withdrawn >= g_dyingBatch)
+            {
+                // a slice per chain, by the clock: a sweep's recordings are thousands, and one with hundreds of ops is as
+                // many frees - 256 of them at once took up to 10 ms (quick build)
+                constexpr auto kSlice = std::chrono::microseconds(200);
+                const auto t0 = ps2x::hostNow();
+                for (auto now = t0; !g_dying.empty() && now - t0 < kSlice; now = ps2x::hostNow())
+                {
+                    const auto it = g_recordings.find(g_dying.back());
+                    g_dying.pop_back();
+                    if (it == g_recordings.end())
+                        continue;
+                    if (it->second.dying != g_dyingBatch)
+                    {
+                        ++g_rescued; // used since: it stays (and is confirmed again)
+                        continue;
+                    }
+                    g_recordingBytes -= it->second.bytes;
+                    g_evictedBytes += it->second.bytes;
+                    ++g_evicted;
+                    if (!g_log)
+                    {
+                        g_recordings.erase(it);
+                        continue;
+                    }
+                    if (g_droppedKeys.size() >= (1u << 20))
+                        g_droppedKeys.clear();
+                    g_droppedKeys.insert(it->first);
+                    const size_t ops = it->second.ops.size();
+                    const uint32_t bytes = it->second.bytes;
+                    const auto e0 = ps2x::hostNow();
+                    g_recordings.erase(it);
+                    const double ms = std::chrono::duration<double, std::milli>(ps2x::hostNow() - e0).count();
+                    if (ms > g_eraseMaxMs)
+                    {
+                        g_eraseMaxMs = ms;
+                        g_eraseMaxOps = ops;
+                        g_eraseMaxBytes = bytes;
+                    }
+                }
+                if (g_log)
+                    g_trimMaxMs = std::max(g_trimMaxMs, std::chrono::duration<double, std::milli>(ps2x::hostNow() - t0).count());
+            }
+            const size_t budget = recordingBudget();
+            if (!budget || g_recordingBytes <= budget || !g_dying.empty() || seq < g_sweepAfter)
+                return;
+            const auto t0 = g_log ? ps2x::hostNow() : std::chrono::steady_clock::time_point{};
+            struct Timed
+            {
+                std::chrono::steady_clock::time_point t0;
+                ~Timed()
+                {
+                    if (g_log)
+                        g_sweepMaxMs = std::max(g_sweepMaxMs, std::chrono::duration<double, std::milli>(ps2x::hostNow() - t0).count());
+                }
+            } timed{t0};
+            // least recently used first, down to three quarters of the budget - but none used in the last kKeepChains: a
+            // budget smaller than what one place needs must not drop and record the same blocks frame after frame
+            constexpr uint64_t kKeepChains = 120;
+            thread_local std::vector<std::pair<uint64_t, uint64_t>> order; // last use, key
+            order.clear();
+            for (const auto &[key, rec] : g_recordings)
+                if (rec.lastUsed + kKeepChains < seq)
+                    order.push_back({rec.lastUsed, key});
+            std::sort(order.begin(), order.end());
+            const size_t target = budget - budget / 4u;
+            size_t held = g_recordingBytes;
+            for (const auto &[used, key] : order)
+            {
+                if (held <= target)
+                    break;
+                held -= g_recordings.find(key)->second.bytes;
+                g_dying.push_back(key);
+            }
+            ++g_sweeps;
+            if (held > budget)
+                g_sweepAfter = seq + kKeepChains; // still over it: look again later, not at every chain
+            if (g_dying.empty())
+                return;
+            ++g_dyingBatch;
+            for (const uint64_t key : g_dying)
+                g_recordings.find(key)->second.dying = g_dyingBatch;
+            std::lock_guard<std::mutex> lock(g_confirmMutex);
+            for (const uint64_t key : g_dying)
+                g_confirmPending.push_back({key, kWithdrawn});
+            g_withdrawPosted = g_dyingBatch;
+        }
+
         struct Stats
         {
             uint64_t blocks = 0, replayed = 0, recorded = 0, notReplayable = 0, changing = 0;
         } g_stats[KindCount];
         uint64_t g_packets = 0, g_verifySame = 0, g_verifyDiffer = 0, g_unmarked = 0, g_rasterMarks = 0;
         std::map<const char *, uint64_t> g_refusals;
-        auto g_reportAt = std::chrono::steady_clock::now();
+        auto g_reportAt = ps2x::hostNow();
 
         uint64_t hashBlock(const uint8_t *p, uint32_t bytes)
         {
@@ -534,7 +657,7 @@ namespace vcs::rslworld
 
         void report()
         {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             if (!g_log || now - g_reportAt < std::chrono::seconds(10))
                 return;
             g_reportAt = now;
@@ -547,9 +670,16 @@ namespace vcs::rslworld
                                  (unsigned long long)s.notReplayable, (unsigned long long)s.changing);
                 g_stats[k] = Stats{};
             }
-            std::fprintf(stderr, "[rsl-world] %llu packets replayed, %llu marks without a length, %llu raster uploads named; %zu recordings (%llu dropped)\n",
-                         (unsigned long long)g_packets, (unsigned long long)g_unmarked, (unsigned long long)g_rasterMarks, g_recordings.size(),
-                         (unsigned long long)g_recordingsEvicted);
+            std::fprintf(stderr, "[rsl-world] %llu packets replayed, %llu marks without a length, %llu raster uploads named; %zu recordings\n",
+                         (unsigned long long)g_packets, (unsigned long long)g_unmarked, (unsigned long long)g_rasterMarks, g_recordings.size());
+            // the bound (issue 115): totals since the start, not per report
+            std::fprintf(stderr, "[rsl-world] memory: recordings hold %.1f MB (limit %zu MB); dropped %llu (%.1f MB) in %llu sweeps, "
+                                 "%llu of them recorded again later, %llu kept for being used in time; slowest sweep %.2f ms, slice "
+                                 "%.2f ms, single recording %.2f ms (%zu ops, %u KB); game thread: %zu snapshots, %zu flattenable\n",
+                         g_recordingBytes / 1048576.0, recordingBudget() >> 20, (unsigned long long)g_evicted, g_evictedBytes / 1048576.0,
+                         (unsigned long long)g_sweeps, (unsigned long long)g_returned, (unsigned long long)g_rescued, g_sweepMaxMs,
+                         g_trimMaxMs, g_eraseMaxMs, g_eraseMaxOps, g_eraseMaxBytes >> 10,
+                         g_snapshotCount.load(std::memory_order_relaxed), g_flatOkCount.load(std::memory_order_relaxed));
             if (!g_refusals.empty())
             {
                 std::fprintf(stderr, "[rsl-world] not replayable:");
@@ -652,9 +782,10 @@ namespace vcs::rslworld
             if (it != g_recordings.end())
             {
                 Recording &rec = it->second;
-                rec.used = ++g_recordingClock;
                 if (!rec.ops.empty() && rec.replayable && rec.mode == memory.vif1_regs.mode && rec.cycle == memory.vif1_regs.cycle)
                 {
+                    rec.lastUsed = seq;
+                    rec.dying = 0; // (a chain from before its withdrawal reached the game thread: confirmed again below)
                     replay(memory, rec);
                     ++g_stats[d.kind].blocks;
                     ++g_stats[d.kind].replayed;
@@ -811,9 +942,12 @@ namespace vcs::rslworld
             }
             Stats &stats = g_stats[d.kind];
             ++stats.blocks;
-            evictRecordings(); // (before the reference below: erasing moves nothing, but not the one about to be used)
             Recording &rec = g_recordings[(uint64_t(d.kind) << 56) | (uint64_t(d.addr & kRamMask) << 24) | units];
-            rec.used = ++g_recordingClock;
+            if (g_log && !rec.lastUsed && !g_droppedKeys.empty() &&
+                g_droppedKeys.erase((uint64_t(d.kind) << 56) | (uint64_t(d.addr & kRamMask) << 24) | units))
+                ++g_returned; // a key dropped for the memory limit, here again
+            rec.lastUsed = seq;
+            rec.dying = 0;
             if (rec.skip && !g_verify)
             {
                 --rec.skip;
@@ -870,6 +1004,7 @@ namespace vcs::rslworld
                 rec.probe = false;
                 rec.hash = hash;
                 record(memory, bytes, size, rec);
+                account(rec);
                 ++stats.recorded;
                 if (rec.replayable)
                     t_confirm.push_back({key, seq});
@@ -898,14 +1033,50 @@ namespace vcs::rslworld
             bool usable = false;                                // only RAM pages, all seen
             uint32_t units = 0;                                 // its length as copied (8-byte units)
             uint64_t stableSince = 0;                           // the copy (g_chainSeq) since which its pages are unchanged
+            uint64_t seen = 0;                                  // the chain that last asked for it (trimSnapshots)
         };
         // [perf] Open addressing for the two maps the skip test reads per marked block (~2,000 a frame): a probe in one
         // array instead of std::unordered_map's bucket list (rslworld's `skippable` was 2.4% of the game thread,
-        // PERFORMANCE.md 23). Only lookups and inserts (nothing is erased); a key of ~0 is never used (kind << 56).
+        // PERFORMANCE.md 23). A key of ~0 is never used (kind << 56). Erasing (the memory bound, issue 115) moves the
+        // rest of the run back, so there are no tombstones to probe past.
         template <typename V>
         class FlatMap
         {
         public:
+            size_t size() const { return m_count; }
+            void erase(uint64_t key)
+            {
+                if (m_keys.empty())
+                    return;
+                size_t i = slot(key);
+                for (;; i = (i + 1) & m_mask)
+                {
+                    if (m_keys[i] == kEmpty)
+                        return;
+                    if (m_keys[i] == key)
+                        break;
+                }
+                for (size_t j = (i + 1) & m_mask; m_keys[j] != kEmpty; j = (j + 1) & m_mask)
+                {
+                    // the entry at j may move into the hole at i when its own slot is not after i on the way to j
+                    if (((j - slot(m_keys[j])) & m_mask) >= ((j - i) & m_mask))
+                    {
+                        m_keys[i] = m_keys[j];
+                        m_values[i] = std::move(m_values[j]);
+                        i = j;
+                    }
+                }
+                m_keys[i] = kEmpty;
+                m_values[i] = V{};
+                --m_count;
+            }
+            template <typename F>
+            void forEach(F &&f) const
+            {
+                for (size_t i = 0; i < m_keys.size(); ++i)
+                    if (m_keys[i] != kEmpty)
+                        f(m_keys[i], m_values[i]);
+            }
             V *find(uint64_t key)
             {
                 if (m_keys.empty())
@@ -984,8 +1155,11 @@ namespace vcs::rslworld
             static const unsigned kinds = std::getenv("VCS_RSL_SKIP_KINDS") ? unsigned(std::strtoul(std::getenv("VCS_RSL_SKIP_KINDS"), nullptr, 0)) : 0xFu;
             if (!g_skip || !((kinds >> kind) & 1u))
                 return false;
-            const PageSnapshot *snap = g_snapshots.find(snapshotKey);
-            if (!snap || !unchanged(*snap))
+            PageSnapshot *snap = g_snapshots.find(snapshotKey);
+            if (!snap)
+                return false;
+            snap->seen = g_chainSeq;
+            if (!unchanged(*snap))
                 return false;
             const uint64_t *c = g_confirmed.find(recordingKey(kind, addr, snap->units));
             if (!c || *c < snap->stableSince)
@@ -1033,6 +1207,7 @@ namespace vcs::rslworld
                 ++g_cleanStats.unseen;
             if (!clean)
                 snap.stableSince = g_chainSeq; // this copy is the first of the bytes it holds now
+            snap.seen = g_chainSeq;
             snap.units = units;
             std::sort(pages.begin(), pages.end());
             pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
@@ -2079,6 +2254,36 @@ namespace vcs::rslworld
             }
         }
 
+        // The game thread's side of the memory bound (issue 115): a snapshot for every block address ever copied, and
+        // the note that a model's block may be an item, go when no chain asked for them for a while. A block that comes
+        // back after that is copied once and drawn by the packet path once, as on its first frame. At a kick, before
+        // the items are resolved.
+        size_t g_snapshotLimit = 16384;
+        void trimSnapshots()
+        {
+            if (g_log)
+            {
+                g_snapshotCount.store(g_snapshots.size(), std::memory_order_relaxed);
+                g_flatOkCount.store(g_flatOk.size(), std::memory_order_relaxed);
+            }
+            if (!recordingBudget() || g_snapshots.size() <= g_snapshotLimit)
+                return;
+            constexpr uint64_t kKeepChains = 1800;
+            thread_local std::vector<uint64_t> gone;
+            gone.clear();
+            g_snapshots.forEach([](uint64_t key, const PageSnapshot &snap) {
+                if (snap.seen + kKeepChains < g_chainSeq)
+                    gone.push_back(key);
+            });
+            for (const uint64_t key : gone)
+            {
+                g_snapshots.erase(key);
+                g_flatOk.erase(key); // (the same key: blockKey)
+            }
+            if (g_snapshots.size() > g_snapshotLimit / 2u)
+                g_snapshotLimit *= 2u; // that many are in use: look again at twice as many
+        }
+
         // a model block the walker copied (the packet path): may later draws of it be items?
         void noteFlattenable(uint64_t key, uint32_t units)
         {
@@ -2503,7 +2708,7 @@ namespace vcs::rslworld
         };
         std::map<std::string, CensusRow> g_census;
         uint64_t g_censusChains = 0;
-        auto g_censusAt = std::chrono::steady_clock::now();
+        auto g_censusAt = ps2x::hostNow();
 
         void census(uint32_t tagAddr, uint32_t id, uint32_t dataAddr, uint32_t qwc, uint64_t vifCodes, bool chainStart)
         {
@@ -2517,7 +2722,7 @@ namespace vcs::rslworld
                                      [](const Origin &x, const Origin &y) { return x.cursor < y.cursor; });
                 }
                 ++g_censusChains;
-                const auto now = std::chrono::steady_clock::now();
+                const auto now = ps2x::hostNow();
                 if (now - g_censusAt > std::chrono::seconds(5) && g_censusChains > 1)
                 {
                     g_censusAt = now;
@@ -2594,20 +2799,27 @@ namespace vcs::rslworld
             }
             if (chainStart)
             {
-                g_chainStartAt = std::chrono::steady_clock::now();
+                g_chainStartAt = ps2x::hostNow();
                 g_chainResolveMs = 0.0;
                 g_building = ChainTable{};
                 g_building.seq = ++g_chainSeq;
                 g_openBlock.open = false;
                 {
                     std::lock_guard<std::mutex> lock(g_confirmMutex); // the worker's confirmations since the last kick
-                    for (const auto &[key, seq] : g_confirmPending)
+                    for (const auto &[key, seq] : g_confirmPending) // (in the worker's order: a use after a withdrawal counts)
                     {
+                        if (seq == kWithdrawn) // its recording is being dropped: copied again from this chain on
+                        {
+                            g_confirmed.erase(key);
+                            continue;
+                        }
                         uint64_t &c = g_confirmed[key];
                         c = std::max(c, seq);
                     }
                     g_confirmPending.clear();
+                    g_building.withdrawn = g_withdrawPosted;
                 }
+                trimSnapshots();
                 if (!g_itemsKicked.empty()) // step 4c: the kicked frame's items (the fold has run: the walk starts after it)
                 {
                     g_building.items = std::move(g_itemsKicked);
@@ -2617,9 +2829,9 @@ namespace vcs::rslworld
                     g_building.itemFrame = g_itemFrameKicked;
                     g_itemsKicked.clear();
                     g_arenaKicked.clear();
-                    const auto t0 = std::chrono::steady_clock::now();
+                    const auto t0 = ps2x::hostNow();
                     resolveItems(g_building);
-                    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                    const double ms = std::chrono::duration<double, std::milli>(ps2x::hostNow() - t0).count();
                     g_chainResolveMs = ms;
                     static const bool slowLog = std::getenv("VCS_RSL_SLOW_LOG") != nullptr;
                     if (slowLog && ms > 3.0)
@@ -2749,7 +2961,7 @@ namespace vcs::rslworld
         {
             if (g_chainStartAt != std::chrono::steady_clock::time_point{})
             {
-                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g_chainStartAt).count();
+                const double ms = std::chrono::duration<double, std::milli>(ps2x::hostNow() - g_chainStartAt).count();
                 ++g_kickTime.chains;
                 g_kickTime.ms += ms;
                 g_kickTime.resolveMs += g_chainResolveMs;
@@ -2774,7 +2986,7 @@ namespace vcs::rslworld
             static const bool slowLog = std::getenv("VCS_RSL_SLOW_LOG") != nullptr;
             if (slowLog && !begin)
             {
-                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_chainStart).count();
+                const double ms = std::chrono::duration<double, std::milli>(ps2x::hostNow() - t_chainStart).count();
                 if (ms > 15.0)
                     std::fprintf(stderr, "[rsl-slow] chain processed in %.1f ms: %zu items, arena %zu KB, %zu refs\n", ms,
                                  t_table ? t_table->items.size() : size_t(0), t_table ? t_table->arena.size() >> 10 : size_t(0),
@@ -2782,6 +2994,9 @@ namespace vcs::rslworld
             }
             if (!begin)
             {
+                const bool hadTable = static_cast<bool>(t_table);
+                const uint64_t seq = hadTable ? t_table->seq : 0;
+                const uint32_t withdrawn = hadTable ? t_table->withdrawn : 0;
                 if (t_table && t_table.use_count() == 1 && (t_table->arena.capacity() || t_table->items.capacity()))
                 {
                     std::lock_guard<std::mutex> lock(g_poolMutex); // step 4c: the arena and the item list for a later frame
@@ -2798,11 +3013,13 @@ namespace vcs::rslworld
                     g_confirmPending.insert(g_confirmPending.end(), t_confirm.begin(), t_confirm.end());
                     t_confirm.clear();
                 }
+                if (hadTable) // (a chain without marked blocks carries no word from the game thread and recorded nothing)
+                    trimRecordings(seq, withdrawn);
                 return;
             }
             t_chain = static_cast<const uint8_t *>(key);
             t_seen.clear();
-            t_chainStart = std::chrono::steady_clock::now();
+            t_chainStart = ps2x::hostNow();
             ++g_measure.chains;
             g_measure.chainBytes += g_lastChainBytes.load(std::memory_order_relaxed);
             std::lock_guard<std::mutex> lock(g_tablesMutex);

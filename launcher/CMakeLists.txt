@@ -40,22 +40,16 @@ set(VCS_LAUNCHER_COMMON
 )
 
 if(WIN32)
-    # the shader, compiled at build time into headers (no runtime compiler, shader errors are build errors)
-    file(GLOB VCS_FXC_CANDIDATES "C:/Program Files (x86)/Windows Kits/10/bin/10.*/x64/fxc.exe")
-    list(SORT VCS_FXC_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
-    find_program(VCS_FXC fxc HINTS ${VCS_FXC_CANDIDATES})
-    if(NOT VCS_FXC AND VCS_FXC_CANDIDATES)
-        list(GET VCS_FXC_CANDIDATES 0 VCS_FXC)
-    endif()
-    if(NOT VCS_FXC)
-        message(FATAL_ERROR "fxc.exe (Windows SDK) not found: install the Windows 10/11 SDK")
-    endif()
+    # the shader, compiled at build time into headers (no runtime compiler, shader errors are build errors): Windows'
+    # own d3dcompiler_47.dll through tools/hlsl_dxbc.py, fxc's DXBC without the Windows SDK
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     foreach(stage vs ps)
         add_custom_command(
             OUTPUT "${VCS_LAUNCHER_SHADERS}/ui_${stage}.h"
-            COMMAND "${VCS_FXC}" /nologo /O3 /T ${stage}_4_0 /E ${stage}_main /Vn g_ui_${stage} /Fh "${VCS_LAUNCHER_SHADERS}/ui_${stage}.h" "${VCS_UI_HLSL}"
-            DEPENDS "${VCS_UI_HLSL}"
-            COMMENT "fxc ui.hlsl ${stage}_main"
+            COMMAND "${Python3_EXECUTABLE}" -I "${VCS_ROOT}/tools/hlsl_dxbc.py" --profile ${stage}_4_0 --entry ${stage}_main
+                    --name g_ui_${stage} --out "${VCS_LAUNCHER_SHADERS}/ui_${stage}.h" "${VCS_UI_HLSL}"
+            DEPENDS "${VCS_UI_HLSL}" "${VCS_ROOT}/tools/hlsl_dxbc.py"
+            COMMENT "hlsl_dxbc ui.hlsl ${stage}_main"
             VERBATIM)
     endforeach()
 
@@ -74,6 +68,9 @@ if(WIN32)
     set_source_files_properties(launcher.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/launcher.ico")
     target_link_libraries(VCSLauncher PRIVATE d3d11 dxgi dwrite dwmapi ole32 shell32 uuid winmm advapi32)
     target_compile_definitions(VCSLauncher PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MINGW)  # mingw-w64's headers default to Windows 7; the Windows SDK's (and the launcher) to Windows 10
+        target_compile_definitions(VCSLauncher PRIVATE _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+    endif()
 else()
     # Linux. Everything comes from the distribution (python3 tools/build.py --check-deps lists the packages):
     # pkg-config modules for the window systems, fonts and D-Bus; Vulkan headers (the loader is opened at run time);
@@ -210,7 +207,10 @@ if(NOT _vcs_version_numbers)
     message(FATAL_ERROR "VERSION must start with major.minor.patch (it holds '${VCS_VERSION}')")
 endif()
 target_compile_definitions(VCSLauncher PRIVATE VCS_VERSION_MAJOR=${CMAKE_MATCH_1} VCS_VERSION_MINOR=${CMAKE_MATCH_2}
-                           VCS_VERSION_PATCH=${CMAKE_MATCH_3} "VCS_VERSION_TEXT=\"${VCS_VERSION}\"")
+                           VCS_VERSION_PATCH=${CMAKE_MATCH_3})
+# the text from a header: a quoted define on the command line loses its quotes in llvm-windres (llvm-mingw)
+file(CONFIGURE OUTPUT "${VCS_LAUNCHER_SHADERS}/launcher_version.h" CONTENT "#define VCS_VERSION_TEXT \"${VCS_VERSION}\"
+")
 
 target_include_directories(VCSLauncher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${VCS_ROOT}/src" "${VCS_LAUNCHER_SHADERS}")
 # next to tools/ and the source, where a release has it (the launcher finds the repository from its own folder)
@@ -219,4 +219,9 @@ if(MSVC)
     # one self-contained exe: the static C++ runtime, nothing to install
     set_property(TARGET VCSLauncher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
     target_compile_options(VCSLauncher PRIVATE /W3 /utf-8)
+elseif(MINGW)
+    # llvm-mingw: the same - libc++, libunwind and winpthread linked in, only the system's UCRT left (tools/release.py
+    # checks the imports); wWinMain needs -municode
+    target_compile_options(VCSLauncher PRIVATE -Wall -Wno-missing-field-initializers -Wno-unknown-pragmas)
+    target_link_options(VCSLauncher PRIVATE -municode -static $<$<CONFIG:Release>:-s>)
 endif()

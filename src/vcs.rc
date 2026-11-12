@@ -1,3 +1,41 @@
-// vcs.exe's manifest: the UTF-8 code page (src/vcs.manifest). 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, 24 = RT_MANIFEST;
-// the linker's own manifest is off (/MANIFEST:NO in CMakeLists.txt), so this is the only one.
+// vcs.exe's resources.
+//
+// The manifest: the UTF-8 code page (src/vcs.manifest). 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, 24 = RT_MANIFEST; the
+// linker's own manifest is off (/MANIFEST:NO in CMakeLists.txt), so this is the only one.
+//
+// The icon and the version information (GitHub issue 91: Explorer showed a blank program with no details): vcs.ico, the
+// launcher's scene by day in lighter colours so the two exes tell apart (launcher/make_icon.py draws both) - SDL takes
+// the exe's first icon for the window and the taskbar too - and VERSION in the repository root, through vcs_version.h, which CMakeLists.txt writes (a header, not compile
+// definitions: those would be on every generated file's command line and rebuild the game at each new version).
+#include <winver.h>
+#include "vcs_version.h"
+
 1 24 "vcs.manifest"
+
+1 ICON "vcs.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION VCS_VERSION_MAJOR, VCS_VERSION_MINOR, VCS_VERSION_PATCH, 0
+PRODUCTVERSION VCS_VERSION_MAJOR, VCS_VERSION_MINOR, VCS_VERSION_PATCH, 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "VCS Recomp (github.com/gothamor/gta-vcs-recomp)"
+            VALUE "FileDescription", "GTA: Vice City Stories PC port"
+            VALUE "ProductName", "VCS Recomp"
+            VALUE "InternalName", "vcs"
+            VALUE "OriginalFilename", "vcs.exe"
+            VALUE "FileVersion", VCS_VERSION_TEXT
+            VALUE "ProductVersion", VCS_VERSION_TEXT
+            VALUE "LegalCopyright", "GPL-3.0. Unofficial; Grand Theft Auto is property of Rockstar Games / Take-Two Interactive"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

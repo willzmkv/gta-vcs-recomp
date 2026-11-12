@@ -92,7 +92,7 @@ class Check:
         self.g.cmd("poke 0x%x %s" % (addr, struct.pack(fmt, v).hex()))
 
     def run(self, story, full):
-        g = self.g = rig.Game.start(save=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"), name="finale_check",
+        g = self.g = rig.Game.start(save=rig.default_save(), name="finale_check",
                                     port=self.port, data_dir=os.path.join(ROOT, "build", "finale", "data%d" % self.port))
         try:
             g.wait_ingame()

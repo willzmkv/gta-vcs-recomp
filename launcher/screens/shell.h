@@ -128,6 +128,7 @@ namespace screens
     void chooseBuildDir(const std::filesystem::path &start);
     void chooseRipTarget();
     void play(App &app);
+    void restartLauncher(App &app); // after an update: the new launcher starts, this one closes
     void openSheet(Sheet sheet);
     void openDialog(Dialog dialog);
     void openSetup(int step);

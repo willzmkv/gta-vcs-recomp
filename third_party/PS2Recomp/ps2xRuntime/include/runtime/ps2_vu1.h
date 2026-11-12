@@ -418,8 +418,10 @@ private:
     void applyFmacDest(float *dst, float *result, uint8_t dest);
     void applyFmacDestAcc(float *result, uint8_t dest);
     void normalizeFmacResult(float *result, uint8_t dest, uint8_t laneFlags[4]);
-    bool calculateFmacExactResult(uint32_t component, long double &result) const;
-    uint8_t normalizeFmacExactResult(float &value, long double exactResult) const;
+    // [gta-recomp] double, not long double: MSVC's long double is double, and mingw's / Linux's 80-bit one can decide
+    // near-zero results otherwise than the reference (and the compiled VU1 code, which uses double)
+    bool calculateFmacExactResult(uint32_t component, double &result) const;
+    uint8_t normalizeFmacExactResult(float &value, double exactResult) const;
     uint32_t calculateFmacProductSticky(uint8_t dest) const;
     void updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest, uint32_t extraSticky);
     void queueFsset(uint16_t immediate);

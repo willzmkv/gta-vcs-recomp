@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -101,6 +102,28 @@ def set_aside(path):
     os.replace(path, old)
 
 
+def put(z, name, target):
+    """One file of the release zip written to `target`. A file held open is tried again for a few seconds (an
+    antivirus scanning it lets go), then renamed aside (running: the launcher, this Python - a running exe or DLL can
+    be renamed, not replaced) and written fresh."""
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    for attempt in range(5):
+        try:
+            with z.open(name) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            return
+        except PermissionError:
+            if attempt == 0:
+                try:
+                    set_aside(target)
+                    continue
+                except OSError:
+                    pass
+            if attempt == 4:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
 def remove_set_aside():
     """The .old files a previous update couldn't remove (they were running then)."""
     for d in (tc.ROOT, os.path.join(tc.ROOT, "python")):
@@ -170,7 +193,7 @@ def apply_appimage(mine, appimage_path=None):
     os.replace(new, target)
     print("[update] %s -> %s: %s. Start the launcher again; it puts the new files in place, then build the game again."
           % (mine["version"], version, target))
-    tc.event(result="ok", version=version)
+    tc.event(result="ok", version=version, restart=True)  # the launcher offers Restart (the new AppImage)
 
 
 def install(source, target):
@@ -240,6 +263,7 @@ def apply(zip_path=None, appimage_path=None):
         zip_path = os.path.join(UPDATE_DIR, found["zip"].rsplit("/", 1)[1])
         verified_download(found, zip_path)
     tc.stage("apply", "Putting the new release in place")
+    failed = []  # (relative path, error): files that could not be written - the rest still goes in
     with zipfile.ZipFile(zip_path) as z:
         top = {n.split("/", 1)[0] for n in z.namelist()}
         if len(top) != 1:
@@ -247,23 +271,34 @@ def apply(zip_path=None, appimage_path=None):
         prefix = top.pop() + "/"
         new = json.loads(z.read(prefix + "RELEASE.json"))
         names = [n for n in z.namelist() if not n.endswith("/")]
-        for i, n in enumerate(names):
+        # VERSION and RELEASE.json last, and only when every other file is in: an update that stopped halfway once
+        # left a folder saying 0.2.1 with half of 0.1.1's tools (issue 66). With RELEASE.json still the old one, the
+        # launcher offers the update again and a second run writes what the first could not.
+        last = [prefix + "VERSION", prefix + "RELEASE.json"]
+        for i, n in enumerate([n for n in names if n not in last] + [n for n in last if n in names]):
             rel = n[len(prefix):]
             if not rel or rel.startswith(KEEP):
+                continue
+            if rel in ("VERSION", "RELEASE.json") and failed:
                 continue
             target = os.path.join(tc.ROOT, *rel.split("/"))
             if not os.path.abspath(target).startswith(os.path.abspath(tc.ROOT) + os.sep):
                 continue
-            os.makedirs(os.path.dirname(target), exist_ok=True)
             try:
-                with z.open(n) as src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-            except PermissionError:
-                set_aside(target)  # running: the launcher, this Python - renamed, then written fresh
-                with z.open(n) as src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+                put(z, n, target)
+            except OSError as e:
+                print("[update] could not write %s: %s" % (rel, e))
+                failed.append((rel, e))
             if i % 200 == 0:
                 tc.event(progress=i, total=len(names), eta=None, note="files")
+    if failed:
+        locked = [rel for rel, e in failed if isinstance(e, PermissionError)]
+        tc.fail("%d of the new release's files could not be written (%s%s)%s. The folder is still the old release: "
+                "close the game and anything else using the folder, then update again - or extract the new release's "
+                "zip into a new folder." % (
+                    len(failed), ", ".join(rel for rel, _ in failed[:3]), ", ..." if len(failed) > 3 else "",
+                    "; in use by another program - often an antivirus or a cloud-synced folder" if locked else ""),
+                "update_incomplete")
     gone = sorted(set(mine.get("files", [])) - set(new.get("files", [])))
     for rel in gone:
         if rel.startswith(KEEP):
@@ -273,10 +308,13 @@ def apply(zip_path=None, appimage_path=None):
             try:
                 os.remove(path)
             except PermissionError:
-                set_aside(path)
+                try:
+                    set_aside(path)
+                except OSError as e:  # an old file left behind is harmless: the new release doesn't use it
+                    print("[update] could not remove %s: %s" % (rel, e))
     print("[update] %s -> %s (%d files, %d removed). Build the game again (the launcher, or python tools/build.py "
           "--recompile-if-needed)." % (mine["version"], new["version"], len(names), len(gone)))
-    tc.event(result="ok", version=new["version"])
+    tc.event(result="ok", version=new["version"], restart=True)  # the launcher offers Restart (its new exe)
 
 
 def main():

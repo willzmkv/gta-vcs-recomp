@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Draws the launcher's icon (launcher.ico): Home's backdrop in a rounded square - Vice City at dusk, a striped hot-pink
 sun going down behind the art deco towers of the beach, a line of light on the horizon and the sun on the sea. Colours
-are the dark palette's (launcher/ui/theme.h). Standard library only.
+are the dark palette's (launcher/ui/theme.h). And the game's (src/vcs.ico, vcs.exe's): the same scene by day, in the
+light palette's pinks with an orange sun and no stars, so the two programs don't look alike in Explorer or the taskbar.
+Standard library only.
 
-    python launcher/make_icon.py            writes launcher/launcher.ico (16, 20, 24, 32, 40, 48, 64, 256 px) and
-                                            launcher/launcher.png (256 px: the Linux .desktop entry's icon)
-    python launcher/make_icon.py --png DIR  also writes each size as DIR/icon_<size>.png (to look at)
+    python launcher/make_icon.py            writes launcher/launcher.ico (16, 20, 24, 32, 40, 48, 64, 256 px),
+                                            launcher/launcher.png (256 px: the Linux .desktop entry's icon) and
+                                            src/vcs.ico (the same sizes)
+    python launcher/make_icon.py --png DIR  also writes each size as DIR/launcher_<size>.png and DIR/game_<size>.png
     python launcher/make_icon.py --header OUT.h   only the X11 window icon (_NET_WM_ICON: 32, 64, 128 px as
                                             ARGB) as a C header - launcher/CMakeLists.txt runs it on Linux
 
@@ -28,12 +31,30 @@ def mix(a, b, t):
     return tuple(x + (y - x) * t for x, y in zip(a, b))
 
 
-# theme.h, kDarkPalette
-NIGHT, SKY, HORIZON, SEA = rgb(0x0A0A0B), rgb(0x140A0F), rgb(0x3A0E24), rgb(0x0F080B)
-PINK, PINK_HI, WHITE = rgb(0xFF2E8B), rgb(0xFF62A8), rgb(0xFFFFFF)
-SKYLINE, LIGHTS = rgb(0x0B0709), rgb(0xFFB8D6)
-SUN_TOP = mix(PINK_HI, WHITE, 0.22)  # as backdrop.cpp's sun
-FAR = mix(SKYLINE, HORIZON, 0.55)     # the towers in the haze
+WHITE = rgb(0xFFFFFF)
+
+
+class Palette:
+    def __init__(self, night, sky, horizon, sea, pink, pink_hi, skyline, lights, sun_top, far, sea_far, stars,
+                 haze=1.0):
+        self.night, self.sky, self.horizon, self.sea = rgb(night), rgb(sky), rgb(horizon), rgb(sea)
+        self.pink, self.pink_hi, self.skyline, self.lights = rgb(pink), rgb(pink_hi), rgb(skyline), rgb(lights)
+        self.sun_top = sun_top(self)
+        self.far = mix(self.skyline, self.horizon, far)  # the towers in the haze
+        self.sea_far = rgb(sea_far)                      # the sea at the icon's bottom edge
+        self.stars = stars
+        self.haze = haze  # the pink glow around the sun and just above the horizon (0: none)
+
+
+# The launcher: dusk, theme.h's kDarkPalette
+DUSK = Palette(night=0x0A0A0B, sky=0x140A0F, horizon=0x3A0E24, sea=0x0F080B, pink=0xFF2E8B, pink_hi=0xFF62A8,
+               skyline=0x0B0709, lights=0xFFB8D6, sun_top=lambda p: mix(p.pink_hi, WHITE, 0.22),  # backdrop.cpp's sun
+               far=0.55, sea_far=0x0A0A0B, stars=True)
+# The game (vcs.exe): the same scene by day, from kLightPalette's pinks - a plain white sky (the user's choice), rose
+# towers, a sea that keeps enough colour at the bottom edge to stand apart from a white desktop or Explorer window
+DAY = Palette(night=0xFFFFFF, sky=0xFFFFFF, horizon=0xFFFFFF, sea=0xFFB3CF, pink=0xEC1A62, pink_hi=0xFF4C84,
+              skyline=0xD9618F, lights=0xFFF1F6, sun_top=lambda p: mix(rgb(0xFFB547), p.pink_hi, 0.35),
+              far=0.4, sea_far=0xF58AB2, stars=False, haze=0.0)
 
 
 def hash01(n):
@@ -50,8 +71,9 @@ def hash01(n):
 class Scene:
     """The icon's shapes for one size, in [0, 1) units; edges on whole pixels when the icon is small."""
 
-    def __init__(self, size):
+    def __init__(self, size, pal=DUSK):
         self.size = size
+        self.p = pal
         small = size <= 64
         q = (lambda v: round(v * size) / size) if small else (lambda v: v)
         self.radius = 0.19  # the rounded square's corners
@@ -121,7 +143,7 @@ class Scene:
                             self.windows.append((wx, wy, wx + ww, wy + wh, a))
         # stars (large sizes): high in the sky, away from the sun
         self.stars = []
-        if size >= 128:
+        if size >= 128 and pal.stars:
             for i in range(28):
                 sx, sy = 0.06 + 0.88 * hash01(i * 3), 0.05 + 0.32 * hash01(i * 3 + 1) ** 1.4
                 if math.hypot(sx - cx, sy - cy) < r + 0.06:
@@ -153,11 +175,14 @@ def pixel(S, x, y):
     h = S.horizon
     sx, sy, sr = S.sun
     d = math.hypot(x - sx, y - sy)
+    P = S.p
+    NIGHT, SKY, HORIZON, SEA, PINK, PINK_HI = P.night, P.sky, P.horizon, P.sea, P.pink, P.pink_hi
+    SKYLINE, LIGHTS, SUN_TOP, FAR = P.skyline, P.lights, P.sun_top, P.far
     if y < h:
         # the sky: dark up high, the horizon's glow below, a pink haze around the sun
         t = y / h
         colour = mix(mix(SKY, NIGHT, t * 0.5), HORIZON, max(0.0, (t - 0.35) / 0.65) ** 1.4)
-        glow = 0.22 * math.exp(-(d - sr) / (0.07 if S.size >= 128 else 0.04)) if d >= sr else 0
+        glow = 0.22 * P.haze * math.exp(-(d - sr) / (0.07 if S.size >= 128 else 0.04)) if d >= sr else 0
         colour = mix(colour, PINK, glow)
         for (px, py, pr, a) in S.stars:
             if (x - px) ** 2 + (y - py) ** 2 < pr * pr:
@@ -178,10 +203,10 @@ def pixel(S, x, y):
         if y >= h - line:
             colour = mix(colour, PINK, 0.85)
         elif y > h - 0.05:
-            colour = mix(colour, PINK, 0.25 * (1 - (h - y) / 0.05) ** 2)
+            colour = mix(colour, PINK, 0.25 * P.haze * (1 - (h - y) / 0.05) ** 2)
     else:
         t = (y - h) / (1 - h)
-        colour = mix(SEA, NIGHT, t)
+        colour = mix(SEA, P.sea_far, t)
         colour = mix(colour, PINK, 0.12 * math.exp(-abs(x - sx) / 0.12) * (1 - t))  # the sun's column on the water
         for (ly, th, width, a) in S.reflection:
             if ly <= y < ly + th and abs(x - sx) < width / 2:
@@ -189,8 +214,8 @@ def pixel(S, x, y):
     return colour
 
 
-def render(size, pixels_only=False):
-    S = Scene(size)
+def render(size, pixels_only=False, pal=DUSK):
+    S = Scene(size, pal)
     n = 8 if size <= 64 else 3  # supersampling per side
     rows = []
     for py in range(size):
@@ -244,28 +269,31 @@ def main():
     if "--header" in sys.argv:
         write_header(sys.argv[sys.argv.index("--header") + 1])
         return
+    here = os.path.dirname(os.path.abspath(__file__))
     sizes = [16, 20, 24, 32, 40, 48, 64, 256]
-    images = [render(s) for s in sizes]
-    if "--png" in sys.argv:
-        folder = sys.argv[sys.argv.index("--png") + 1]
-        os.makedirs(folder, exist_ok=True)
+    for name, pal, out, png in (("launcher", DUSK, os.path.join(here, "launcher.ico"), os.path.join(here, "launcher.png")),
+                                ("game", DAY, os.path.join(here, "..", "src", "vcs.ico"), None)):
+        images = [render(s, pal=pal) for s in sizes]
+        if "--png" in sys.argv:
+            folder = sys.argv[sys.argv.index("--png") + 1]
+            os.makedirs(folder, exist_ok=True)
+            for s, data in zip(sizes, images):
+                with open(os.path.join(folder, "%s_%d.png" % (name, s)), "wb") as f:
+                    f.write(data)
+        header = struct.pack("<HHH", 0, 1, len(sizes))
+        offset = 6 + 16 * len(sizes)
+        entries = b""
         for s, data in zip(sizes, images):
-            with open(os.path.join(folder, "icon_%d.png" % s), "wb") as f:
-                f.write(data)
-    header = struct.pack("<HHH", 0, 1, len(sizes))
-    offset = 6 + 16 * len(sizes)
-    entries = b""
-    for s, data in zip(sizes, images):
-        entries += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(data), offset)
-        offset += len(data)
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launcher.ico")
-    with open(out, "wb") as f:
-        f.write(header + entries + b"".join(images))
-    print("wrote " + out)
-    png = os.path.join(os.path.dirname(out), "launcher.png")
-    with open(png, "wb") as f:
-        f.write(images[-1])
-    print("wrote " + png)
+            entries += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(data), offset)
+            offset += len(data)
+        out = os.path.normpath(out)
+        with open(out, "wb") as f:
+            f.write(header + entries + b"".join(images))
+        print("wrote " + out)
+        if png:
+            with open(png, "wb") as f:
+                f.write(images[-1])
+            print("wrote " + png)
 
 
 if __name__ == "__main__":

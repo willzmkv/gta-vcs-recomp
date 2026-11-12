@@ -20,7 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace vcs::world
+namespace vcs::world_areas
 {
     namespace
     {

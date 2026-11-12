@@ -1,23 +1,16 @@
 # Renderer pieces on top of the RHI: the window presenter and the HW GS renderer's shaders (docs/NATIVE_RENDERER.md).
 # One HLSL source per shader, compiled at build time into headers for each backend that is built:
-#   D3D11: DXBC from fxc (Windows SDK)             -> shaders/dxbc/<header>, array <name>
+#   D3D11: DXBC from D3DCompile (tools/hlsl_dxbc.py) -> shaders/dxbc/<header>, array <name>
 #   Vulkan: SPIR-V from glslang (tools/hlsl_spirv.py) -> shaders/spirv/<header>, array <name>_spv
 set(VCS_SHADER_OUT "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY "${VCS_SHADER_OUT}/dxbc" "${VCS_SHADER_OUT}/spirv")
 
-if(VCS_RHI_D3D11)
-    file(GLOB VCS_FXC_CANDIDATES "C:/Program Files (x86)/Windows Kits/10/bin/10.*/x64/fxc.exe")
-    list(SORT VCS_FXC_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
-    find_program(VCS_FXC fxc HINTS ${VCS_FXC_CANDIDATES})
-    if(NOT VCS_FXC AND VCS_FXC_CANDIDATES)
-        list(GET VCS_FXC_CANDIDATES 0 VCS_FXC)
-    endif()
-    if(NOT VCS_FXC)
-        message(FATAL_ERROR "fxc.exe (Windows SDK) not found: install the Windows 10/11 SDK")
-    endif()
-endif()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+# D3D11: Windows' own d3dcompiler_47.dll through tools/hlsl_dxbc.py, the same DXBC as the SDK's fxc (checked
+# byte for byte; DECISIONS.md 2026-11-03) - no Windows SDK. VCS_DXBC_CHECK_FXC=<fxc.exe> compares every shader with
+# that fxc's output and fails on a difference.
+set(VCS_DXBC_CHECK_FXC "" CACHE FILEPATH "fxc.exe to compare tools/hlsl_dxbc.py's DXBC with (empty: no check)")
 if(VCS_RHI_VULKAN)
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     find_program(VCS_GLSLANG NAMES glslangValidator glslang HINTS "$ENV{VULKAN_SDK}/bin")
     if(NOT VCS_GLSLANG)
         message(FATAL_ERROR "glslangValidator not found (Vulkan shaders): install glslang-tools (Debian / Ubuntu), "
@@ -33,13 +26,18 @@ function(vcs_shader source entry profile name header)
         set(out "${VCS_SHADER_OUT}/dxbc/${header}")
         set(defines "")
         foreach(d IN LISTS ARGN)
-            list(APPEND defines /D ${d})
+            list(APPEND defines -D ${d})
         endforeach()
+        set(check "")
+        if(VCS_DXBC_CHECK_FXC)
+            set(check --check-fxc "${VCS_DXBC_CHECK_FXC}")
+        endif()
         add_custom_command(
             OUTPUT "${out}"
-            COMMAND "${VCS_FXC}" /nologo /O3 /T ${profile} /E ${entry} /Vn ${name} ${defines} /Fh "${out}" "${src}"
-            DEPENDS "${src}"
-            COMMENT "fxc ${source} ${entry}"
+            COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/hlsl_dxbc.py" --profile ${profile}
+                    --entry ${entry} --name ${name} --out "${out}" ${defines} ${check} "${src}"
+            DEPENDS "${src}" "${CMAKE_SOURCE_DIR}/tools/hlsl_dxbc.py"
+            COMMENT "hlsl_dxbc ${source} ${entry}"
             VERBATIM)
         list(APPEND VCS_SHADER_HEADERS "${out}")
     endif()

@@ -21,7 +21,7 @@ Texture replacement is not one of these mods: it comes from upstream PR #8 (PCSX
 
 | Effect (mod) | In VCS Recomp | Status |
 |---|---|---|
-| Distance fog density / start (Proper Shaders' fog, foggy weathers) | The game's own GS fog: its range scaled at the setter (game-internals.md 6l, `src/game/vcs_fog.cpp`) | **Done** 2026-11-02 - Graphics > Fog; `tools/fog_check.py` |
+| Distance fog density / start (Proper Shaders' fog, foggy weathers) | The game's own GS fog: its range scaled at the setter (game-internals.md 6t, `src/game/vcs_fog.cpp`) | **Done** 2026-11-02 - Graphics > Fog; `tools/fog_check.py` |
 | Object / LOD draw distance (Project2DFX `DrawDistance`) | VC's own mechanism in VCS: the entities' LOD distances times the camera's LODDistMultiplier, scaled through CRenderer::ms_lodDistScale `0x4887F8` (game-internals.md 9h, `src/game/vcs_distance.cpp`) | **Done** 2026-11-03 - Graphics > Draw distance > Object distance 100-400 %; `tools/distance_check.py` |
 | View distance, detail distance (Project2DFX `ViewDistance` / `DetailDistance`) | The city is not entities: a low-detail image of the whole map (resident) and the detailed sectors of the cell around the camera, ~260 m (game-internals.md 9h); further detail needs more cells drawn (their pieces read and relocated, the lists merged) or the cell chosen ahead of the camera; the far plane is 2000 | T2 (HD further) |
 | Population and car spawn / removal distance (follows the draw distance) | GenerationDistMultiplier `0x6F4CA0`: cars made 100-160 x, removed past 160 x, peds 35-60 x (game-internals.md 9h); scaling it spreads the same numbers wider - the counts have to grow with it | T2 |
@@ -275,7 +275,7 @@ python tools/weaponmod_check.py              # modloader/HD Weapons in the game:
   Vic's hand where VCS holds its own (the chainsaw's handles in his hands, the pistol's grip in his palm), each
   covering VCS's model better than at VC's place (silhouette overlap, e.g. the pistol 0.50 -> 0.78, the molotov
   0.14 -> 0.65), with VCS's HUD icon, no crash (`build/weaponmod_check/placed`).
-- **Cost**: an HD weapon in view costs 1-2 ms a frame in this build (PERFORMANCE.md 31): faceted HD meshes make one
+- **Cost**: an HD weapon in view costs 1-2 ms a frame in this build (PERFORMANCE.md 40): faceted HD meshes make one
   draw per ~70 strip vertices. The conversion at boot runs on every core (194 files in 1.7 s).
 
 ## The pre-HUD pass (the infrastructure T4-T7 need)

@@ -14,7 +14,7 @@ DECISIONS.md 2026-10-30 "A launcher for releases", 2026-11-01 "The launcher draw
 
 ## Why
 
-The manual install (README) is: Python with *Add to PATH*, Git, Visual Studio with two specific options, clone, copy
+The manual install (README) is: Python with *Add to PATH*, Git (Visual Studio with two specific options until 2026-11-03), clone, copy
 the `.iso` in under the right name, a terminal, `python tools/build.py --recompile`, then find `build\vcs.exe`. Each
 step loses players, and the README's *Problems* table is mostly those steps going wrong. Distribution is source-only
 (DECISIONS.md 2026-10-21): the player's PC compiles the game, so the launcher is also a build front end.
@@ -28,14 +28,15 @@ step loses players, and the README's *Problems* table is mostly those steps goin
 |---|---|
 | `VCSLauncher.exe` | the launcher, one static exe (4 MB) |
 | `VERSION`, `RELEASE.json` | the release's number (the repository's `VERSION`, also built into VCSLauncher.exe's version information; a `v*` tag must match it); its repository, commit and file list (tools/update.py) |
-| `python/` | python.org's embeddable CPython (the version that made the release) |
+| `python/` | python.org's embeddable CPython (the version that made the release). Not on PATH: the build hands it to CMake (`-DPython3_EXECUTABLE`, `toolchain.python_defines`), which runs `tools/hlsl_dxbc.py` for the shaders - without it a PC with no Python of its own stopped at "Could NOT find Python3" (0.2.1, issues 67-73) |
 | `deps/` | the libraries CMake would download (tools/deps.py): SDL3, Dear ImGui, zlib, ELFIO, toml11, fmt, libdwarf, rabbitizer, nlohmann/json, and the FFmpeg LGPL build - 136 MB unpacked |
 | `THIRD_PARTY_LICENSES.txt` | their licences, collected from the libraries themselves |
 | the source | the repository at the tag (`git archive`; `--worktree` for tests) |
 
 With `deps/` there, `toolchain.configure` points CMake at it (`FETCHCONTENT_SOURCE_DIR_<NAME>`,
-`-DFFMPEG_PREBUILT_URL=<zip>`, `FETCHCONTENT_FULLY_DISCONNECTED=ON`): the build needs neither git nor internet. Only
-Visual Studio's compiler is left to install, and the launcher does that.
+`-DFFMPEG_PREBUILT_URL=<zip>`, `FETCHCONTENT_FULLY_DISCONNECTED=ON`): the build needs neither git nor internet - except for
+the compiler: the first build downloads llvm-mingw (~190 MB, once; DECISIONS.md 2026-11-03). Nothing is left to
+install (with `VCS_TOOLCHAIN=msvc` Visual Studio's compiler, which the launcher installs).
 
 **No game code, ever**: `release.py` checks every file of the release before zipping - names (`*.iso`, `SLUS_*`...),
 folders (`generated/`, `build/`, the Ghidra project, memory cards), content (a MIPS ELF header, an ISO 9660 volume
@@ -81,7 +82,8 @@ GitHub release as the Windows zip, and only when both were made (DECISIONS.md 20
   are left alone (their dates too), so an update rebuilds only what changed. From then on everything runs in that
   folder, as in a release folder on Windows: doctor, build, `build/`, `generated/`.
 - **Updates** (`update.py check` finds the `-x86_64.AppImage` asset; `apply` downloads it, checks the SHA-256 and the
-  AppImage magic, and renames it over `$APPIMAGE`): "Restart the launcher, then update the build", as on Windows.
+  AppImage magic, and renames it over `$APPIMAGE`): the Restart button starts the new image, as on Windows ("Restart
+  after an update" below), then "Update the build".
 - **The shortcut** points at the AppImage file, not where it happens to be mounted.
 - **Made with** appimagetool 1.9.1 and the static type 2 runtime 20251108 (no libfuse2 needed), downloaded once into
   `build/dist/cache` and checked against pinned SHA-256s. Without FUSE, `--appimage-extract-and-run` (CI does that).
@@ -142,7 +144,9 @@ motion is (2026-11-01, the user's "rethink everything"; before, a sidebar of pag
   switches with them. The icon (`launcher/make_icon.py`, which writes `launcher.ico`) is Home's backdrop in a rounded square: the
   striped sun behind the beach's towers, the horizon's line and the sun on the sea, in the dark palette. Each size is
   drawn for itself: 16 and 20 px only the sun, its stripes and the sea; towers from 24 px; up to 64 px every edge and
-  stripe on whole pixels; lit windows and stars only at 256.
+  stripe on whole pixels; lit windows and stars only at 256. The same script draws vcs.exe's icon (`src/vcs.ico`): the
+  scene by day - a white sky, an orange-to-pink sun, rose towers, no stars - so the game and the launcher don't look
+  alike in Explorer or on the taskbar.
 - The first frame: the last doctor answer (`build/launcher_state.json`) gives the right mode at once; while this run's
   check is out, only "fine" is believed (anything else shows as checking) and the big button waits.
 
@@ -164,9 +168,10 @@ What each step and sheet holds:
   own); a relative `iso=` is read against the build folder, then the source folder.
 - **Build tools**: the processor (doctor's `check_cpu`: which build this PC gets - AVX2, AVX or SSE4,
   `toolchain.cpu_level`; a CPU without SSE4.2 can't build: `cpu_unsupported`, a red card), and tools/doctor.py
-  `check_compiler` (vswhere, one `-requires` query per component - `-path` ignores
-  `-requires`; the clang-cl the build would take: scoop's LLVM, then Visual Studio's, then PATH). Missing parts:
-  *Install build tools* runs tools/setup_vs.py.
+  `check_compiler`: llvm-mingw there (`build/build-tools`, `VCS_LLVM_MINGW`) or downloaded by the first build - always
+  ok, `toolchain: "mingw"`, and the step's text says so. With `VCS_TOOLCHAIN=msvc`: vswhere, one `-requires` query per
+  component - `-path` ignores `-requires`; the clang-cl the build would take: scoop's LLVM, then Visual Studio's, then
+  PATH; `toolchain: "msvc"`; missing parts: *Install build tools* runs tools/setup_vs.py.
 - **Game**: built and current, or the reasons not (doctor's `check_build`: no exe, generated/ stale, no / other
   `build_info.json`, source files newer than vcs.exe). Build type: Standard (ThinLTO) / Quick / Fastest (PGO), a
   segmented control; unset, the current build's type is kept.
@@ -179,6 +184,20 @@ What each step and sheet holds:
 - **Settings**: what the launcher does when the game starts, updates (check now, check at start, Update now when one
   is found - a dot on the title bar's Settings marks it), Appearance (System / Light / Dark), Reduce motion, a desktop
   shortcut.
+- **Restart after an update** (2026-11-04): the update's done card offers **Restart** (Enter; the primary button) and
+  *Later*. Restart starts the new launcher - `VCSLauncher.exe` in the release folder (this one now runs as
+  `VCSLauncher.exe.old`), or `$APPIMAGE` on Linux (the new image renamed over the file) - detached, its output to
+  `build/run/launcher_restart.log`, with `--after-update <old pid>`, and closes this one. The new launcher waits for that
+  process to end (at most 15 s) before anything else, so its start removes `VCSLauncher.exe.old` and an AppImage's old
+  mount is gone; then it is the new version's window (an AppImage puts the new files in place first). After *Later*,
+  Home's Updates card reads "Restart to finish" and Settings shows the installed version with the same Restart button.
+  `update.py apply` marks a real update with `restart: true` in its result; "already the newest" has none and gets OK.
+  Checked on Linux (2026-11-04) end to end: a 0.2.0 AppImage updated to a local 0.2.1 one through Settings, Restart,
+  the old process ended at once, the new one opened as 0.2.1 with its files installed. That test found the old mount
+  *staying*: the AppImage runtime unmounts once every holder of its keep-alive pipe has closed it, and the new launcher
+  had inherited that pipe (fd 3, not close-on-exec) through our fork. The game and anything `openUrl` starts inherited
+  it too. Every child now marks the fds above stderr close-on-exec before exec (`closeInheritedFdsOnExec`, Linux's
+  `close_range`); with it the old mount and its FUSE process go when the old launcher ends.
 - **Help**: Make a report (tools/report.py), the game's last log, the build log, the README, the keyboard, version and
   folder.
 
@@ -325,7 +344,7 @@ recompiler, the runtime headers it compiles in, the translate / sync scripts; `r
 | `python tools/setup_vs.py status / install [--dry-run]` | Visual Studio Build Tools 2022 + clang: nothing there - Microsoft's bootstrapper (aka.ms, Authenticode-checked: valid and Microsoft's, or it isn't run) with the C++ workload, recommended parts and the clang components; a Visual Studio without clang / CMake - its installer's `modify --add` (the components only: the workload's ID differs between products); clang too old - `update`. Elevated via ShellExecuteEx `runas`; 1223 = declined, 3010 = restart needed |
 | `python tools/backup.py create / list / restore NAME [--force]` | the card zipped with a manifest of every entry's creation / modification time; restore backs up the current card first, recreates in creation order and puts the times back (SetFileTime); refused while vcs.exe runs |
 | `python tools/report.py [OUT]` | build logs, the newest four game logs (crash reports included), state files, doctor's JSON, Windows / CPU / GPU names; never the disc, generated code or the card |
-| `python tools/update.py check / apply [--zip F]` | GitHub's latest release vs RELEASE.json; apply replaces the release's files, removes the ones the new release dropped, keeps build/ and generated/ and anything added; files in use (the launcher, the running Python) are renamed `*.old` and removed next time; checks the `.sha256` |
+| `python tools/update.py check / apply [--zip F]` | GitHub's latest release vs RELEASE.json; apply replaces the release's files, removes the ones the new release dropped, keeps build/ and generated/ and anything added; files in use (the launcher, the running Python) are renamed `*.old` and removed next time, a file held open is tried again for a few seconds; a file it still can't write is skipped and named, `VERSION` / `RELEASE.json` stay the old ones and it fails with `update_incomplete` (the launcher offers the update again; issue 66); checks the `.sha256`; its result says `restart: true` when it put a new release in place (the launcher's Restart button) |
 | `python tools/rip_disc.py list / rip E: OUT.iso` | a disc's sectors (the size its ISO 9660 volume gives) to an .iso, retries, then the check |
 | `python tools/deps.py list / fetch [DIR] / check [DIR]` | the FetchContent pins read from the CMake files (one list); nlohmann/json from its release archive (0.2 MB instead of a 188 MB clone) |
 | `python tools/release.py [--ref vX / --worktree] [--version X] [--launcher EXE]` | the release zip |
@@ -336,8 +355,8 @@ exe prints to the terminal that started it only through AttachConsole; `--out` f
 `--screenshot F.png`: the window rendered offscreen into a texture and saved - tests never put a window on the desktop.
 `--screen` picks what is shown (`setup:folder|disc|tools|game`, `home`, `task`, `sheet:saves|settings|help|folder`,
 `dialog:restore|quit|cancel`, `gallery` - every widget in its states), `--demo` a sample state (`running`, `link`,
-`firstlink`, `error`, `done`, `playing`, `update`, `gameerror`, `stale` - Home with the build out of
-date), `--then S --at T` switches after T seconds and `--frames N` saves N
+`firstlink`, `error`, `done`, `playing`, `update`, `updated` - an update in place with Restart / Later, `gameerror`,
+`stale` - Home with the build out of date), `--after-update PID` waits for PID to end first (the Restart button's), `--then S --at T` switches after T seconds and `--frames N` saves N
 consecutive frames (a transition, frame by frame), `--scale K` / `--size WxH` the pixels per unit and the logical size,
 `--theme light|dark` the palette (dark when not given, whatever launcher.ini or Windows say), `--clock S` Home's moving
 scene S seconds further on (its jets, clouds and windows at a given moment: the stills otherwise land wherever the

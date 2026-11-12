@@ -219,9 +219,14 @@ namespace screens
         pushReveal(since, 7, 20);
         {
             const bool newer = app.updateInfo["newer"].boolean();
-            const std::string line = newer ? "Version " + app.updateInfo["latest"].str() + " is available" : "Version " + app.sourceVersion;
-            if (glassCard("#card-updates", {strip.x + 2 * (cw + gap), strip.y, cw, cardsH}, newer ? theme::icon::kDownload : theme::icon::kSync,
-                          newer ? theme::kPink : theme::kDim, newer ? "Update available" : "Updates", line))
+            const bool installed = !app.updatedTo.empty(); // put in place, the restart put off
+            const std::string line = installed ? "Version " + app.updatedTo + " is installed"
+                                     : newer   ? "Version " + app.updateInfo["latest"].str() + " is available"
+                                               : "Version " + app.sourceVersion;
+            if (glassCard("#card-updates", {strip.x + 2 * (cw + gap), strip.y, cw, cardsH},
+                          installed ? theme::icon::kRefresh : newer ? theme::icon::kDownload : theme::icon::kSync,
+                          installed ? theme::kTeal : newer ? theme::kPink : theme::kDim,
+                          installed ? "Restart to finish" : newer ? "Update available" : "Updates", line))
                 openSheet(Sheet::Settings);
         }
         popReveal();

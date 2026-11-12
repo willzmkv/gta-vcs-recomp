@@ -1,4 +1,4 @@
-// The game's distance fog as settings (docs/game-internals.md 6l) - the fog of PC shader mods (Proper Shaders, SkyGFX),
+// The game's distance fog as settings (docs/game-internals.md 6t) - the fog of PC shader mods (Proper Shaders, SkyGFX),
 // done the game's own way, so it is depth-correct on every surface and keeps the time cycle's colour.
 //
 // VCS fogs like the PS2's GS: per vertex F = clamp(53.z + 53.w * w, 0, 255) from the camera-space depth w, blended per

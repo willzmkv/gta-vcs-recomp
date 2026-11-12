@@ -180,8 +180,51 @@ def self_test(stage):
         print("[release]   " + line)
     if code != 0:
         tc.fail("the release's launcher failed its self-test (above): nothing was written", "release_selftest")
-    # the self-test ran doctor.py, which may leave build/ (the Visual Studio environment cache): not part of a release
+    # the self-test ran doctor.py, which may leave build/ (an environment cache): not part of a release
     shutil.rmtree(os.path.join(stage, "build"), ignore_errors=True)
+
+
+# C++ runtimes Windows doesn't have: the launcher links them in (MSVC's static runtime, llvm-mingw's -static)
+FOREIGN_RUNTIME_DLLS = ("libc++", "libunwind", "libwinpthread", "libgcc", "libstdc++", "vcruntime", "msvcp", "concrt")
+
+
+def pe_imports(path):
+    """The DLL names a PE32+ executable imports (its import directory), standard library only."""
+    import struct
+    with open(path, "rb") as f:
+        data = f.read()
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    sections_count, optional_size = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from("<H", data, pe + 20)[0]
+    optional = pe + 24
+    if struct.unpack_from("<H", data, optional)[0] != 0x20B:
+        tc.fail(path + " is not a 64-bit Windows program", "release_launcher")
+    import_rva = struct.unpack_from("<I", data, optional + 112 + 8)[0]  # data directory 1: imports
+    sections = [struct.unpack_from("<IIII", data, optional + optional_size + 40 * i + 8)
+                for i in range(sections_count)]  # virtual size, virtual address, raw size, raw offset
+
+    def offset(rva):
+        for vsize, vaddr, rsize, raw in sections:
+            if vaddr <= rva < vaddr + max(vsize, rsize):
+                return raw + rva - vaddr
+        raise ValueError("RVA %x outside the sections" % rva)
+
+    names, entry = [], offset(import_rva) if import_rva else None
+    while entry is not None:
+        name_rva = struct.unpack_from("<I", data, entry + 12)[0]
+        if not name_rva:
+            break
+        start = offset(name_rva)
+        names.append(data[start:data.index(b"\0", start)].decode("ascii", "replace"))
+        entry += 20
+    return names
+
+
+def check_launcher_imports(launcher):
+    """A launcher that needs a C++ runtime DLL the release doesn't carry (a build without -static) starts nowhere."""
+    foreign = [n for n in pe_imports(launcher) if n.lower().startswith(FOREIGN_RUNTIME_DLLS)]
+    if foreign:
+        tc.fail("the launcher needs %s, which Windows doesn't have: build it with the C++ runtime linked in "
+                "(launcher/CMakeLists.txt)" % ", ".join(foreign), "release_launcher")
 
 
 def zip_time(ref, worktree):
@@ -381,6 +424,7 @@ def main():
     with open(os.path.join(stage, "VERSION"), "w", encoding="utf-8") as f:
         f.write(version + "\n")
     launcher = a.launcher or build_launcher()
+    check_launcher_imports(launcher)
     shutil.copy2(launcher, os.path.join(stage, "VCSLauncher.exe"))
     print("[release] python %s (embeddable)" % a.python)
     bundle_python(stage, a.python)

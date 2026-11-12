@@ -26,7 +26,7 @@ priority slider per mod, everything applied while the game runs. Next: T1c (game
 | Texture packs switched live; sources with priorities | `gsHwSetTextureReplacements`: the GS stage swaps the pack at its next frame (the old pack's GPU textures dropped, the game's or the new pack's back as they are drawn); `TextureReplacements` indexes several folders, a name going to the highest priority | - | `tools/mods_check.py` |
 | Mod loader (T1b) | `src/mods/modloader.cpp`: `modloader/<mod>/` folders as mods, Mod Loader's `modloader.ini` (made by the game in `modloader/`; priorities 1-100, ignore lists), F2 > Mods, live; test runs authentic. Settings registry: `Spec::saved = false`, a Toggle's `partner` slider; `platform::openFolder` | F2 > Mods: `mods.enabled`, `graphics.texture_replacements` (now live, on), `mods.<name>` + its priority slider (in modloader.ini), Rescan, Open folder; `VCS_MODLOADER_DIR`, `VCS_MODS`, `VCS_TEST_MODS` | `tools/mods_check.py` (passes) |
 
-What was learned on the way is in game-internals.md 6l (the fog setters, the camera's begin-update `FUN_0018EE48`,
+What was learned on the way is in game-internals.md 6t (the fog setters, the camera's begin-update `FUN_0018EE48`,
 camera +0x78 near / +0x7C far / +0x80 fog plane, FOGCOL from `0x4E1B30`; measured: far plane 2000 everywhere, fog start
 ~55 at noon, 22 at night, -28.6 in foggy weather) and DECISIONS.md 2026-11-02 (why not a screen-space overlay: a first
 attempt painted a gradient over the picture by screen height and was removed).
@@ -160,7 +160,7 @@ VC's `wheels.dff` over VCS's wheel models 320-329 (in GAME.DTZ memory, not GTA3P
 9e). The player sees more different cars in traffic. The regression rig at the PS2 setting (`build/regress/t10_ps2b`):
 tour, drive, shakedown and controls (64 / 64) pass; the saves check needs the card it was written for (its
 `1 Soldier` save), which the current `build/rig/saves/fortbaxter` copy lacks.
-Costs measured (PERFORMANCE.md 30): the memory itself none; the player's slowdown was the HD pack's images made on the
+Costs measured (PERFORMANCE.md 39): the memory itself none; the player's slowdown was the HD pack's images made on the
 main thread (now on the helpers: 207 -> 31 hitches) and the VC cars' many draws (next: an atlas per car). Not what the
 player hoped for: the detailed world does not reach further - that is the level's four area slots (9f), T2's work.
 `VCS_TRACE_AREAS=1` measured it: an area is read in ~20 ms; what it lacks is reach, not speed. Mods that are not
@@ -301,7 +301,7 @@ replaces it, gamepad navigation, and the text (GXT keys) for the new entries.
 ## Progress log
 
 - **2026-11-02 - fork set up.** Rebased onto upstream 0.2.0; the screen-space "fog" of a first attempt replaced by
-  the game's own fog range as settings (game-internals.md 6l); docs and the work list (this file, MODS.md); issues
+  the game's own fog range as settings (game-internals.md 6t); docs and the work list (this file, MODS.md); issues
   #1-#8; the launcher's release update off for a clone (no `RELEASE.json`).
 - **2026-11-02 - T1, texture packs.** Upstream PR #8 (PNG packs) onto 0.2.0 with its author; DDS (BC1-BC7, RGBA8 /
   BGRA8, the file's mips) through block formats in the RHI; the texture dump. With the user's HD pack (6279 BC7): all

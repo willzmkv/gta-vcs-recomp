@@ -298,9 +298,12 @@ namespace screens
             }
             float y = body.y;
             y = header({body.x, y, body.w, 0}, "STEP 3 OF 4", theme::kPink, "Build tools",
-                       launcher::os::kWindows
+                       launcher::os::kWindows && c["toolchain"].str() == "msvc"
                            ? "The game is compiled on your PC with Microsoft's free C++ tools and clang. Nothing of the game "
                              "is downloaded - only the compiler."
+                       : launcher::os::kWindows
+                           ? "The game is compiled on your PC with clang (llvm-mingw), which the first build downloads by "
+                             "itself. Nothing of the game is downloaded - only the compiler."
                            : "The game is compiled on your PC with clang and your distribution's packages. Nothing of the "
                              "game is downloaded - only the compiler and libraries.");
             if (!app.doctorDone)

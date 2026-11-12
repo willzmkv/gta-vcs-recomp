@@ -33,12 +33,24 @@
 #include <unordered_set>
 #include <vector>
 #include <cmath>  // [gta-recomp] libstdc++ (Linux) does not bring it in
+#include "runtime/ps2_host_std.h"
 
 namespace
 {
     std::atomic<float> g_hudSqueeze{1.0f}; // [gta-recomp] gsHwSetHudSqueeze
     std::atomic<GSHwAnchorFn> g_hudClassifier{nullptr}; // [gta-recomp] gsHwSetHudClassifier
     std::atomic<bool> g_hudLayer{false};                // [gta-recomp] gsHwSetHudLayer
+    std::atomic<GSHwGlyphFn> g_glyphClassifier{nullptr}; // [gta-recomp] gsHwSetGlyphClassifier
+    // [gta-recomp] gsHwSetGlyphAtlas: the atlas the GS stage was handed last (that thread only) and its number
+    struct GlyphAtlas
+    {
+        uint32_t w = 0, h = 0;
+        std::shared_ptr<const std::vector<uint32_t>> pixels;
+        uint64_t generation = 0;
+    };
+    GlyphAtlas g_glyphAtlas;
+    std::atomic<uint64_t> g_glyphDraws{0};
+    constexpr uint64_t kGlyphAtlasKey = 0xF1F1F1F100000000ull; // its texture key: no GS texture key has these high bits
     std::atomic<uint32_t> g_outputW{0}, g_outputH{0};   // [gta-recomp] gsHwSetOutputSize
     std::atomic<float> g_aspectWidening{1.0f};          // [gta-recomp] gsHwSetAspectWidening
     std::atomic<uint32_t> g_frameW{0}, g_frameH{0};     // [gta-recomp] gsHwSetFrameSize
@@ -57,6 +69,23 @@ namespace
             if (g_targetRoles[i].fbp == fbp && (g_targetRoles[i].fbw == fbw || fbw == 0u))
                 return &g_targetRoles[i];
         return nullptr;
+    }
+    struct TargetFilter                                 // [gta-recomp] gsHwSetTargetFilter
+    {
+        uint32_t fbp = 0, fbw = 0;
+        std::atomic<int> mode{0};
+    };
+    TargetFilter g_targetFilters[4];
+    std::atomic<uint32_t> g_targetFilterCount{0};
+    std::mutex g_targetFilterMutex; // registration only (readers take the count)
+    // the filter mode for draws into (fbp, fbw): 0 none, 1 always, 2 when the source is above 1x
+    int targetFilter(uint32_t fbp, uint32_t fbw)
+    {
+        const uint32_t n = g_targetFilterCount.load(std::memory_order_acquire);
+        for (uint32_t i = 0; i < n; ++i)
+            if (g_targetFilters[i].fbp == fbp && g_targetFilters[i].fbw == fbw)
+                return g_targetFilters[i].mode.load(std::memory_order_relaxed);
+        return 0;
     }
     // [gta-recomp] any role at fbp (whatever its width) wants the window's scale
     bool windowScaleAt(uint32_t fbp)
@@ -103,6 +132,24 @@ void gsHwSetTargetRole(uint32_t fbp, uint32_t fbw, const char *name, bool window
     g_targetRoleCount.store(n + 1u, std::memory_order_release);
 }
 
+void gsHwSetTargetFilter(uint32_t fbp, uint32_t fbw, int mode)
+{
+    std::lock_guard<std::mutex> lock(g_targetFilterMutex);
+    const uint32_t n = g_targetFilterCount.load(std::memory_order_relaxed);
+    for (uint32_t i = 0; i < n; ++i)
+        if (g_targetFilters[i].fbp == fbp && g_targetFilters[i].fbw == fbw)
+        {
+            g_targetFilters[i].mode.store(mode, std::memory_order_relaxed);
+            return;
+        }
+    if (n >= 4u)
+        return;
+    g_targetFilters[n].fbp = fbp;
+    g_targetFilters[n].fbw = fbw;
+    g_targetFilters[n].mode.store(mode, std::memory_order_relaxed);
+    g_targetFilterCount.store(n + 1u, std::memory_order_release);
+}
+
 void gsHwSetFrameSize(uint32_t width, uint32_t height)
 {
     g_frameW.store(width, std::memory_order_relaxed);
@@ -114,7 +161,7 @@ void gsHwSetAspectWidening(float widening) { g_aspectWidening.store(widening, st
 // [gta-recomp] gsHwShownInputNs (gs_hw.h)
 static int64_t steadyNs()
 {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(ps2x::hostNow().time_since_epoch()).count();
 }
 // [gta-recomp] gsHwFrameBuildNs: input snapshot -> frame ready for the window (game, render worker, GS stage), the 95th
 // percentile of the last 64 frames - the frame lead's estimate (docs/PERFORMANCE.md 19). GS stage thread writes.
@@ -194,6 +241,15 @@ namespace
 void gsHwSetHudSqueeze(float factor) { g_hudSqueeze.store(factor, std::memory_order_relaxed); }
 void gsHwSetHudClassifier(GSHwAnchorFn fn) { g_hudClassifier.store(fn, std::memory_order_relaxed); }
 void gsHwSetHudLayer(bool on) { g_hudLayer.store(on, std::memory_order_relaxed); }
+void gsHwSetGlyphClassifier(GSHwGlyphFn fn) { g_glyphClassifier.store(fn, std::memory_order_relaxed); }
+void gsHwSetGlyphAtlas(uint32_t width, uint32_t height, std::shared_ptr<const std::vector<uint32_t>> pixels)
+{
+    g_glyphAtlas.w = width;
+    g_glyphAtlas.h = height;
+    g_glyphAtlas.pixels = std::move(pixels);
+    ++g_glyphAtlas.generation;
+}
+uint64_t gsHwGlyphDraws() { return g_glyphDraws.load(std::memory_order_relaxed); }
 void gsHwSetOutputSize(uint32_t width, uint32_t height)
 {
     g_outputW.store(width, std::memory_order_relaxed);
@@ -242,7 +298,11 @@ namespace
         uint8_t zte, ztst, zmsk, ate, atst, aref, afail, abe;
         uint8_t ba, bb, bc, bd, fix, tme, tfx, tcc;
         uint8_t fst, linear, wms, wmt, fge, fogR, fogG, fogB;
-        uint8_t iip, mode, texIsRt, rtFull; // rtFull [gta-recomp]: a render target read 1:1 (rtFullScale)
+        uint8_t iip, mode, texIsRt, rtFull; // rtFull [gta-recomp]: 1 a render target read 1:1 (rtFullScale); 2 a
+                                            // minifying copy into a filtered target (gsHwSetTargetFilter, markFiltered)
+        uint8_t filterX4, filterY4;         // [gta-recomp] rtFull 2: one target pixel's footprint in source texels, x4
+        uint16_t filterU, filterV;          // [gta-recomp] rtFull 2: the source's extent the copy reads (texels)
+        uint16_t filterSpare;               // (no padding: HwState is compared bytewise)
         uint16_t tw, th, minu, maxu, minv, maxv;
         uint32_t rtFbp;
         uint16_t rtOx, rtOy;
@@ -506,7 +566,7 @@ namespace
             ++m_frames;
             if (m_log)
             {
-                const auto now = std::chrono::steady_clock::now();
+                const auto now = ps2x::hostNow();
                 if (now - m_lastLog >= std::chrono::seconds(5))
                 {
                     m_lastLog = now;
@@ -582,7 +642,7 @@ namespace
         uint64_t m_frames = 0;
         bool m_log = false, m_table = false;
         std::unordered_map<uint64_t, Kind> m_kinds;
-        std::chrono::steady_clock::time_point m_lastLog = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point m_lastLog = ps2x::hostNow();
     };
 
     std::mutex g_drawSourcesMutex;
@@ -678,6 +738,8 @@ namespace
         float rtOrigin[4];
         int32_t blendCPremul[4];
         float fogColor[4];
+        float filterSize[4]; // [gta-recomp] a filtered read (sampleRtFiltered): footprint xy, source size zw (texels)
+        float filterDest[4]; // [gta-recomp] ... and the target's own scale xy (only its pixels a texel read takes are filtered)
     };
 
     struct QuadConstants // render/shaders/gs_util.hlsl, cbuffer Quad
@@ -909,7 +971,7 @@ namespace
                     d.usage = rhi::UsageSampled;
                     d.name = t.replacement ? "replacement texture" : "gs texture"; // [gta-recomp]
                     d.mipLevels = m_anisotropy ? 0u : 1u; // [gta-recomp] anisotropic filtering samples a mip chain
-                    const auto createStart = std::chrono::steady_clock::now(); // [gta-recomp] tex_create_us / tex_kb
+                    const auto createStart = ps2x::hostNow(); // [gta-recomp] tex_create_us / tex_kb
                     if (t.early) // [gta-recomp] made on a helper thread (makeTextureEarly / makeReplacementEarly)
                     {
                         t.early->done.wait(false);
@@ -937,7 +999,7 @@ namespace
                     else
                         m_textures[t.key] = m_dev.createTexture(d, t.pixels.data(), t.w * 4u);
                     ps2perf::add(ps2perf::Counter::TexCreateUs, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                                                    std::chrono::steady_clock::now() - createStart).count()));
+                                                                    ps2x::hostNow() - createStart).count()));
                     ps2perf::add(ps2perf::Counter::TexKBytes,
                                  ((t.early ? t.early->bytes : t.replacement ? t.replacement->gpuBytes(m_anisotropy != 0) : (t.pixels.size() + t.mips.size()) * 4u) + 1023u) / 1024u);
                     // [gta-recomp] the dump reads RGBA8 texels: a PNG's, or the GS's when they stayed here (not moved to a helper)
@@ -960,10 +1022,10 @@ namespace
                 }
                 case CmdType::TexDelete:
                 {
-                    const auto deleteStart = std::chrono::steady_clock::now(); // [gta-recomp] tex_create_us: releases too
+                    const auto deleteStart = ps2x::hostNow(); // [gta-recomp] tex_create_us: releases too
                     m_textures.erase(f.texDeletes[c.index]);
                     ps2perf::add(ps2perf::Counter::TexCreateUs, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                                                    std::chrono::steady_clock::now() - deleteStart).count()));
+                                                                    ps2x::hostNow() - deleteStart).count()));
                     break;
                 }
                 case CmdType::RtDrop:
@@ -1128,10 +1190,10 @@ namespace
                 if (f.displayFromRt && it != m_hud.end() && !it->second.stale && !it->second.draws.empty())
                     layer = &it->second;
                 static const bool rtLog = std::getenv("PS2X_HW_RT_LOG") != nullptr; // [gta-recomp] the targets, every 5 s
-                static auto rtLast = std::chrono::steady_clock::now();
-                if (rtLog && std::chrono::steady_clock::now() - rtLast > std::chrono::seconds(5))
+                static auto rtLast = ps2x::hostNow();
+                if (rtLog && ps2x::hostNow() - rtLast > std::chrono::seconds(5))
                 {
-                    rtLast = std::chrono::steady_clock::now();
+                    rtLast = ps2x::hostNow();
                     for (const auto &[fbp, rt] : m_rts)
                     {
                         const TargetRole *role = targetRole(fbp, 0u);
@@ -1141,10 +1203,10 @@ namespace
                     }
                 }
                 static const bool log = std::getenv("PS2X_HW_HUD_LOG") != nullptr; // the layers, every 2 s
-                static auto last = std::chrono::steady_clock::now();
-                if (log && std::chrono::steady_clock::now() - last > std::chrono::seconds(2))
+                static auto last = ps2x::hostNow();
+                if (log && ps2x::hostNow() - last > std::chrono::seconds(2))
                 {
-                    last = std::chrono::steady_clock::now();
+                    last = ps2x::hostNow();
                     std::string s;
                     for (const auto &[fbp, l] : m_hud)
                         s += " " + std::to_string(fbp) + (l.stale ? "(stale," : "(") + std::to_string(l.draws.size()) + " draws)";
@@ -1561,6 +1623,8 @@ namespace
                 return 1;                   // no texture
             if (c.atstArefAfailRt[3] == 2)
                 return 6;                   // a render target 1:1 at full resolution
+            if (c.atstArefAfailRt[3] == 3)
+                return 0;                   // [gta-recomp] a filtered copy (sampleRtFiltered): the full shader has it
             if (linear == 2)
                 return 4;                   // the hardware sampler
             return linear == 0 ? 2 : 3;     // nearest / the GS's bilinear by four loads
@@ -1569,11 +1633,12 @@ namespace
         // [gta-recomp] Does the GS pixel shader write the depth (SV_Depth)? A shader depth turns early depth rejection off:
         // every hidden pixel of the city's overdraw shaded and textured (on the laptop's HD 520 ~1.8 of ~10.7 ms of the
         // frame, PERFORMANCE.md 26). D3D / Vulkan take the 0..1 depth as given, so the rasterised value is the shader's
-        // (the explicit write was GL's: its NDC lost the precision). PS2X_HW_SHADER_DEPTH=1 / 0 forces it; unset: off.
-        // [gta-recomp] D3D11 kept the shader depth until checked against the Windows reference; with it the game's fire
-        // was gone (the flame-thrower's, molotovs', explosions', burning cars': additive GS sprites, ZTST GEQUAL) whenever
-        // the pixel shader took a bilinear path (four loads, Gather, the anisotropic sampler) - the same SV_Depth as the
-        // nearest and full shaders, which drew it. The rasterised depth draws it on every path (game-internals.md 6m).
+        // (the explicit write was GL's: its NDC lost the precision). PS2X_HW_SHADER_DEPTH=1 forces it; unset: off with
+        // every backend. [gta-recomp] D3D11 too since 2026-11-04 (issue 4): on AMD (RX 6600, a Radeon iGPU) fire and
+        // explosions - recorded sprites, depth tested against the native world - were hidden by everything but the
+        // sky, as if their exported depth lost to any written one; NVIDIA and WARP drew them. The rasterised depth is
+        // the plain path every driver takes, and better defined where the hardware clips a native triangle (its
+        // noperspective depth attribute at the new vertices is the driver's choice)
         bool shaderDepth() const
         {
             static const int forced = [] {
@@ -1649,14 +1714,14 @@ namespace
                 d.depth.write = depthTest && zwrite;
                 d.depth.func = ztst == 1 ? rhi::Compare::Always : ztst == 2 ? rhi::Compare::GreaterEqual : rhi::Compare::Greater;
                 d.name = "gs draw";
-                const auto made = std::chrono::steady_clock::now();
+                const auto made = ps2x::hostNow();
                 p = m_dev.createPipeline(d);
                 // [gta-recomp] PS2X_HW_LOG_PIPELINES=1: each draw pipeline as it is made, with the time it took (a first
                 // use mid-game is a main-thread stall)
                 static const bool logPipelines = std::getenv("PS2X_HW_LOG_PIPELINES") != nullptr;
                 if (logPipelines)
                     std::fprintf(stderr, "[gs-hw] pipeline %08x (sample %u, mode %u) made in %.2f ms, %zu so far\n", key, sample, mode,
-                                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - made).count(),
+                                 std::chrono::duration<double, std::milli>(ps2x::hostNow() - made).count(),
                                  m_drawPipelines.size());
             }
             return *p;
@@ -1984,7 +2049,7 @@ namespace
             if (!d || d->count < 3u)
                 return 0;
             const HwState &s = d->s;
-            if (!s.tme || !s.texIsRt || !s.rtFull || !s.fst || s.fbw != 10u || s.rtFbp == s.fbp || s.rtOx || s.rtOy || s.fbmsk ||
+            if (!s.tme || !s.texIsRt || s.rtFull != 1u || !s.fst || s.fbw != 10u || s.rtFbp == s.fbp || s.rtOx || s.rtOy || s.fbmsk ||
                 s.mode != 0u || s.scx0 != 0u || s.scy0 != 0u || s.scx1 < 639u || s.scy1 < 447u)
                 return 0;
             auto src = m_rts.find(s.rtFbp);
@@ -2225,11 +2290,11 @@ namespace
             if (log)
             {
                 static uint64_t n[2][2] = {};
-                static auto since = std::chrono::steady_clock::now();
+                static auto since = ps2x::hostNow();
                 ++n[which][same ? 1 : 0];
-                if (std::chrono::steady_clock::now() - since > std::chrono::seconds(5))
+                if (ps2x::hostNow() - since > std::chrono::seconds(5))
                 {
-                    since = std::chrono::steady_clock::now();
+                    since = ps2x::hostNow();
                     std::fprintf(stderr, "[gs-hw] constants: draw %llu written, %llu skipped; world %llu written, %llu skipped\n",
                                  (unsigned long long)n[0][0], (unsigned long long)n[0][1], (unsigned long long)n[1][0],
                                  (unsigned long long)n[1][1]);
@@ -2322,7 +2387,12 @@ namespace
             bindPass(colorTarget, depthTarget);
             {
                 // [gta-recomp] the scissor passes GS pixels scx0..scx1, sampled at their integer positions: moved by the
-                // pixel-centre offset like the geometry, a target pixel passes when its centre does
+                // pixel-centre offset like the geometry, a target pixel passes when its centre does. Above 640x448 a GS
+                // pixel X stands for the target pixels whose centres are nearest to X - [X - 0.5, X + 0.5) once the
+                // geometry is offset - so the edges are scx0 - o and scx1 + 1 - o: at 1x the same pixels as before;
+                // scx0 + 0 / scx1 + 1 (until 2026-11-06) cut half a GS pixel off the left / top and passed half of one
+                // more on the right / bottom: the first glyph of a menu label scissored to its own text ("stats")
+                // lost its left edge
                 const float o = pixelCentreOffset();
                 const float sx = target ? target->scaleX : targetScale.x, sy = target ? target->scaleY : targetScale.y;
                 const float ox = target ? static_cast<float>(target->originX) : 0.0f, oy = target ? static_cast<float>(target->originY) : 0.0f;
@@ -2334,8 +2404,8 @@ namespace
                 // a squeezed HUD layer draw: its scissor edges go where its vertices went (appendHudDraw), unrounded
                 const float pv = target ? target->squeezePivot : 0.0f, sq = target ? target->squeeze : 1.0f;
                 auto edgeX = [&](float e) { return sq == 1.0f ? e : pv + (e + o - pv) * sq - o; };
-                const int x0 = edge(edgeX(s.scx0 * scw), sx, ox, tw), x1 = std::max(x0, edge(edgeX((s.scx1 + 1.0f) * scw), sx, ox, tw));
-                const int y0 = edge(static_cast<float>(s.scy0), sy, oy, th), y1 = std::max(y0, edge(s.scy1 + 1.0f, sy, oy, th));
+                const int x0 = edge(edgeX(s.scx0 * scw - o), sx, ox, tw), x1 = std::max(x0, edge(edgeX((s.scx1 + 1.0f) * scw - o), sx, ox, tw));
+                const int y0 = edge(s.scy0 - o, sy, oy, th), y1 = std::max(y0, edge(s.scy1 + 1.0f - o, sy, oy, th));
                 m_dev.setScissor(x0, y0, x1 - x0, y1 - y0);
             }
 
@@ -2395,7 +2465,30 @@ namespace
             c.atstArefAfailRt[0] = s.atst;
             c.atstArefAfailRt[1] = s.aref;
             c.atstArefAfailRt[2] = 0;
-            c.atstArefAfailRt[3] = (s.texIsRt && !plainTexture) ? (s.rtFull ? 2 : 1) : 0; // [gta-recomp] 2: read 1:1 at full resolution
+            c.atstArefAfailRt[3] = (s.texIsRt && !plainTexture) ? (s.rtFull == 1u ? 2 : 1) : 0; // [gta-recomp] 2: read 1:1 at full resolution
+            // [gta-recomp] 3: a filtered copy (markFiltered, gsHwSetTargetFilter) - when the target's mode asks for it now:
+            // always, or with the source above 1x - by its height: 1x at 16:9 is 853x448, x 1.33 for the wider view at the
+            // PS2's own pixel density. Off, the GS's read as before
+            if (s.texIsRt && !plainTexture && s.rtFull == 2u && tex)
+            {
+                const int mode = targetFilter(s.fbp, s.fbw);
+                if (mode == 1 || (mode == 2 && rtScale.y > 1.001f))
+                {
+                    c.atstArefAfailRt[3] = 3;
+                    c.filterSize[0] = s.filterX4 * 0.25f;
+                    c.filterSize[1] = s.filterY4 * 0.25f;
+                    c.filterSize[2] = s.filterU;
+                    c.filterSize[3] = s.filterV;
+                    c.filterDest[0] = targetScale.x;
+                    c.filterDest[1] = targetScale.y;
+                    if (!m_filterReported)
+                    {
+                        m_filterReported = true;
+                        std::fprintf(stderr, "[gs-hw] filtered copy into fbp %u (fbw %u) from fbp %u at %.2fx%.2f, footprint %.2fx%.2f\n",
+                                     s.fbp, s.fbw, s.rtFbp, rtScale.x, rtScale.y, c.filterSize[0], c.filterSize[1]);
+                    }
+                }
+            }
             c.texSizeWrap[0] = s.tw;
             c.texSizeWrap[1] = s.th;
             c.texSizeWrap[2] = s.wms;
@@ -2530,6 +2623,7 @@ namespace
         uint32_t m_displayW = 640, m_displayH = 448;
         std::unordered_set<uint32_t> m_reportedBlend;
         uint64_t m_feedbackReported = 0;
+        bool m_filterReported = false; // [gta-recomp] the first filtered copy (gsHwSetTargetFilter) logged
         bool m_inPass = false;
         rhi::Texture *m_passColor = nullptr, *m_passDepth = nullptr;
     };
@@ -2891,6 +2985,49 @@ namespace
         // One primitive's vertices (out, n) into the frame: flat colour, render-target sampling, the widescreen HUD
         // squeeze / native HUD layer (batch: the GS vertices for the HUD classifier; nullptr = not asked), then merged
         // into the current draw. bookkeeping: depth buffer and target size here (SubmitPacked does them per packet).
+        // [gta-recomp] A glyph primitive (recordPrimitive): its texture is the glyph atlas - handed to the executor first
+        // when it is new (a TexCreate under its own key, never evicted) -, its texture coordinates the glyph's cell,
+        // bilinear and clamped; the colour white (the texture's own) or, for the text's drop shadow, black. The game's
+        // blending, depth, scissor, alpha (fades) and the HUD layer stay as they were.
+        void glyphDraw(HwState &s, HwVertex *out, uint32_t n, const GSHwGlyphHit &hit)
+        {
+            if (m_glyphGeneration != g_glyphAtlas.generation)
+            {
+                m_glyphGeneration = g_glyphAtlas.generation;
+                TexCreate tc;
+                tc.key = kGlyphAtlasKey;
+                tc.w = g_glyphAtlas.w;
+                tc.h = g_glyphAtlas.h;
+                tc.pixels = *g_glyphAtlas.pixels;
+                if (m_anisotropy > 1u) // the executor makes these textures with a mip chain (TexCreate)
+                    buildMipChain(tc.pixels, tc.w, tc.h, tc.mips);
+                Frame &f = *m_frame;
+                f.cmds.push_back({CmdType::TexCreate, static_cast<uint32_t>(f.textures.size())});
+                f.textures.push_back(std::move(tc));
+            }
+            s.texKey = kGlyphAtlasKey;
+            s.tw = static_cast<uint16_t>(g_glyphAtlas.w);
+            s.th = static_cast<uint16_t>(g_glyphAtlas.h);
+            s.fst = 0;
+            s.tfx = 0; // modulate
+            s.tcc = 1;
+            s.linear = 1;
+            s.wms = s.wmt = 1; // clamp
+            s.minu = s.minv = 0;
+            s.maxu = static_cast<uint16_t>(g_glyphAtlas.w - 1u);
+            s.maxv = static_cast<uint16_t>(g_glyphAtlas.h - 1u);
+            for (uint32_t i = 0; i < n; ++i)
+            {
+                out[i].s = hit.u[i];
+                out[i].t = hit.v[i];
+                out[i].q = 1.0f;
+                out[i].x += hit.dx[i];
+                const uint8_t c = hit.shadow ? 0u : 128u;
+                out[i].r = out[i].g = out[i].b = c;
+            }
+            g_glyphDraws.fetch_add(1, std::memory_order_relaxed);
+        }
+
         void recordPrimitive(HwState s, HwVertex *out, uint32_t n, const GSPrimitiveBatch *batch, float ofx, float ofy,
                              uint32_t source, bool bookkeeping)
         {
@@ -2919,8 +3056,24 @@ namespace
                     out[i].b = out[n - 1].b;
                     out[i].a = out[n - 1].a;
                 }
+            // [gta-recomp] a button prompt glyph (gsHwSetGlyphClassifier): the same primitive, drawn from the glyph atlas
+            if (batch && s.tme && !s.texIsRt && batch->vertexCount == n && n <= 8u && gsDrawSourcePath(source) == 2u)
+                if (const GSHwGlyphFn glyph = g_glyphClassifier.load(std::memory_order_relaxed); glyph && g_glyphAtlas.pixels)
+                {
+                    float xy[2 * 8];
+                    for (uint32_t i = 0; i < n; ++i)
+                    {
+                        xy[2 * i] = batch->vertices[i].x - ofx;
+                        xy[2 * i + 1] = batch->vertices[i].y - ofy;
+                    }
+                    GSHwGlyphHit hit{};
+                    if (glyph(xy, n, hit))
+                        glyphDraw(s, out, n, hit);
+                }
             if (s.texIsRt && rtFullScale())
                 s.rtFull = isOneToOne(s, out, n) ? 1u : 0u;
+            if (s.texIsRt && s.rtFull == 0u && s.rtFbp != s.fbp && targetFilter(s.fbp, s.fbw) != 0)
+                markFiltered(s, out, n);
             // [gta-recomp] VCS draws its HUD, text, radar and menus (RwIm2D) at the largest Z, whatever the depth test
             // (RenderWare keeps ZTE on: ZTE=0 is prohibited on the GS); projected sprites (clouds, coronas) take the
             // same path at their real depth.
@@ -3051,6 +3204,39 @@ namespace
             const double dvdx = (v1 * y2 - v2 * y1) / det, dvdy = (v2 * x1 - v1 * x2) / det;
             constexpr double tol = 0.01; // the self-copy maps 448 rows to 450 texels (1.004)
             return std::fabs(dudx - 1.0) < tol && std::fabs(dvdy - 1.0) < tol && std::fabs(dudy) < tol && std::fabs(dvdx) < tol;
+        }
+
+        // [gta-recomp] A minifying, axis-aligned copy of another render target into a target named for filtering
+        // (gsHwSetTargetFilter: VCS's reflection map, 640x448 onto 128x128): rtFull 2 with one target pixel's footprint
+        // in source texels and the extent it reads. The executor's draw reads it filtered when the target's mode says so
+        // (atstArefAfailRt.w 3); otherwise it is drawn as before.
+        static void markFiltered(HwState &s, const HwVertex *v, uint32_t n)
+        {
+            if (n < 3u || s.mode != 0u)
+                return;
+            const float su = s.fst ? 1.0f : static_cast<float>(s.tw), sv = s.fst ? 1.0f : static_cast<float>(s.th);
+            auto u = [&](const HwVertex &p) { return p.s / p.q * su; };
+            auto w = [&](const HwVertex &p) { return p.t / p.q * sv; };
+            const double x1 = v[1].x - v[0].x, y1 = v[1].y - v[0].y, x2 = v[2].x - v[0].x, y2 = v[2].y - v[0].y;
+            const double det = x1 * y2 - x2 * y1;
+            if (std::fabs(det) < 1e-6)
+                return;
+            const double u1 = u(v[1]) - u(v[0]), u2 = u(v[2]) - u(v[0]), v1 = w(v[1]) - w(v[0]), v2 = w(v[2]) - w(v[0]);
+            const double dudx = (u1 * y2 - u2 * y1) / det, dudy = (u2 * x1 - u1 * x2) / det;
+            const double dvdx = (v1 * y2 - v2 * y1) / det, dvdy = (v2 * x1 - v1 * x2) / det;
+            if (std::fabs(dudy) > 0.01 || std::fabs(dvdx) > 0.01 || (std::fabs(dudx) < 1.5 && std::fabs(dvdy) < 1.5))
+                return; // rotated, or not a reduction
+            float umax = 0.0f, vmax = 0.0f;
+            for (uint32_t i = 0; i < n; ++i)
+            {
+                umax = std::max(umax, u(v[i]));
+                vmax = std::max(vmax, w(v[i]));
+            }
+            s.rtFull = 2u;
+            s.filterX4 = static_cast<uint8_t>(std::clamp(std::lround(std::fabs(dudx) * 4.0), 1l, 255l));
+            s.filterY4 = static_cast<uint8_t>(std::clamp(std::lround(std::fabs(dvdy) * 4.0), 1l, 255l));
+            s.filterU = static_cast<uint16_t>(std::clamp(std::lround(umax), 1l, 2048l));
+            s.filterV = static_cast<uint16_t>(std::clamp(std::lround(vmax), 1l, 2048l));
         }
 
         struct DepthInfo // [gta-recomp] depth buffers seen in use (see depthFill)
@@ -3463,7 +3649,7 @@ namespace
             { // PS2X_HW_UPSTATS=1: upload kinds every 5 s
                 static const bool stats = std::getenv("PS2X_HW_UPSTATS") != nullptr;
                 static uint64_t whole = 0, partial = 0, bytesWhole = 0, bytesPartial = 0;
-                static auto last = std::chrono::steady_clock::now();
+                static auto last = ps2x::hostNow();
                 if (stats)
                 {
                     (wholeTransfer ? whole : partial) += 1;
@@ -3472,7 +3658,7 @@ namespace
                         std::fprintf(stderr, "[upload] partial: %u bytes, rect %ux%u psm %u (expects %llu)\n", sizeBytes, t.trxreg.rrw,
                                      t.trxreg.rrh, t.bitbltbuf.dpsm,
                                      static_cast<unsigned long long>(uint64_t(t.trxreg.rrw) * t.trxreg.rrh * bitsPerPixel / 8u));
-                    const auto now = std::chrono::steady_clock::now();
+                    const auto now = ps2x::hostNow();
                     if (now - last > std::chrono::seconds(5))
                     {
                         last = now;
@@ -3517,14 +3703,14 @@ namespace
                     if (stats)
                     {
                         static std::map<std::string, uint64_t> why;
-                        static auto lastWhy = std::chrono::steady_clock::now();
+                        static auto lastWhy = ps2x::hostNow();
                         char key[96];
                         std::snprintf(key, sizeof(key), "%s psm %u %ux%u %u bytes%s", !wholeTransfer ? "partial" : "whole", dpsm, t.trxreg.rrw, t.trxreg.rrh, sizeBytes,
                                       wholeTransfer && overlapsRenderTarget(first, last) ? " over a render target" : "");
                         ++why[key];
-                        if (std::chrono::steady_clock::now() - lastWhy > std::chrono::seconds(5))
+                        if (ps2x::hostNow() - lastWhy > std::chrono::seconds(5))
                         {
-                            lastWhy = std::chrono::steady_clock::now();
+                            lastWhy = ps2x::hostNow();
                             std::vector<std::pair<uint64_t, std::string>> top;
                             for (const auto &[k, n] : why)
                                 top.push_back({n, k});
@@ -4002,10 +4188,10 @@ namespace
         void reportLazyStats()
         {
             static const bool stats = std::getenv("PS2X_HW_UPSTATS") != nullptr;
-            static auto lastReport = std::chrono::steady_clock::now();
-            if (!stats || std::chrono::steady_clock::now() - lastReport < std::chrono::seconds(5))
+            static auto lastReport = ps2x::hostNow();
+            if (!stats || ps2x::hostNow() - lastReport < std::chrono::seconds(5))
                 return;
-            lastReport = std::chrono::steady_clock::now();
+            lastReport = ps2x::hostNow();
             std::fprintf(stderr, "[upload] lazy: deferred %llu, written later %llu, made obsolete %llu, queued now %zu (%zu KB); forced by clut %llu, decode %llu, direct upload %llu, other %llu\n",
                          (unsigned long long)m_lazyDeferred, (unsigned long long)m_lazyWritten, (unsigned long long)m_lazyDropped,
                          m_pendingUploads.size(), m_pendingBytes >> 10, (unsigned long long)m_lazyWhy[0], (unsigned long long)m_lazyWhy[1],
@@ -4160,7 +4346,7 @@ namespace
                 std::unique_lock<std::mutex> lock(m_queueMutex);
                 // Don't let the game run more than a few frames ahead of the main thread.
                 const size_t depth = frameQueueDepth(); // [gta-recomp] gsHwSetShowEveryFrame
-                m_queueCv.wait_for(lock, std::chrono::milliseconds(100), [&] { return m_queue.size() < depth; });
+                ps2x::waitFor(m_queueCv, lock, std::chrono::milliseconds(100), [&] { return m_queue.size() < depth; });
                 m_frame->inputNs = PSPadBackend::lastInputNs();
                 m_frame->queuedNs = steadyNs();
                 m_queue.push_back(std::move(m_frame));
@@ -4511,9 +4697,15 @@ namespace
             const int64_t takenNs = steadyNs();
             if (!frames.empty())
             {
-                // [gta-recomp] F12 (or PS2X_HW_DUMP=<frame>): list the next frame's draws and dump its targets
+                // [gta-recomp] F12 (or PS2X_HW_DUMP=<frame>): list the next frame's draws and dump its targets. The key
+                // only with PS2X_HW_DUMP_KEY=1: F12 is the screenshot / record key of Steam, Bandicam and others, and
+                // a player pressing it got hundreds of [draw] lines and the targets as files (GitHub issue 89)
                 static const long dumpAt = std::getenv("PS2X_HW_DUMP") ? std::atol(std::getenv("PS2X_HW_DUMP")) : -1;
-                const bool f12 = ps2control::keyDown(301 /* KEY_F12 */);
+                static const bool dumpKey = [] {
+                    const char *e = std::getenv("PS2X_HW_DUMP_KEY");
+                    return e && *e && *e != '0';
+                }();
+                const bool f12 = dumpKey && ps2control::keyDown(301 /* KEY_F12 */);
                 if (f12 && !m_f12Down)
                     m_dumpPending = true;
                 m_f12Down = f12;
@@ -4574,7 +4766,7 @@ namespace
                 static const bool debug = std::getenv("PS2X_HW_DEBUG") != nullptr;
                 if (debug)
                 {
-                    static auto since = std::chrono::steady_clock::now();
+                    static auto since = ps2x::hostNow();
                     static uint64_t nFrames = 0, nDraws = 0, nVerts = 0, nTex = 0;
                     for (auto &fr : frames)
                     {
@@ -4583,7 +4775,7 @@ namespace
                         nVerts += fr->vertices.size();
                         nTex += fr->textures.size();
                     }
-                    const auto now = std::chrono::steady_clock::now();
+                    const auto now = ps2x::hostNow();
                     if (std::chrono::duration<double>(now - since).count() >= 1.0)
                     {
                         const Frame &l = *frames.back();
@@ -5064,7 +5256,7 @@ namespace
             tc.key = key;
             tc.w = d.textureWidth;
             tc.h = d.textureHeight;
-            const auto decodeStart = std::chrono::steady_clock::now(); // [gta-recomp] tex_decode_us
+            const auto decodeStart = ps2x::hostNow(); // [gta-recomp] tex_decode_us
             if (!decodeFromQueuedUpload(d, tc.pixels)) // [gta-recomp] step 3c
             {
                 if (materializeRectKeepTransfer(t.psm, t.tbp0, t.tbw, 0u, 0u, d.textureWidth, d.textureHeight))
@@ -5092,7 +5284,7 @@ namespace
             if (!makeTextureEarly(tc, mipChain) && mipChain)
                 buildMipChain(tc.pixels, tc.w, tc.h, tc.mips);
             ps2perf::add(ps2perf::Counter::TexDecodeUs, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                                            std::chrono::steady_clock::now() - decodeStart).count()));
+                                                            ps2x::hostNow() - decodeStart).count()));
             f.cmds.push_back({CmdType::TexCreate, static_cast<uint32_t>(f.textures.size())});
             f.textures.push_back(std::move(tc));
             m_texLru[key] = m_frameIndex;
@@ -5524,6 +5716,7 @@ namespace
         bool m_nativeFrame = false; // [gta-recomp] GSHwOptions::nativeFrame
         uint32_t m_msaa = 1, m_anisotropy = 0; // [gta-recomp] GSHwOptions
         uint32_t m_helperThreads = 0; // [gta-recomp] PS2X_HW_TEXTURE_HELPERS / PS2X_HW_EARLY_TEXTURES
+        uint64_t m_glyphGeneration = 0;        // [gta-recomp] the glyph atlas the executor has (gsHwSetGlyphAtlas)
         std::atomic<rhi::Device *> m_earlyDevice{nullptr}; // [gta-recomp] makeTextureEarly: set by the main thread
         std::mutex m_makeMutex;                             // [gta-recomp] makeTextureEarly's helper threads
         std::condition_variable m_makeCv;

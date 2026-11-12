@@ -29,6 +29,9 @@ cbuffer Draw : register(b0)
                            // w: render-target texel scale y
     int4 blendCPremul;     // C (0 As, 1 Ad, 2 FIX), premultiply (0 none, 1 rgb *= C, 2 rgb *= 1 + C)
     float4 fogColor;       // rgb 0..255
+    float4 filterSize;     // a filtered read (atstArefAfailRt.w == 3, sampleRtFiltered): xy the footprint of one target
+                           // PS2 pixel in source texels (the tent's half-width), zw the source's size in texels (clamp)
+    float4 filterDest;     // a filtered read: xy the target's own scale (target pixels per PS2 pixel)
 };
 
 struct VSIn
@@ -263,6 +266,48 @@ float4 sampleBilinear(float2 uv)
     return lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
 }
 
+// A filtered read of a render target (atstArefAfailRt.w == 3): the reflection map's copy of the frame with "Car
+// reflections: Smooth" (gs_hw.cpp gsHwSetTargetFilter). Instead of the GS's four taps out of the ~5 x 3.5 frame pixels
+// a map texel stands for, a tent filter over the texel's footprint and its neighbours' (half-width filterSize.xy,
+// source texels) at the source's own resolution: a car panel's reflection, one map texel, follows the picture smoothly
+// as the camera moves instead of jumping with whatever single pixel lands on the tap (docs/game-internals.md 6g). At
+// most 16 taps per axis (every pixel up to ~1440p, a stride above).
+// Only the target pixels that are ever read get the filter: the paint reads the map one target pixel per PS2 texel
+// (fetchTexel: the pixel at the texel's centre), so a map drawn above 1x has ~16k such pixels of its 100k+; the others
+// take the GS's four taps (filterDest.xy: the target's own scale). Filtering all of them cost ~1.1 ms per copy at 4x3
+// (GTX 1080 Ti), this ~0.2 ms (the GS's own read: 0.04).
+static float2 g_pixel; // SV_Position of the pixel being shaded (ps_main)
+
+float4 sampleRtFiltered(float2 uv)
+{
+    const float2 ds = max(filterDest.xy, 1.0);
+    const float2 P = floor(g_pixel);
+    const float2 t = floor((P + 0.5) / ds); // the PS2 texel this target pixel is in
+    [branch] if (any(floor((t + 0.5) * ds) != P))
+        return sampleBilinear(uv); // not the pixel a texel read takes
+    const float2 s = rtScale2();
+    const float2 halfSize = max(filterSize.xy, 0.5);
+    uint tw, th;
+    tex.GetDimensions(tw, th);
+    const int2 maxPx = min(int2(tw, th), int2(ceil(filterSize.zw * s))) - 1;
+    const int2 p0 = clamp(int2(ceil((uv - halfSize + rtOrigin.xy) * s - 0.5)), int2(0, 0), maxPx);
+    const int2 p1 = clamp(int2(floor((uv + halfSize + rtOrigin.xy) * s - 0.5)), p0, maxPx);
+    const int2 step = max(int2(1, 1), (p1 - p0 + 16) / 16);
+    float4 sum = 0.0;
+    float weights = 0.0;
+    [loop] for (int y = p0.y; y <= p1.y; y += step.y)
+    {
+        const float wy = max(0.0, 1.0 - abs((float(y) + 0.5) / s.y - rtOrigin.y - uv.y) / halfSize.y);
+        [loop] for (int x = p0.x; x <= p1.x; x += step.x)
+        {
+            const float w = wy * max(0.0, 1.0 - abs((float(x) + 0.5) / s.x - rtOrigin.x - uv.x) / halfSize.x);
+            sum += tex.Load(int3(x, y, 0)) * w;
+            weights += w;
+        }
+    }
+    return weights > 0.0 ? sum * (255.0 / weights) : fetchTexel(int2(floor(uv)));
+}
+
 float4 sampleTex(float2 uv)
 {
 #if SAMPLE_MODE == 2
@@ -280,6 +325,10 @@ float4 sampleTex(float2 uv)
     [branch] if (atstArefAfailRt.w == 2)
     {
         r = sampleRtFull(uv);
+    }
+    else if (atstArefAfailRt.w == 3)
+    {
+        r = sampleRtFiltered(uv); // only the full shader (SAMPLE_MODE 0) has it: drawSampleMode picks that one
     }
     else if (linearIipFgeAte.x == 2)
     {
@@ -316,6 +365,7 @@ struct PSOut
 PSOut ps_main(VSOut i)
 {
     PSOut o;
+    g_pixel = i.pos.xy;
     // GS Z is Z24/Z32 / 2^n: written directly (going through GL's NDC rounded near values and collapsed far ones; with
     // D3D / Vulkan's 0..1 depth the rasterised value is the same: SHADER_DEPTH 0)
 #if SHADER_DEPTH

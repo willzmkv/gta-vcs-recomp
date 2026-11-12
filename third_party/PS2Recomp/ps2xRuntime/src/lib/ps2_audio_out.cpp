@@ -18,6 +18,7 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
+#include "runtime/ps2_host_std.h"
 
 namespace
 {
@@ -162,10 +163,10 @@ namespace
     void reportStats()
     {
         static const bool stats = std::getenv("PS2X_AUDIO_STATS") != nullptr;
-        static auto last = std::chrono::steady_clock::now();
+        static auto last = ps2x::hostNow();
         if (!stats)
             return;
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - last < std::chrono::seconds(5))
             return;
         const double secs = std::chrono::duration<double>(now - last).count();

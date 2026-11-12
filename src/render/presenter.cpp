@@ -48,6 +48,7 @@ namespace present
         int g_backendSetting = -1; // rhi::Backend; -1: the default
         std::atomic<bool> g_postProcessEnabled{false};
         std::atomic<int> g_exposurePercent{100};
+        int g_gpuSetting = 0;      // an rhi::Gpu id (0: the fastest card)
 
         rhi::Backend chooseBackend()
         {
@@ -99,6 +100,8 @@ namespace present
 
     void setBackend(int backend) { g_backendSetting = backend; }
 
+    void setGpu(int id) { g_gpuSetting = id; }
+
     int backend() { return static_cast<int>(g_device ? g_device->backend() : chooseBackend()); }
 
     bool backendNeedsVulkanWindow() { return chooseBackend() == rhi::Backend::Vulkan; }
@@ -112,6 +115,7 @@ namespace present
     {
         rhi::DeviceDesc desc;
         desc.backend = chooseBackend();
+        desc.gpu = g_gpuSetting;
         desc.nativeWindow = platform::nativeWindow();
         desc.vulkan.instanceExtensions = platform::vulkanInstanceExtensions;
         desc.vulkan.createSurface = platform::vulkanCreateSurface;

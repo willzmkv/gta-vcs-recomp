@@ -113,6 +113,11 @@ namespace launcher
         void dismissTask() { if (task && task->finished) task.reset(); }
         Json backups, drives, updateInfo; // results kept from their tasks
         bool updateQuiet = false;
+        // an update put in place (update.py apply said restart): the version; this launcher is the old one until then
+        std::string updatedTo;
+        std::filesystem::path restartTarget() const; // the new launcher: root's VCSLauncher.exe, or $APPIMAGE
+        // the new launcher started (--after-update <our pid>: it waits for us to end); the caller closes this one
+        bool restart(std::string &error);
 
         // the game
         std::unique_ptr<Process> game;
@@ -136,6 +141,7 @@ namespace launcher
 
     private:
         std::unique_ptr<Process> m_doctor;
+        std::unique_ptr<Process> m_restarted; // the new launcher (restart): never killed
         std::vector<std::string> m_doctorOut;
         double m_now = 0;
         void runTool(const std::string &kind, const std::string &title, const std::vector<std::string> &args);

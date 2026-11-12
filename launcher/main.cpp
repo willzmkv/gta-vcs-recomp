@@ -9,7 +9,7 @@
 //   VCSLauncher.exe --screenshot F.png  the window rendered offscreen and saved (tests, docs; never a window):
 //       [--screen S] [--demo D]         what is shown (screens/screens.h: setup:disc, home, task, sheet:saves,
 //                                       dialog:quit, gallery...; demo: running, count (1% every 0.8 s), link, firstlink, error, done,
-//                                       playing, update, stale (the build out of date))
+//                                       playing, update, updated (Restart after an update), stale (the build out of date))
 //       [--then S --at T]               switch to S after T seconds (transitions)
 //       [--frames N]                    N consecutive frames from the start (or from --then): F-000.png...
 //       [--size WxH] [--scale K]        logical size (1100x700) and pixels per unit (1)
@@ -18,6 +18,8 @@
 //       [--step N]                      the old page numbers: 0-3 the setup steps, 4 Saves, 5 Settings, 6 Help
 //       [--action build --every S] [--iso X] [--wait S] [--pick-build-dir PATH]
 //   VCSLauncher.exe --stats             the window with a frame-time overlay (also Ctrl+Shift+F11)
+//   VCSLauncher.exe --after-update PID  (the Restart button after an update) wait for the old launcher to end, then
+//                                       the window
 //   VCSLauncher.exe --hidden --quit-after S [--out F]   the real window and frame loop, never shown, for S seconds;
 //                                       then the frames drawn and the CPU time used (the idle cost; tests)
 //
@@ -531,8 +533,18 @@ namespace
     }
 }
 
-int launcherMain(const std::vector<std::string> &args)
+int launcherMain(const std::vector<std::string> &argsIn)
 {
+    std::vector<std::string> args = argsIn;
+    // started by the Restart button after an update (App::restart): the old launcher first ends, so its renamed exe
+    // (VCSLauncher.exe.old) can go and an AppImage's old mount is gone; then the window as usual
+    for (size_t i = 0; i + 1 < args.size(); ++i)
+        if (args[i] == "--after-update")
+        {
+            waitForProcessExit(std::strtoul(args[i + 1].c_str(), nullptr, 10), 15.0);
+            args.erase(args.begin() + long(i), args.begin() + long(i) + 2);
+            break;
+        }
     if (hasArg(args, "--screenshot"))
     {
         if (const std::string out = argValue(args, "--out"); !out.empty())

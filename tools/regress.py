@@ -14,8 +14,13 @@ Steps (each a tool of its own, run in turn; the game window shows):
   saves     tools/saves.py: save to slot 2, Load Game slot 1, Delete Game slot 2 through the game's menus
   shakedown tools/shakedown.py: mission 50's shop entry at 144 fps (the shopkeeper deleted by the 32-bit branch bug,
             the mission stuck on "Loading...")
+  haze      tools/haze_check.py: mission 94's cutscene with original timing at 60 fps (a thug run over behind the
+            fade, his audio line waited for for ever) and the haze across a 16:9 picture
   widecull  at 16:9, 16:10, 21:9 and 32:9 the entity culling (CCamera's side planes) reaches the screen edges, not
             the 4:3 ones
+  widepref  the game's own (anamorphic) widescreen preference stays off; mission 50's cutscene has its black bars by
+            default and none with Display > Cutscene black bars off
+  scopemask the sniper scope and the camera at 16:9: their black mask reaches the screen edges (no world beside it)
   menushape every presented frame into and out of the pause menu at 32:9 on a 16:9 screen: a 4:3 shape shows the menu,
             a wide one the game (the shifted frame at the switch)
             (buildings, peds and cars vanishing at the sides in widescreen)
@@ -24,7 +29,7 @@ Steps (each a tool of its own, run in turn; the game window shows):
   controls  tools/controls_check.py: every default key binding, rebinding, walk, wheel, presets, Reset all settings,
             the game's vibration reaching the host
   fire      tools/fire_check.py: a burning car, the flame-thrower and a molotov - fire on screen (the GS fire sprites
-            lost to the D3D11 shader depth, game-internals.md 6m)
+            lost to the D3D11 shader depth, game-internals.md 6u)
 
 Writes OUT/report.md and OUT/metrics.json (default OUT: build/regress/<date-time>). --set-baseline stores this
 run as build/regress/baseline (metrics.json + the scenes capture); later runs report what changed against it:
@@ -108,7 +113,7 @@ def step_evening(out, quick):
     import tour  # noqa: E402
     d = os.path.join(out, "evening")
     os.makedirs(d, exist_ok=True)
-    g = rig.Game.start(save=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"), name="regress_evening")
+    g = rig.Game.start(save=rig.default_save(), name="regress_evening")
     lumas = {}
     try:
         g.wait_ingame()
@@ -145,6 +150,12 @@ def step_shakedown(out, quick):
     return shakedown.check(os.path.join(out, "shakedown"))
 
 
+def step_haze(out, quick):
+    sys.path.insert(0, TOOLS)
+    import haze_check  # noqa: E402
+    return haze_check.check(os.path.join(out, "haze"))
+
+
 def step_widecull(out, quick):
     """Widescreen culling (game-internals.md 5): CCamera::IsSphereVisible's side planes (TheCamera 0x6F44D0 + 0xB60,
     right (cos h, -sin h)) must end where the widened view window does (tan(FOV / 2) x r at 0x742AC0), not at the
@@ -153,7 +164,7 @@ def step_widecull(out, quick):
     import rig  # noqa: E402
     res = {}
     for aspect in ("169", "329") if quick else ("169", "1610", "219", "329"):
-        g = rig.Game.start(save=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"), name="regress_widecull_" + aspect,
+        g = rig.Game.start(save=rig.default_save(), name="regress_widecull_" + aspect,
                            env={"VCS_ASPECT": aspect})
         try:
             g.wait_ingame()
@@ -167,6 +178,86 @@ def step_widecull(out, quick):
         right, left = -ry / rx, ly / lx
         res[aspect] = {"view_window": round(window, 4), "right_edge": round(right, 4), "left_edge": round(left, 4),
                        "pass": abs(right - window) < 1e-3 * window and abs(left - window) < 1e-3 * window}
+    return res
+
+
+def step_widepref(out, quick):
+    """The game's own widescreen preference (*(*0x48F3D0 + 0x30), the PS2's anamorphic mode) stays off, and the cutscene
+    letterbox follows Display > Cutscene black bars (game-internals.md 5a, src/game/vcs_display.cpp, 2026-11-06: the
+    game's option removed the bars). Mission 50's opening cutscene, the top and bottom twelfth of the picture black with
+    the bars, not without them: 16:9 with the setting On and Off, and 4:3 with it Off - the bars stay there (the setting
+    is locked On at 4:3, 2026-11-06). The hidden window is 4:3, so a 16:9 picture is letterboxed inside it."""
+    sys.path.insert(0, TOOLS)
+    import rig  # noqa: E402
+    import toolchain as tc  # noqa: E402
+    d = os.path.abspath(os.path.join(out, "widepref"))
+    os.makedirs(d, exist_ok=True)
+    res = {}
+    for aspect, bars, want in (("169", "1", True), ("169", "0", False), ("43", "0", True)):
+        name = "%s_bars%s" % (aspect, bars)
+        g = rig.Game.start(save=rig.default_save(), name="regress_widepref_" + name,
+                           env={"VCS_ASPECT": aspect, "VCS_CUTSCENE_BARS": bars})
+        try:
+            g.wait_ingame()
+            prefs = g.u32(0x48F3D0)
+            g.cmd("poke 0x%x 01000000" % (prefs + 0x30))  # as a save with the option on would (the setter is hooked too)
+            g.wait_frames(5)
+            pref = g.u32(prefs + 0x30)
+            g.invincible(True)
+            g.prime()
+            g.mission(50)
+            time.sleep(12)
+            shot = os.path.join(d, "cutscene_%s.png" % name)
+            g.cmd("screenshot " + shot.replace(os.sep, "/"))
+            cutscene = g.u32(g.u32(0x48F820) + 0x34)
+        finally:
+            g.quit()
+        w, h, rows = tc.read_png(shot)
+        pic = h if aspect == "43" else min(h, w * 9 // 16)  # the picture's rows inside the hidden 4:3 window
+        y0 = (h - pic) // 2
+        band = pic // 12
+        mean = lambda ys: sum(sum(rows[y][x] for x in range(0, w * 3, 12)) for y in ys) / (len(ys) * w / 4)  # noqa: E731
+        top, bottom = mean(range(y0 + 2, y0 + band - 2)), mean(range(y0 + pic - band + 2, y0 + pic - 2))
+        res[name] = {"pref": pref, "cutscene": cutscene, "top": round(top, 1), "bottom": round(bottom, 1),
+                     "pass": pref == 0 and cutscene != 0 and ((top < 3 and bottom < 3) if want else max(top, bottom) > 8)}
+    res["pass"] = all(r["pass"] for r in res.values())
+    return res
+
+
+def step_scopemask(out, quick):
+    """The sniper scope and the camera at 16:9 (game-internals.md 6f "Scope mask", src/game/vcs_hud.cpp, 2026-11-06):
+    the mask's side bars reach the screen edges - before, they and the scope were squeezed into the middle 4:3 and the
+    3D world showed in the strips beside it (max 253 there). The hidden window is 4:3, so the 16:9 picture is
+    letterboxed in it: the strips are x 0..1/8 and 7/8..1 of the screenshot inside the picture's rows."""
+    sys.path.insert(0, TOOLS)
+    import rig  # noqa: E402
+    import toolchain as tc  # noqa: E402
+    d = os.path.abspath(os.path.join(out, "scopemask"))
+    os.makedirs(d, exist_ok=True)
+    res = {}
+    g = rig.Game.start(save=rig.default_save(), name="regress_scopemask",
+                       env={"VCS_ASPECT": "169", "VCS_HUD": "0"})
+    try:
+        g.wait_ingame()
+        g.invincible(True)
+        g.set_time(12)
+        for weapon in (30, 39):  # the sniper rifle (camera mode 7), the camera (47)
+            g.scm(rig.Scm.op(rig.Scm.GIVE_WEAPON_TO_CHAR, rig.Scm.PLAYER, rig.Scm.i(weapon), rig.Scm.i(50)))
+            time.sleep(1.0)
+            g.cmd("key mouseright down")
+            time.sleep(1.5)
+            shot = os.path.join(d, "weapon%d.png" % weapon)
+            g.cmd("screenshot " + shot.replace(os.sep, "/"))
+            g.cmd("key mouseright up")
+            time.sleep(1.0)
+            w, h, rows = tc.read_png(shot)
+            top, bottom = (h - w * 9 // 16) // 2 + 8, (h + w * 9 // 16) // 2 - 8
+            strip = lambda x0, x1: max(max(rows[y][x * 3:x * 3 + 3]) for y in range(top, bottom, 3) for x in range(x0, x1, 2))  # noqa: E731
+            left, right = strip(2, w // 8 - 5), strip(w - w // 8 + 5, w - 2)
+            res[str(weapon)] = {"left_max": left, "right_max": right, "pass": left <= 8 and right <= 8}
+    finally:
+        g.quit()
+    res["pass"] = all(r["pass"] for r in res.values())
     return res
 
 
@@ -203,7 +294,7 @@ def step_controls(out, quick):
 
 
 def step_fire(out, quick):
-    """Fire on screen (game-internals.md 6m): tools/fire_check.py, one run as the player plays."""
+    """Fire on screen (game-internals.md 6u): tools/fire_check.py, one run as the player plays."""
     d = os.path.abspath(os.path.join(out, "fire"))
     r = subprocess.run([sys.executable, os.path.join(TOOLS, "fire_check.py"), d, "--variant", "as-is="], capture_output=True,
                        text=True, timeout=900)
@@ -237,7 +328,7 @@ def step_menushape(out, quick):
     d = os.path.abspath(os.path.join(out, "menushape"))  # the game writes it (its own working directory)
     env = {"VCS_ASPECT": "329", "VCS_HUD": "2", "PS2X_HW_OUTPUT": "1920x1080", "PS2X_CAPTURE_SIZE": "480x270",
            "VCS_PERF_OVERLAY": "0"}
-    g = rig.Game.start(save=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"), name="regress_menushape", env=env)
+    g = rig.Game.start(save=rig.default_save(), name="regress_menushape", env=env)
     try:
         g.wait_ingame()
         g.prime()
@@ -247,7 +338,7 @@ def step_menushape(out, quick):
         for phase in ("in", "out"):
             os.makedirs(os.path.join(d, phase), exist_ok=True)
             g.cmd("burst %s 50" % os.path.join(d, phase).replace(os.sep, "/"))
-            g.cmd("press Return 150")
+            g.cmd("press Escape 150")
             time.sleep(4)
     finally:
         g.quit()
@@ -309,12 +400,20 @@ def compare(base, new):
             notes.append("saves: %s failed (see saves.log and the screenshots)" % k)
     if "shakedown" in new and new["shakedown"].get("pass") is not True:
         notes.append("shakedown: the shop entry failed %s (see shakedown/)" % json.dumps(new["shakedown"]))
+    if "haze" in new and new["haze"].get("pass") is not True:
+        notes.append("haze: Purple Haze's cutscene or its haze at 16:9 failed %s (see haze/)" % json.dumps(new["haze"]))
     if "controls" in new and new["controls"].get("pass") is not True:
         notes.append("controls: failed checks %s (tools/controls_check.py)" % new["controls"].get("failed"))
     if "fire" in new and new["fire"].get("pass") is not True:
-        notes.append("fire: no fire on screen %s (tools/fire_check.py, game-internals.md 6m)" % json.dumps(new["fire"]))
+        notes.append("fire: no fire on screen %s (tools/fire_check.py, game-internals.md 6u)" % json.dumps(new["fire"]))
     if "meters" in new and new["meters"].get("pass") is not True:
         notes.append("meters: per-frame mission meters off the time step %s (PHI_A2's heat at 144 vs 30)" % json.dumps(new["meters"]))
+    wp = new.get("widepref", {})
+    if wp and wp.get("pass") is not True:
+        notes.append("widepref: the game's widescreen preference or the cutscene bars %s (widepref/)" % json.dumps(wp))
+    sm = new.get("scopemask", {})
+    if sm and sm.get("pass") is not True:
+        notes.append("scopemask: the 3D world shows beside the scope / camera mask at 16:9 %s (scopemask/)" % json.dumps(sm))
     ms = new.get("menushape", {})
     if ms and ms.get("pass") is not True:
         notes.append("menushape: frames whose shape does not fit their picture at the pause menu %s" % json.dumps(ms))
@@ -338,8 +437,10 @@ def main():
     metrics = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "quick": a.quick}
     for name, fn in (("scenes", step_scenes), ("tour", step_tour), ("missions", step_missions), ("drive", step_drive),
                      ("evening", step_evening), ("saves", step_saves), ("shakedown", step_shakedown),
-                     ("widecull", step_widecull), ("menushape", step_menushape), ("meters", step_meters), ("controls", step_controls),
-                     ("fire", step_fire), ("distance", step_distance)):
+                     ("haze", step_haze),
+                     ("widecull", step_widecull), ("widepref", step_widepref), ("scopemask", step_scopemask),
+                     ("menushape", step_menushape),
+                     ("meters", step_meters), ("controls", step_controls), ("fire", step_fire), ("distance", step_distance)):
         print("[regress] %s" % name)
         t0 = time.time()
         try:

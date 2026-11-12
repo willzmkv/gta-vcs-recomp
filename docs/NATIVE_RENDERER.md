@@ -236,7 +236,7 @@ Result:
   17.7-18.6 game fps over four runs (baseline 17.9-18.2); main-thread GPU submit
   0.4 ms (GL execution was 3.2 ms; 3.7-3.9 with the stage 2 readback). The extra
   frame of display latency from stage 2 is gone.
-- Checked: `PS2X_HW_SCALE=2`, `PS2X_HW_DUMP` / F12 (render targets and display as
+- Checked: `PS2X_HW_SCALE=2`, `PS2X_HW_DUMP` / F12 (with `PS2X_HW_DUMP_KEY=1` since 2026-11-10; render targets and display as
   PPM), hidden runs, resize. vcs.exe no longer imports opengl32.dll.
 
 At this point the game runs on D3D11 with no OpenGL or raylib left. Frame rate is
@@ -459,6 +459,11 @@ it is 1920x1080, 3 x 2.41 pixels per PS2 pixel.
   textures (effects, copies, the self-copy), the display, growth, dumps - sees a single-sampled copy resolved when the
   target was drawn to since the last read (`readable`, `Rt::dirty`); a multisampled frame copy is drawn instead of
   copied. Effect buffers stay single-sampled. Depth buffers are kept per scale and sample count.
+- **Car reflections** (no setting: Smooth above 1x internal resolution, the PS2's four taps at 1x; `VCS_REFLECTIONS`
+  for one run): the game's copy of the frame into the reflection map (FBP 420, FBW 2) is read through a tent over each
+  map texel's footprint instead of the GS's four taps (`gsHwSetTargetFilter`, `sampleRtFiltered`,
+  `atstArefAfailRt.w == 3`, the full shader only). Car panels then stop flickering as the camera moves.
+  game-internals.md 6g has the numbers.
 - **Anisotropic filtering** (Display > Texture filtering, `display.aniso` / `PS2X_HW_ANISO` = 2-16, restart; off =
   the original bilinear): the game's textures get a mip chain, and bilinear-filtered draws with plain repeat / clamp
   wrapping (about 90% of textured draws outside the barracks) are sampled by the hardware - trilinear, anisotropic -
@@ -477,7 +482,9 @@ it is 1920x1080, 3 x 2.41 pixels per PS2 pixel.
 - **No shader depth on Vulkan** (2026-11-02, PERFORMANCE.md 26): the GS pixel shader is built with and without its
   depth output (SHADER_DEPTH); Vulkan uses the rasterised depth - the same value with a 0..1 depth range - so early depth
   rejection works; D3D11 too since 2026-11-03 - with the shader depth it lost the game's fire sprites
-  (game-internals.md 6m; `PS2X_HW_SHADER_DEPTH=1` brings it back). The draw constants are
+  (game-internals.md 6u; `PS2X_HW_SHADER_DEPTH=1` brings it back). The draw constants are
+  rejection works; D3D11 kept the shader depth until 2026-11-04, when issue 4 (fire hidden on AMD GPUs) dropped it there
+  too (`PS2X_HW_SHADER_DEPTH=1` brings it back; DECISIONS.md 2026-11-04). The draw constants are
   written only when they change (`updateConstants`), and the Vulkan backend records viewport, scissor, blend constants
   and buffers only when they differ from what the command buffer has. Depth test / write / compare are dynamic state:
   pipelines that differ only there share one VkPipeline (`PS2X_RHI_STATIC_DEPTH=1` = baked in), and a dynamic vertex

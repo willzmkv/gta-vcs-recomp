@@ -10,8 +10,8 @@ The game listens when started with PS2X_CONTROL=1 or PS2X_HIDDEN=1 - e.g. `pytho
     python tools/gamectl.py perf                    the perf overlay's numbers for the last second
     python tools/gamectl.py quit
 
-Key names: letters, digits, F1-F12, Return/Enter/Start, Shift/Cross, Space/Square, Triangle (F), Ctrl/Circle,
-Escape, Backspace/Select, Tab, Up/Down/Left/Right. Game controls: docs/CONTROLS.md (WASD left stick, IJKL right
+Key names: letters, digits, F1-F12, Return/Enter, Escape/Esc/Start, Shift/Cross, Space/Square, Triangle (F), Ctrl/Circle,
+Backspace/Select, Tab, Up/Down/Left/Right, MouseLeft/MouseRight, WheelUp/WheelDown. Game controls: docs/CONTROLS.md (WASD left stick, IJKL right
 stick, F3 perf overlay).
 """
 import argparse

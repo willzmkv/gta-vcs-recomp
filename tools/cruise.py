@@ -191,7 +191,7 @@ def record(route, minutes, spot, speed=40.0, style=3):
     """AI drives one after another: when the car stands (traffic, a pole - tools/soak.py sees it too), a new AI car
     beside it carries on from there (a few metres' step in the route: the cruise goes straight from point to point)."""
     os.makedirs(os.path.dirname(os.path.abspath(route)), exist_ok=True)
-    save = os.path.join(ROOT, "build", "rig", "saves", "fortbaxter")
+    save = rig.default_save()
     g = rig.Game.start(save=save, name="cruise_record", port=47671,
                        data_dir=os.path.join(ROOT, "build", "cruise", "record_data"), env={"VCS_TIMING": "1", "VCS_FPS": "60"})
     pts = []

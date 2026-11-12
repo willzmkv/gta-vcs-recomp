@@ -16,7 +16,7 @@ From the user's ELF (`build/elf/SLUS_215.90`; addresses are in the game's code, 
 |---|---|---|
 | FOV global | `0x487484` (float) | written by `FUN_002653e0` (a `CDraw::SetFOV`), read by the camera code at `0x21cd98`, `0x21ce90`, `0x21ec4c`, `0x21f9ac` and others |
 | Aspect-ratio global | `0x487488` (float) | written only by `FUN_002653f0` (a `CDraw::CalculateAspectRatio`); read by the camera (`0x21cdcc`, `0x21cf20`, `0x21ec60`) and 2D code (`0x39fd2c`: world-to-screen with 640/448 and 448.0) |
-| Aspect choice | `FUN_002653f0` | widescreen pref on: 16/9 (5/3 when `[0x6f4d14]` is set); off: 4/3 (1.25 when set). `[0x6f4d14]` looks like the PAL/NTSC flag (non-square pixel variants) |
+| Aspect choice | `FUN_002653f0` | widescreen pref on: 16/9 (5/3 when `[0x6f4d14]` is set); off: 4/3 (1.25 when set). `[0x6f4d14]` is the camera's m_WideScreenOn (cutscenes; found 2026-11-06, game-internals.md 5a), not a PAL/NTSC flag |
 | Widescreen preference | `*(int *)(*(0x48F3D0) + 0x30)` | read through the getter `FUN_002af658` (`lw v0, 0x30(a0)`); the object at `[0x48F3D0]` is created by `FUN_00470fa8` if missing (a menu manager / prefs object - 533 loads of that pointer) |
 | HUD awareness | 106 calls of `FUN_002af658` | the first ones (`0x1147e0`, `0x1149e8`, `0x11589c`) sit next to the HUD's own 4/3 constants (`0x1147f8`, `0x114a18`, `0x1158ac`): the HUD already adjusts for widescreen |
 | Camera view window | `FUN_001ab9e0(camera, flag, tan(fov/2), aspect)` | called at `0x21cdd4` with the aspect global; at `0x21f9d0` with a fixed 16/9 (a second camera - to identify) |
@@ -174,6 +174,19 @@ pause map) are shown at 4:3, pillarboxed.
   screen: every frame's shape matches its picture (the build before: 3 of 100 did not) and the HUD is the same in the
   first gameplay frame as later; the reference scenes at 32:9 unchanged. Regression check: `tools/regress.py` step
   "menushape" (fails with `PS2X_HW_MENU_SWITCH=0`: 29 frames of the menu stretched, 3 of the game squashed).
+- **The game's own Widescreen option retired** (2026-11-06, the user's report: turning it on in the pause menu removed
+  the cutscene bars). Everything it does is in game-internals.md 5a: the PS2's anamorphic mode (Vert- 16:9; HUD, text
+  and pause map 3/4 wide; `_WIDE` menu layouts), which squeezes everything a second time next to the Hor+ view and the
+  HUD squeeze, plus no cutscene letterbox. It is now kept off (`vcs_display.cpp` hooks its setter, so a save's value
+  is not taken), its row on the pause menu's Display page is hidden (`vcs_frontend.cpp`: the rows below move up into
+  its place, up / down skip it), and the bars are Display > Screen > **Cutscene black bars** (`display.cutscene_bars`,
+  default On, `VCS_CUTSCENE_BARS`; Off skips the game's letterbox draw `FUN_002804c8`). At 4:3 it is locked On - the
+  row greyed out showing On, the saved value kept for widescreen: `Spec::locked` / `lockedValue` / `lockedNote`
+  (settings.h), for any setting another one decides; `main.cpp` `cutsceneBarsLocked()`. DECISIONS.md has why;
+  `tools/menu_check.py` "display" and `tools/regress.py` "widepref" check it.
+- **Scope / camera mask** (same day): the black mask around the sniper scope, the camera and binoculars was squeezed
+  into the middle 4:3 with the scope, so the world showed at the sides in widescreen; its side bars now reach the
+  screen edges (game-internals.md 6f "Scope mask", regress step "scopemask").
 - Not done from the plan: window mode, pausing,
   control-channel `menu` / `set` commands (environment overrides cover scripted captures:
   `VCS_ASPECT=169 python tools/scenes.py capture ...`).
@@ -211,7 +224,7 @@ registration order; the vcs.ini keys did not change):
 
 | Page | Section | Settings |
 |---|---|---|
-| Display | Screen | Aspect ratio, HUD |
+| Display | Screen | Aspect ratio, HUD (Cutscene black bars since 2026-11-06) |
 | Display | Frame rate | Game timing, Frame rate cap |
 | Graphics | Image quality | Internal resolution, Anti-aliasing (MSAA), Texture filtering |
 | Mods | Mod loader, Installed mods, Folder | Load mods (`mods.enabled`), Replace textures (`graphics.texture_replacements`), one switch per mod (`mods.<name>`) with its priority slider beside it (`mods.<name>.priority`: a Toggle's `partner` Integer, kept in modloader.ini - `saved = false`), Rescan, Open folder (docs/MODS.md) |
@@ -267,6 +280,11 @@ Audio, Game, Keyboard, Gamepad, Advanced.
   vibration stopped, sound muted).
 - **Keyboard** / **Gamepad**: the bindings and stick, mouse and vibration options (docs/CONTROLS.md).
 - **Advanced**: **Reset all settings** (asks for a second click).
+- **Enhancements** (2026-11-07, after this list was written): **Button prompts** (game-internals.md 6n) and, under
+  *World*, **Traffic density**, **Pedestrian density** and **Draw distance** (100% = the original, up to 300%;
+  `VCS_TRAFFIC` / `VCS_PEDS` / `VCS_DRAW_DISTANCE`; game-internals.md 6o / 12d, `src/game/vcs_world_detail.cpp`).
+  Under *Combat* (2026-11-08): **Drive-by fire rate** - As on the PS2 (default) / The gun's own rate
+  (`VCS_DRIVEBY_RATE=0/1`; game-internals.md 12c, `src/game/vcs_driveby.cpp`).
 
 Registry additions (`settings::Spec`): `Type::Action` (a button: `button` text, `confirm` for a second click; no
 value, nothing in vcs.ini, skipped by applyAll and the page reset); Key `optional` (0 = unbound; right-click clears),

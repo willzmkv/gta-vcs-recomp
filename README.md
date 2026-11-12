@@ -130,14 +130,15 @@ The release zip contains the full source: the steps below work in it too, and in
 - **Python 3**: [python.org](https://www.python.org/downloads/). During setup, tick *Add python.exe to PATH*.
 - **Git**: [git-scm.com](https://git-scm.com/download/win) (the default options are fine). The first build uses it
   to download the libraries the game needs (SDL3, FFmpeg, ...), so it also needs an internet connection.
-- **Visual Studio 2022 or newer** (the free Community edition, or just the
-  [Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)). In the installer, pick the workload
-  **Desktop development with C++**, and under *Installation details* on the right also tick
-  **C++ Clang tools for Windows**.
 
-That's all: you don't need to open Visual Studio or a special command prompt. CMake and Ninja are found wherever
-they are (Visual Studio's own, the CMake installer, winget, scoop, Chocolatey, pip, CLion...); when none is new enough
-(CMake 3.21, Ninja 1.10), the build downloads them once (~55 MB, into `build\build-tools`).
+That's all: there's no compiler to install. The first build downloads [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)
+(clang, lld, libc++ and the Windows headers in one package; ~190 MB once, into `build\build-tools`). CMake and Ninja
+are found wherever they are (Visual Studio's own, the CMake installer, winget, scoop, Chocolatey, pip, CLion...); when
+none is new enough (CMake 3.21, Ninja 1.10), the build downloads them too (~55 MB).
+
+With Visual Studio 2022 or newer installed (*Desktop development with C++* and *C++ Clang tools for Windows*),
+`set VCS_TOOLCHAIN=msvc` before building uses its clang-cl instead. The game is the same and runs as fast
+(docs/PERFORMANCE.md 29).
 
 **Linux**
 - Python 3 and Git (most distributions have both), then let the build list the rest: in the source folder (step 2),
@@ -279,7 +280,8 @@ Vulkan on Linux -, sound and streaming run on the PC, and the movies are decoded
 
 | What you see | What to do |
 |---|---|
-| `vswhere.exe not found` | Visual Studio isn't installed: see step 1 (or `python tools/setup_vs.py install`). |
+| `llvm-mingw (clang 19 or newer) not found, and downloading it failed` | Check the internet connection and build again; or unpack an llvm-mingw (`ucrt-x86_64`) yourself and set `VCS_LLVM_MINGW` to its folder. |
+| `vswhere.exe not found` (with `VCS_TOOLCHAIN=msvc`) | Visual Studio isn't installed (`python tools/setup_vs.py install`), or build without it: unset `VCS_TOOLCHAIN`. |
 | CMake configure fails, mentioning `clang-cl` | Open the Visual Studio Installer, *Modify*, and tick **C++ Clang tools for Windows**. |
 | `no disc image` | Put the `.iso` in the repository folder, or give its path after `--recompile`. |
 | `unsupported executable build` or `SLUS_215.90 not found on disc` | The disc isn't the USA release (SLUS-21590). Other regions aren't supported. |

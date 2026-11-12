@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "runtime/ps2_host_std.h"
 
 namespace vcs::rslnative
 {
@@ -102,13 +103,13 @@ namespace vcs::rslnative
                         if (log)
                         {
                             static std::map<uint64_t, uint64_t> seen;
-                            static auto at = std::chrono::steady_clock::now();
+                            static auto at = ps2x::hostNow();
                             const uint32_t cb = (dirty & 0x1u) ? (rd32(rdram, node + 0x48u) ? rd32(rdram, node + 0x48u) : rd32(rdram, node + 0x4Cu))
                                                                : rd32(rdram, node + 0x50u);
                             ++seen[(uint64_t(cb) << 32) | ((dirty & 0x1u) ? (rd32(rdram, node + 0x48u) ? 0x48u : 0x4Cu) : 0x50u)];
-                            if (std::chrono::steady_clock::now() - at > std::chrono::seconds(5))
+                            if (ps2x::hostNow() - at > std::chrono::seconds(5))
                             {
-                                at = std::chrono::steady_clock::now();
+                                at = ps2x::hostNow();
                                 for (const auto &[k, n] : seen)
                                     std::fprintf(stderr, "[rsl-plugin] callback 0x%08x at +0x%02x: %llu flushes\n", unsigned(k >> 32),
                                                  unsigned(k & 0xFFu), (unsigned long long)n);
@@ -285,7 +286,7 @@ namespace vcs::rslnative
         {
             uint64_t native = 0, fallback = 0, noRoom = 0, verifySame = 0, verifyDiffer = 0, queueMovedOn = 0;
         } g_stats;
-        auto g_reportAt = std::chrono::steady_clock::now();
+        auto g_reportAt = ps2x::hostNow();
 
         // verify: the last flush's native bytes, compared with what the original left once it has run
         struct Pending
@@ -353,7 +354,7 @@ namespace vcs::rslnative
 
         void report()
         {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             if (!g_log || now - g_reportAt < std::chrono::seconds(10))
                 return;
             g_reportAt = now;

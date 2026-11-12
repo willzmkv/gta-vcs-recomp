@@ -15,7 +15,7 @@ One session from a copy of build/rig/saves/fortbaxter (slot 1 = "1 Soldier"):
   delete  pause menu -> Game -> Delete Game -> slot 2 -> Yes: the slot file and its card-order entry are gone
   backup  the card was zipped into <data>/backups/auto-*.zip before the delete: the deleted slot is in it
 Screenshots after every key press go to OUT (default build/saves); OUT/results.json holds the checks. Exit code 1
-when one fails. Menu keys (CONTROLS.md): Shift = Cross, Return = Start, arrows = D-pad.
+when one fails. Menu keys (CONTROLS.md): Shift = Cross, Escape = Start, arrows = D-pad.
 """
 import argparse
 import glob
@@ -63,7 +63,7 @@ def main():
     data = os.path.join(out, "data")
     folder = os.path.join(data, *FOLDER)
     seed = os.path.join(out, "seed")
-    rig.copy_card(os.path.join(ROOT, "build", "rig", "saves", "fortbaxter", "mc0"), os.path.join(seed, "mc0"))
+    rig.copy_card(os.path.join(rig.default_save(), "mc0"), os.path.join(seed, "mc0"))
     normalise_seed(os.path.join(seed, *FOLDER))
     if os.path.isdir(os.path.join(data, "backups")):
         shutil.rmtree(os.path.join(data, "backups"))
@@ -123,7 +123,7 @@ def main():
         g.cmd("trainer toggle god 1")
         time.sleep(4)
         mark = len(log_text())
-        keys("load", "Return@3", "Right", "Right", "Shift@2", "Shift@3", "Down", "Shift@3", "Up", "Shift@15")
+        keys("load", "Escape@3", "Right", "Right", "Shift@2", "Shift@3", "Down", "Shift@3", "Up", "Shift@15")
         # the runtime's [MC] lines reach the log through a buffered stdout (maybe only at exit): the player being
         # back where the save put them is the check (a hung load leaves him at INITPLA's start); the full read is
         # reported when the log already has it
@@ -135,7 +135,7 @@ def main():
                           "trainer_slot_taken_by_load": "[rig] script slot" in tail, "mission_running": mission,
                           "pos": pos, "saved_pos": saved_pos}
         # delete slot 2 (the Game tab again: Load, New, Delete)
-        keys("delete", "Return@3", "Right", "Right", "Shift@2", "Down", "Down", "Shift@3", "Down", "Down", "Shift@3",
+        keys("delete", "Escape@3", "Right", "Right", "Shift@2", "Down", "Down", "Shift@3", "Down", "Down", "Shift@3",
              "Up", "Shift@8", "Shift@3", "F@2", "F@2", "F@2")
         order = open(os.path.join(folder, ".ps2x-order")).read().split("\n")
         left = [f for f in slot_files() if f.startswith("2 ")]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fog settings check (src/game/vcs_fog.cpp, game-internals.md 6l): Graphics > Fog scales the game's fog range, and the
+"""Fog settings check (src/game/vcs_fog.cpp, game-internals.md 6t): Graphics > Fog scales the game's fog range, and the
 game's own range goes through untouched at 100 %.
 
     python tools/fog_check.py [OUT] [--save DIR] [--port 47630]

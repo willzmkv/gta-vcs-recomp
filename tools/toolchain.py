@@ -1,8 +1,8 @@
 """Shared helpers for the build scripts (tools/build.py, recompile.py, run.py, ...). Standard library only.
 
-- Windows: finds the newest Visual Studio with the C++ x64 toolset (vswhere), takes the vcvars64 environment
-  (cached in build/msvc_env.json) and builds with clang-cl + Ninja. Standalone CMake / Ninja / LLVM / JDK from
-  scoop are preferred when installed.
+- Windows: builds with llvm-mingw's clang + Ninja (downloaded into build/build-tools; no Visual Studio). With
+  VCS_TOOLCHAIN=msvc: the newest Visual Studio with the C++ x64 toolset (vswhere), its vcvars64 environment (cached in
+  build/msvc_env.json) and clang-cl. Standalone CMake / Ninja / LLVM / JDK from scoop are preferred when installed.
 - Linux: the newest LLVM 19+ (Debian / Ubuntu's /usr/lib/llvm-<N>/bin, apt.llvm.org, or the distro's own clang on
   PATH) goes first on PATH, so clang, clang++, ld.lld and llvm-profdata are one version; CMake and Ninja from PATH.
   `check_linux_deps()` lists the packages the build needs (docs/LINUX.md).
@@ -50,9 +50,13 @@ def show(path):
     return path if rel.startswith("..") else rel
 IS_WINDOWS = platform.system() == "Windows"
 
-# our progress lines and the tools' output interleave in order even when stdout is a pipe
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(line_buffering=True)
+# our progress lines and the tools' output interleave in order even when stdout is a pipe. UTF-8 whatever the
+# console's code page: the launcher reads UTF-8, and its PYTHONIOENCODING / PYTHONUTF8 do nothing under -I (isolated
+# mode ignores PYTHON* variables), so a disc named with a character cp1252 lacks ("꞉") stopped the build with a
+# UnicodeEncodeError on Windows (issue 62). errors="replace": printing a name never stops a tool.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=_stream is sys.stdout or None)
 ISO_GLOB = "*Vice City Stories*.iso"
 
 
@@ -609,6 +613,58 @@ def _linux_llvm_bin(env):
     return max(found)[1] if found else None
 
 
+# Windows builds with llvm-mingw (github.com/mstorsjo/llvm-mingw), one zip with clang, lld, libc++,
+# compiler-rt, llvm-windres and mingw-w64's Windows headers and import libraries (D3D11, DirectWrite, dbghelp...) - no
+# Visual Studio (DECISIONS.md 2026-11-03). Pinned and SHA-256 checked (GitHub's asset digest), unpacked into
+# build/build-tools the first time a build needs it; VCS_LLVM_MINGW=<folder> takes another copy. The default since its
+# ThinLTO build is as fast as clang-cl's (PERFORMANCE.md 29); VCS_TOOLCHAIN=msvc keeps Visual Studio's for comparison.
+LLVM_MINGW_DOWNLOADS = {
+    "windows": ("https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/llvm-mingw-20261020-ucrt-x86_64.zip",
+                "fd5462b7f5d93b2ff981fcd3f9c7e427e47f3203c64ea91c27bcc444eebd74cd", "llvm-mingw-20261020-ucrt-x86_64"),
+}
+
+
+WINDOWS_TOOLCHAIN_DEFAULT = "mingw"  # llvm-mingw; "msvc": Visual Studio's clang-cl (PERFORMANCE.md 29)
+
+
+def windows_toolchain():
+    """The Windows compiler: "mingw" (llvm-mingw) or "msvc" (Visual Studio's clang-cl); VCS_TOOLCHAIN chooses."""
+    value = (os.environ.get("VCS_TOOLCHAIN") or WINDOWS_TOOLCHAIN_DEFAULT).strip().lower()
+    if value not in ("mingw", "msvc"):
+        fail("VCS_TOOLCHAIN=%s: mingw (llvm-mingw, the default) or msvc (Visual Studio)" % value, "bad_toolchain")
+    return value
+
+
+def _clang_probe(path):
+    version = clang_version(path)
+    return (version,) if version else None
+
+
+def llvm_mingw_bin(download=True):
+    """The bin folder of llvm-mingw: VCS_LLVM_MINGW's (checked), else the one in build/build-tools, else (download=True)
+    downloaded there. None when there is none and download=False (doctor: nothing is fetched)."""
+    given = os.environ.get("VCS_LLVM_MINGW")
+    if given:
+        clang = os.path.join(given, "bin", "clang.exe")
+        version = clang_version(clang) if os.path.isfile(clang) else 0
+        if version < MIN_CLANG:
+            fail("VCS_LLVM_MINGW=%s is not an llvm-mingw with clang %d or newer (%s)" % (
+                given, MIN_CLANG, "clang %d" % version if version else "no bin\\clang.exe that runs"), "no_clang")
+        return os.path.join(given, "bin")
+    url, sha256, folder = LLVM_MINGW_DOWNLOADS["windows"]
+    bin_dir = os.path.join(TOOLS_DIR, folder, "bin")
+    if (_clang_probe(os.path.join(bin_dir, "clang.exe")) or (0,)) >= (MIN_CLANG,):
+        return bin_dir
+    if not download:
+        return None
+    clang = _download_tool("llvm-mingw", LLVM_MINGW_DOWNLOADS, _clang_probe, (MIN_CLANG,), ["clang"],
+                           hint="unpack an llvm-mingw (github.com/mstorsjo/llvm-mingw, ucrt-x86_64) and set "
+                                "VCS_LLVM_MINGW to its folder", code="no_clang",
+                           need="llvm-mingw (clang %d or newer)" % MIN_CLANG)
+    print("[toolchain] llvm-mingw: " + os.path.dirname(os.path.dirname(clang)))
+    return os.path.dirname(clang)
+
+
 def build_env():
     """Environment for CMake / Ninja / the compiler."""
     env = dict(os.environ)
@@ -616,6 +672,13 @@ def build_env():
         llvm = _linux_llvm_bin(env)
         if llvm:
             env["PATH"] = os.pathsep.join([llvm, env.get("PATH", "")])
+        return env
+    if windows_toolchain() == "mingw":
+        # first on PATH, as Linux's LLVM: clang, ld.lld, llvm-profdata, llvm-windres are one version
+        front, jdk = _scoop_paths()
+        env["PATH"] = os.pathsep.join([llvm_mingw_bin()] + front + [env.get("PATH", "")])
+        if jdk:
+            env["JAVA_HOME"] = jdk
         return env
     cache = os.path.join(BUILD, "msvc_env.json")
     vs = _vs_root()
@@ -866,19 +929,32 @@ def _version_text(version):
     return ".".join(str(n) for n in version)
 
 
-def _download_tool(title, downloads, probe, minimum, names):
-    """Unpacks this platform's build from `downloads` into TOOLS_DIR (once) and returns its program; fails (no_cmake)
-    when there is none for this machine or it can't be fetched."""
+CMAKE_HINT = "install it (https://cmake.org/download, or your system's cmake / ninja package)"
+
+
+def long_path(path):
+    """Windows: `path` as an extended-length path (\\\\?\\C:\\..., \\\\?\\UNC\\server\\...), which file calls take past
+    the 260-character MAX_PATH whatever the LongPathsEnabled policy says. Elsewhere `path` itself."""
+    if not IS_WINDOWS:
+        return path
+    path = os.path.abspath(path)
+    if path.startswith("\\\\?\\"):
+        return path
+    return "\\\\?\\UNC\\" + path[2:] if path.startswith("\\\\") else "\\\\?\\" + path
+
+
+def _download_tool(title, downloads, probe, minimum, names, hint=CMAKE_HINT, code="no_cmake", need=None):
+    """Unpacks this platform's build from `downloads` into TOOLS_DIR (once) and returns its program; fails (`code`,
+    with `hint` on what to do instead) when there is none for this machine or it can't be fetched."""
     import hashlib
     import http.client
     import tarfile
     import urllib.request
     import zipfile
     key = download_platform()
-    need = "%s %s or newer" % (title, _version_text(minimum))
+    need = need or "%s %s or newer" % (title, _version_text(minimum))
     if key not in downloads:
-        fail("%s not found and there is no build of it to download for this machine: install it (https://cmake.org/"
-             "download, or your system's cmake / ninja package)" % need, "no_cmake")
+        fail("%s not found and there is no build of it to download for this machine: %s" % (need, hint), code)
     url, sha256, folder = downloads[key]
     target = os.path.join(TOOLS_DIR, folder)
     archive = os.path.join(TOOLS_DIR, url.rsplit("/", 1)[1])
@@ -901,14 +977,17 @@ def _download_tool(title, downloads, probe, minimum, names):
                 done += len(block)
                 progress.update(done >> 20, total >> 20, "MB")
     except (OSError, http.client.HTTPException) as e:
-        fail("%s not found, and downloading it failed (%s). Check the internet connection, or install it: Visual "
-             "Studio's \"C++ CMake tools for Windows\", https://cmake.org/download or your system's package"
-             % (need, e), "no_cmake")
+        fail("%s not found, and downloading it failed (%s). Check the internet connection, or %s" % (need, e, hint),
+             "download_failed" if code != "no_cmake" else code)
     if digest.hexdigest() != sha256:
         os.remove(archive + ".part")
         fail("the %s download is not the file it should be (SHA-256 %s, expected %s): try again; a proxy or antivirus "
              "may have changed it" % (title, digest.hexdigest(), sha256), "download_failed")
     os.replace(archive + ".part", archive)
+    # unpacked into <folder>.unpack\<folder>\...: llvm-mingw's deepest files then pass Windows' 260-character limit
+    # below a folder longer than ~86 characters (Quiver's are 105) and the build stopped at a FileNotFoundError with
+    # nothing in its logs (issue 69). The \\?\ form has no such limit; the unpacked tree's own paths are shorter.
+    unpacked, target = long_path(unpacked), long_path(target)
     shutil.rmtree(unpacked, ignore_errors=True)
     if archive.endswith(".zip"):
         with zipfile.ZipFile(archive) as z:
@@ -933,6 +1012,7 @@ def _download_tool(title, downloads, probe, minimum, names):
     else:
         shutil.copytree(source, target)
     shutil.rmtree(unpacked, ignore_errors=True)
+    target = os.path.join(TOOLS_DIR, folder)  # the plain form again: the program goes on PATH and into CMake
     for d in (os.path.join(target, "bin"), target):
         for name in names:
             path = os.path.join(d, exe(name))
@@ -941,7 +1021,7 @@ def _download_tool(title, downloads, probe, minimum, names):
                     os.chmod(path, 0o755)  # zip keeps no file modes
                 if (probe(path) or ()) >= minimum:
                     return path
-    fail("the downloaded %s (%s) does not run" % (title, target), "no_cmake")
+    fail("the downloaded %s (%s) does not run" % (title, target), code)
 
 
 def build_tools(env, download=True):
@@ -1057,7 +1137,10 @@ def configure(env, force=False, build_dir=BUILD_DIR, defines=None):
     """CMake configure of `build_dir` (first time, when forced, or with `defines`: {"PS2X_LTO": "THIN", ...}). The
     CPU baseline follows this PC (cpu_level): a tree set up for another CPU - or from before PS2X_CPU, i.e. AVX2 - is
     configured again for this one, which rebuilds everything."""
-    force = drop_foreign_cache(build_dir, ROOT) or stale_tools(build_dir) or force
+    force = drop_foreign_cache(build_dir, ROOT) or stale_tools(build_dir) or python_changed(build_dir) or force
+    kept = drop_other_compiler(build_dir, env)
+    if kept is not None:
+        force, defines = True, dict(kept, **(defines or {}))
     level = check_cpu()
     configured = os.path.isfile(os.path.join(build_dir, "build.ninja"))
     cached = cached_value(build_dir, "PS2X_CPU") or "AVX2"  # CMakeLists.txt's default
@@ -1070,7 +1153,7 @@ def configure(env, force=False, build_dir=BUILD_DIR, defines=None):
         return
     cmd = ["cmake", "-S", ROOT, "-B", build_dir, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF"]
     cmd += ["-D%s=%s" % (k, v) for k, v in (defines or {}).items()]
-    cmd += compiler_defines(env) + deps_defines()
+    cmd += compiler_defines(env) + deps_defines() + python_defines()
     if os.path.normcase(os.path.abspath(build_dir)) == os.path.normcase(BUILD_DIR):
         cmd.append("-DVCS_GAME_DIR=" + BUILD.replace(os.sep, "/"))  # vcs.exe at the top of the build folder
     print("[build] configuring " + show(build_dir) + "".join(" %s=%s" % kv for kv in (defines or {}).items()))
@@ -1103,6 +1186,32 @@ def drop_foreign_cache(build_dir, source):
     return True
 
 
+KEPT_ON_RESET = ("PS2X_LTO", "PS2X_PGO")  # the build's optimisation (build.py --opt) survives a new compiler
+
+
+def drop_other_compiler(build_dir, env):
+    """Windows: a build tree set up with the other compiler (VCS_TOOLCHAIN switched, or a newer llvm-mingw pinned) -
+    CMake can't change the compiler of a tree, so its cache goes and the tree is set up again (a full rebuild).
+    Returns the optimisation the tree had ({"PS2X_LTO": ..., "PS2X_PGO": ...}) for the new set-up, None when the tree
+    is kept."""
+    cached = cached_value(build_dir, "CMAKE_CXX_COMPILER") if IS_WINDOWS else None
+    if not cached:
+        return None
+    if windows_toolchain() == "msvc":
+        same = os.path.splitext(os.path.basename(cached))[0].lower() == "clang-cl"
+    else:
+        want = _which("clang++", env)
+        same = bool(want) and os.path.normcase(os.path.abspath(cached)) == os.path.normcase(os.path.abspath(want))
+    if same:
+        return None
+    kept = {k: cached_value(build_dir, k) for k in KEPT_ON_RESET}
+    print("[build] %s was set up with another compiler (%s): setting it up again for %s - everything is rebuilt"
+          % (show(build_dir), cached, "Visual Studio's clang-cl" if windows_toolchain() == "msvc" else "llvm-mingw"))
+    os.remove(os.path.join(build_dir, "CMakeCache.txt"))
+    shutil.rmtree(os.path.join(build_dir, "CMakeFiles"), ignore_errors=True)
+    return {k: v for k, v in kept.items() if v is not None}
+
+
 DEPS_DIR = os.path.join(ROOT, "deps")
 
 
@@ -1124,6 +1233,27 @@ def deps_defines(deps_dir=DEPS_DIR):
     return defines
 
 
+def python_defines():
+    """The Python running this one for CMake's find_package(Python3): the build runs tools/hlsl_dxbc.py (and on Linux
+    hlsl_spirv.py) to compile the shaders. Left to itself CMake looks for a Python of the PC's own, and a release runs
+    on the one it carries (python/, python.org's embeddable CPython, not on PATH): with none installed - or a broken
+    one - 0.2.1's configure stopped at "Could NOT find Python3" (issues 67-70, 73)."""
+    return ["-DPython3_EXECUTABLE=" + sys.executable.replace(os.sep, "/")] if sys.executable else []
+
+
+def python_changed(build_dir):
+    """A configured tree whose CMake cache has another Python than this one (or none: set up before 0.2.1's shader
+    step, or by a configure that failed to find one) - configured again so the build's shader step runs with this."""
+    if not sys.executable or not os.path.isfile(os.path.join(build_dir, "build.ninja")):
+        return False
+    cached = cached_value(build_dir, "Python3_EXECUTABLE")
+    same = bool(cached) and os.path.normcase(os.path.normpath(cached)) == os.path.normcase(os.path.normpath(sys.executable))
+    if not same:
+        print("[build] %s: CMake set up %s; using this one (%s)" % (
+            show(build_dir), "with another Python (%s)" % cached if cached else "without a Python", sys.executable))
+    return not same
+
+
 def configure_failure(log):
     """The launcher's name for why a configure failed, read from its log."""
     text = tail(log, 200).lower()
@@ -1141,8 +1271,18 @@ def compiler_defines(env):
     """-DCMAKE_C(XX)_COMPILER for a fresh build tree: clang-cl on Windows, clang 19+ elsewhere (build_env put it first
     on PATH); and build_tools' Ninja (CMAKE_MAKE_PROGRAM: by name it would be looked up on PATH)."""
     ninja = ["-DCMAKE_MAKE_PROGRAM=" + build_tools(env)["ninja"].replace(os.sep, "/")]
-    if IS_WINDOWS:
+    if IS_WINDOWS and windows_toolchain() == "msvc":
         return ["-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl"] + ninja
+    if IS_WINDOWS:  # llvm-mingw, by full path (build_env put its bin first on PATH)
+        tools = {name: _which(name, env) for name in ("clang", "clang++", "llvm-windres")}
+        if not all(tools.values()):
+            fail("llvm-mingw's %s not found on the build's PATH" % ", ".join(n for n, p in tools.items() if not p),
+                 "no_clang")
+        # -static for every program of every tree (the game's, the launcher's, the IOP tests'): libc++ and libunwind
+        # inside, no DLL of llvm-mingw's needed to run it
+        return ["-DCMAKE_%s_COMPILER=%s" % (lang, tools[name].replace(os.sep, "/"))
+                for lang, name in (("C", "clang"), ("CXX", "clang++"), ("RC", "llvm-windres"))] + \
+               ["-DCMAKE_EXE_LINKER_FLAGS=-static"] + ninja
     clang, clangxx = _which("clang", env), _which("clang++", env)
     if not clang or not clangxx or clang_version(clang) < MIN_CLANG:
         fail("clang %d or newer not found - install it (docs/LINUX.md; e.g. sudo apt install clang-20 lld-20 llvm-20), "
@@ -1227,6 +1367,20 @@ LAUNCHER_LINUX_DEPS = [
 PACKAGE_MANAGERS = ("apt", "dnf", "pacman")  # by _linux_family()
 
 
+def _fedora_ffmpeg_devel(quiet=False):
+    """Fedora's FFmpeg headers for the FFmpeg that is installed: RPMFusion's ffmpeg-libs conflicts with Fedora's
+    libavcodec-free that ffmpeg-free-devel pulls in, and dnf then drops the whole install (issue 63). RPMFusion's own
+    ffmpeg-devel then; Fedora has no package called ffmpeg-libs (its libraries are libavcodec-free...), and
+    RPMFusion's libavcodec-freeworld sits beside ffmpeg-free, so the default stays right for both."""
+    try:
+        rpmfusion = subprocess.run(["rpm", "-q", "--quiet", "ffmpeg-libs"], timeout=60).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        rpmfusion = False
+    if rpmfusion and not quiet:
+        print("[deps] RPMFusion's FFmpeg is installed: its headers are ffmpeg-devel (not Fedora's ffmpeg-free-devel)")
+    return "ffmpeg-devel" if rpmfusion else "ffmpeg-free-devel"
+
+
 def linux_missing(env, deps=None, quiet=False):
     """The missing Linux build dependencies: a list of (label, packages for this distro). deps: LINUX_DEPS (the game,
     the default) or LAUNCHER_LINUX_DEPS. CMake / Ninja / LLVM are checked with the game's list only."""
@@ -1239,7 +1393,10 @@ def linux_missing(env, deps=None, quiet=False):
         else:
             ok = bool(_which(check, env))
         if not ok:
-            missing.append((label, packages[family]))
+            names = packages[family]
+            if names == "ffmpeg-free-devel":
+                names = _fedora_ffmpeg_devel(quiet)
+            missing.append((label, names))
     if deps is not None:
         return missing
     tools = build_tools(env, download=False)

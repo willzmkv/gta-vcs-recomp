@@ -1,4 +1,4 @@
-// The game's distance fog as settings: where it starts and where it is total (docs/game-internals.md 6l).
+// The game's distance fog as settings: where it starts and where it is total (docs/game-internals.md 6t).
 #pragma once
 
 class PS2Runtime;

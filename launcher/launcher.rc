@@ -1,6 +1,7 @@
 // The launcher's icon (launcher/make_icon.py draws it) and version information (VCS_VERSION_*: VERSION in the
-// repository root, through launcher/CMakeLists.txt).
+// repository root, through launcher/CMakeLists.txt; the text in launcher_version.h, which it writes).
 #include <winver.h>
+#include "launcher_version.h"
 
 1 ICON "launcher.ico"
 

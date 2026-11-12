@@ -81,7 +81,9 @@ docs/MODS.md. The section below (2026-10-31) is upstream PR #8's, which this for
 ## Phase 0 - setup (done)
 - Repo, GPL-3.0, `.gitignore` blocking game files; `tools/vcs_disc.py`
 - PS2Recomp vendored (changes in `docs/PS2RECOMP_PATCHES.md`)
-- Toolchain: clang-cl 23 + MSVC 14.29 STL, CMake, Ninja, Ghidra 12.1.4 + EE ext, JDK 21
+- Toolchain: Windows llvm-mingw 20261020 (clang 23.1.4, libc++, UCRT; downloaded by the build - no Visual Studio since
+  2026-11-03; `VCS_TOOLCHAIN=msvc`: clang-cl 23 + MSVC 14.29 STL), CMake, Ninja, Ghidra 12.1.4 + EE ext, JDK 21. Same
+  pictures and exactness as clang-cl, ThinLTO game thread level (PERFORMANCE.md 29, DECISIONS.md 2026-11-03)
 
 ## Phase 1 - analysis (done)
 - 9,550 Ghidra functions + 833 indirectly-referenced ones Ghidra missed
@@ -502,6 +504,22 @@ dropped on uploads (lazy render-target patching).
       brake's constants patched to load from guest RAM 0x7FF00..), and CBike's lean `max(step, 0.5)` patched like the
       ped one (a gentle turn leant 22 degrees at 144 fps against 30). After: coasting 3.45 / 3.45 / 3.45 m/s^2 at 1/30
       / 60 / 144, the run-over pitch rate 0.042 / 0.043 / 0.041, the bike past a body upright at all three.
+- [x] Bike braking at high frame rates (2026-11-04, GitHub issue 64: at 240 fps a bike braked from speed threw its
+      rider). CBike::ProcessControl's brake wobble (a sideways shove at a wheel while the brake is held, its phase on
+      the step but the shove once a frame) came 4.8 times as often per second at 144 fps: braking from 36 m/s the bike
+      fishtailed 58 degrees at 144 fps and spun round onto its side at 240 (11 / 5 degrees at 30 / 60). Scaled by step /
+      (50/30) in `src/game/vcs_physics_timing.cpp` (the ApplyTurnForce hook, return address 0x33BE5C): 4 / 3 / 1.3 /
+      0.5 degrees at 1/30 / 60 / 144 / 240, upright at all. Cars brake the same at every rate (stop in 1.08-1.13 s from
+      24 m/s). Left: a bike stops in 1.63 s at 30 fps and 1.12 s at 240 - at 30 it pitches further and its rear wheel
+      can lift; the integration's step, not a per-frame term (game-internals.md 4). `framerate_audit.py` scenarios
+      `bikebrake`, `brake` (on the airport runway, RUNWAY_SPOT). Found with `VCS_TURN_LOG` / `VCS_WHEEL_LOG`.
+      Seen on the way, not looked into: at 1/240 the audit's bikecoast / bikelean bike started moving ~0.4 s after the
+      throttle (it did at once at 1/30 - 1/144).
+- [x] "Display refresh" cap stuck at 60 after a restart (2026-11-04, GitHub issue 64): vcs.ini is applied before SDL
+      starts, so the cap read the display's refresh with no display (`platform::displayRefreshHz`'s fallback, 60) and
+      paced the main loop at 60 until the setting was changed. The limiter now re-applies the pace when the cap it sees
+      differs from the one applied (also a window moved to another display); `[framerate] cap N fps` in the log.
+      Checked: 60 at start, then 144 (this machine's display), host 143 fps.
 - [x] Ferris wheel and escalators above 50 fps (2026-10-31, GitHub issue 10: Vic fell out of the ferris wheel at 60
       fps). The wheel (FUN_00175620) and the escalators (FUN_002469A0) give their objects the move speed `displacement /
       max(step, 1.0)`, step times too small above 50 fps (0.35 at 144); a ped on them moves with that speed, so he
@@ -519,6 +537,23 @@ dropped on uploads (lazy render-target patching).
       Then the same `max(step, 0.5)` in vehicles and bikes in water and a boat's rudder, patched: at 144 fps a car kept
       1.6 m/s one second into the sea (0.6 at 30), a bike sank to the bottom; after, 0.76 m/s and the bike settles 2.95 m
       deep (2.75 at 30). `framerate_audit.py` carwater, bikewater. Left: the ped ones (CPed::ProcessControl).
+- [x] **Rotor blades against walls at high frame rates** (2026-11-10, GitHub issue 102; game-internals.md 4): the
+      blade test sets a damage impulse on every frame a blade touches something and the helicopter loses the same
+      health for it each frame - 12.75 for a Maverick: 375 a second at 30 fps, 1840 at 144, on fire within a second.
+      The blades now count once per 1/30 s (`src/game/vcs_physics_timing.cpp` 4., `VCS_PHYSICS_TIMESTEP=0` off).
+      `framerate_audit.py --only rotor` (new: a Maverick in an alley narrower than its rotor): 375 / 391 / 377 / 389 /
+      395 a second at 1/30 / 60 / 100 / 144 / 240. Seen on the way: the health that falls is the vehicle's +0x27C, not
+      the +0x278 the trainer's vehicle invincibility / repair and the F3 panel use - to look at.
+- [x] **Purple Haze stuck on "Loading..." above 30 fps** (2026-11-10, GitHub issue 41; game-internals.md 11h): at 60
+      fps the truck that rams the van in GON_C3's cutscene turns the van instead of pushing it, rolls on and runs over
+      the first thug as he is created behind the faded-out screen; the audio monitor script frees his line's slot and the
+      mission waits for the line to load for ever. Reproduced every time with original timing at 60 fps (independent
+      timing got through by luck: the thug knocked down, health 64). Two fixes in `src/game/vcs_script_fixes.cpp`
+      (`VCS_SCRIPT_FIXES=0` off): the main script's wait for a line to load also ends when the slot was freed (the
+      loop that held Shakedown too), and Purple Haze's truck is parked by the mission's own commands before the thugs
+      are created (frames other than the PS2's only). `tools/haze_check.py`: state 60 reached, both thugs at health
+      100, the truck parked; the whole mission passes at original 60 and independent 144 fps; with the fixes off it
+      sticks as before. Open: why the hit differs with the step (game-internals.md 13).
 - [ ] Fixes for what changes at the shorter step (physics, animations, script waits, particles, camera), each behind
       the switch; frame pacing. Left from the script survey (game-internals.md 11f): per-frame object / camera /
       text animations in missions (looks only).
@@ -601,6 +636,25 @@ dropped on uploads (lazy render-target patching).
       it after the points before it, in every configuration; a fresh teleport there from Fort Baxter lands (z 14.5).
       Collision streaming order / timing at that spot needs a look.
 ## Phase 5 - stability
+- [x] **Memory growing for as long as the player moves about** (2026-11-10, GitHub issue 115: vcs.exe at 5.3 GB on a
+      PC with 8 GB; PERFORMANCE.md 31, DECISIONS.md 2026-11-10): the RSL replay's recordings, keyed by guest address
+      and length, were never dropped, and the game streams the same model in at ever new addresses. On a route across
+      the map (a move every 30 s) the process grew by 40 MB a minute - 245 -> 842 MB in 15 minutes, 2.3 GB an hour -
+      and stayed at ~300 MB with the recordings off. They now have a limit (`VCS_RSL_RECORDINGS_MB`, 256; 0 = none),
+      least recently used first; a recording's confirmation is withdrawn before it is freed, so the skip (FULLY_NATIVE
+      step 4b) never meets a missing one; the game thread's maps are trimmed with it. Same route: levels off at
+      650-700 MB (40 minutes: +1.45 MB a minute over the second half, +0.78 with no recordings at all; +0.02 with the
+      limit at 64 MB, where it stays at ~470 MB). Checked with the limit at 24 MB: `VCS_RSL_SKIP_VERIFY` 4.87M decisions 0 wrong,
+      `VCS_RSL_WORLD_VERIFY` 7.32M recordings 0 differ; no skipped block read from guest RAM in any run.
+      `tools/memcheck.py` (new) is the check: the route, memory every 10 s, fails when it still rises.
+- [ ] Fire, explosions and flame-thrower flames invisible on AMD GPUs (GitHub issue 4: RX 6600; a laptop's Radeon iGPU,
+      while its NVIDIA GPU drew them) - **likely fixed 2026-11-04, waiting on the reporters**: hidden by everything but
+      the sky, i.e. the fire's depth lost to every written one. D3D11 no longer writes the GS depth from the pixel shader
+      (SV_Depth, a GL-era fix Vulkan had already dropped); the rasterised depth is the same value. Not reproducible here
+      (GTX 1080 Ti and WARP draw the fire; the D3D11 debug layer silent). Checked: the fire scene (rig, ADD_EXPLOSION)
+      draws flames, fireball, smoke and the ground's shadows as before; reference scenes with / without the shader depth:
+      statics 0.00-0.02, moving ones only timing. `PS2X_HW_SHADER_DEPTH=1` brings it back (DECISIONS.md 2026-11-04,
+      game-internals.md 6l).
 - [x] Saves lost when saving (players' reports after 0.1.0: "crashed and destroyed my savegame", "deletes the save
       file when I save at Phil's safehouse") - **fixed 2026-11-01** in the card layer (game-internals.md 10f). The slot
       file is named after the last mission; "Kill Phil: Part 2" made NTFS put the save in a stream of an empty
@@ -701,6 +755,16 @@ dropped on uploads (lazy render-target patching).
   limits (src/game/vcs_input.cpp; why: game-internals.md 12b). The gamepad keeps the game's own speeds (pitch 0.6 x the
   heading's). `tools/controls_check.py`: "mouse pitch at once" (120 counts -> +0.300 two frames later, still +0.300
   after 22); 47 checks, 0 failed.
+- [x] **The mouse's camera stopped at a wall on foot** (reported by the user 2026-11-11, fixed the same day): turned
+  toward a building with the mouse, the camera stood still at the wall's edge while its heading turned on behind the
+  wall (at the Fort Baxter barracks door: 0.744 rad behind its heading after a radian of mouse, at 4.41 m; the
+  gamepad's stick is pulled in toward the player instead). The game pulls the camera in only for a turned stick;
+  while the mouse turns the on-foot camera, and 300 ms after, the pad read now sets `0x487E58`, the game's own switch
+  for that path (src/game/vcs_input.cpp; game-internals.md 12b "On foot: the stick, the camera on its string,
+  walls"). Measured at 30 / 60 / 144 fps: the camera 0.001 rad from its heading, pulled in to 3.19 m. First part of
+  an on-foot mouse camera that was built and taken out again that day (DECISIONS.md), then asked for on its own.
+  `VCS_FOOT_WALL=0`: as before. `tools/controls_check.py`: two new checks (the stick's camera at the wall as the
+  reference, then the mouse's); 77 checks, 0 failed.
 - **Free aim with the mouse and the gamepad** (2026-10-31, asked for by the user): Keyboard > Free aim / Gamepad > Free
   aim (off by default): with a gun, holding R1's button aims where the mouse / right stick points with the game's own
   circle, shots go through it, Vic moves as he does locked on with that gun; fists / melee / thrown / scoped weapons keep
@@ -738,6 +802,30 @@ dropped on uploads (lazy render-target patching).
   circle hit and one beside him not, the script's end ends it. (Starting the range from the trainer's mission list
   drops Vic through the floor: the range is an interior the door's script loads - the game's, with or without free
   aim.)
+- **Aiming in Farewell To Arms** (2026-11-03, a player's report and the user's: the aim snapped to the left now and then;
+  0.0.2, before free aim, was fine): the mission attaches Vic to its helicopter's door (ATTACH_CHAR_TO_CAR, 70 deg
+  either side), whose camera (mode 45) keeps its heading signed, relative to the door; the scopes' mouse wrapped it into
+  0..2 pi, so the first turn right of the middle became +6.27 and the game's clamp put it at +70 deg, the left limit
+  (measured: 0.000 -> +1.222 for 10 counts). Kept signed now, and free aim takes the mounted gun over like the car's and
+  the range's (game-internals.md 12c): the mouse / right stick turn it, the left stick centred, the gamepad's R1 fires.
+  In the mission (window shown): 20 counts a step 0.000 -> -0.300 and back to +0.300, no jump; fired down into the
+  street through the circle. controls_check `mounted_gun` (the mission's attachment, to a car): free aim off the mouse
+  -0.100 / +0.200 rad per 40 / 80 counts, the left stick turns it; on - the mouse, the right stick (-0.66 in 0.3 s), the
+  left stick centred, R1 as Circle; -70.0 / +70.0 deg at the limits; a man under the circle hit, one beside him not;
+  DETACH_CHAR_FROM_CAR ends it.
+- **The mouse on the car camera** (2026-11-03, the user's report: slow and sluggish): behind a car, bike or boat (modes
+  18 / 22) the mouse turned the camera through the stick, at its top speed, while the car dragged the camera after it and
+  pulled it toward where it drove. Now a hook before the game's update (FUN_0029FAF0, src/game/vcs_carcam.cpp) turns it
+  by the mouse's angle, and while the mouse moves it stays where it is put; Keyboard > Car camera return (1.5 s) after
+  the mouse stops it eases back behind the car (~2 s, as slow driving as standing), then the game's camera has it again
+  (game-internals.md 12b, DECISIONS.md). Measured at 30 / 60 / 144 fps: 200 counts -> -0.500 rad, held to 0.000 for 1 s
+  standing and driving, back within 0.01 rad of behind in 2-2.5 s. `tools/controls_check.py`: three checks in place of
+  the old one (turned and held, back behind the car, driving); 71 checks, 0 failed.
+  Then (the user's ask) Keyboard > Car camera sensitivity (100%, 10-400%, on top of Mouse sensitivity): controls_check
+  "car camera sensitivity" (200 counts at 200% -> -1.000 rad); 72 checks, 0 failed. And (the user's report: the
+  gamepad's stick did nothing after the mouse until the camera was back behind the car) the right stick - gamepad or
+  camera keys - now hands the camera back to the game at once: controls_check "the right stick takes the car camera
+  back from the mouse" (0.5 s of full right after the mouse: -0.98 rad, state idle).
 - **Music / sound effects volume** (2026-10-28, asked for by the user): Audio > Music and Sound effects are the game's
   own levels, in step with its pause menu both ways and kept across save loads (game-internals.md 9c). controls_check
   checks that the levels reach the game and its prefs, a save load keeps them, and the pause menu's slider changes the
@@ -776,6 +864,34 @@ dropped on uploads (lazy render-target patching).
   Sector culling was already right. Checked: plane edge = view window x at 16:9 (0.9336) and 16:10 (0.8402),
   regress step "widecull" (fails with `VCS_WIDE_CULL=0`: 0.7002); spheres passing the test at 16:9 +8-25% over the
   three bench spots; 4:3 untouched (the wrapper returns before reading memory).
+- **The game's own widescreen option retired; Cutscene black bars a setting** (2026-11-06, the user's report: with the
+  pause menu's Display > Widescreen on, cutscenes had no bars). Every effect of that option read from the code
+  (game-internals.md 5a): a Vert- 16:9 aspect, the HUD / text / pause map 3/4 wide and the `_WIDE` menu layouts - the
+  PS2's answer to a TV that stretches the picture, which double-squeezes everything next to F2's Hor+ and HUD squeeze -
+  and no cutscene letterbox. Now (`src/game/vcs_display.cpp`, `vcs_frontend.cpp`; DECISIONS.md): the preference kept
+  at 0 (its setter hooked: a save that has it on no longer turns it on), its pause-menu row hidden (the rows below move
+  up, up / down skip it), and Display > **Cutscene black bars** (default On; `VCS_CUTSCENE_BARS`). Checked: mission
+  50's cutscene with bars on / off at 4:3 and 16:9 (16:9 off: the whole 16:9 picture, on: the bars inside it); a save
+  made with the PS2's mode on loads with the preference 0 and the normal view (`VCS_WIDESCREEN=game`: Vert- as before);
+  `menu_check.py` 33 checks, 0 failed (5 new: no Widescreen row, up / down past it, no gap, the mouse on a moved row);
+  regress step "widepref" (passes). Later the same day (the user's request): the setting is locked On at 4:3 - greyed
+  out showing On, the saved choice kept for widescreen (`Spec::locked`, settings.h). Checked: the F2 Display page at
+  4:3 (greyed, On), 16:9 (the saved Off, changeable) and Match window in the 960x672 test window (changeable);
+  mission 50's cutscene with the setting Off while the aspect is switched live 16:9 -> 4:3 -> 16:9 (no bars, bars,
+  no bars); "widepref" now runs 16:9 On, 16:9 Off and 4:3 Off (bars) - passes.
+- **Scope and camera mask at the screen edges** (2026-11-06, checked at the user's request): at 16:9 the sniper rifle's
+  scope, the camera and binoculars had their black mask squeezed into the middle 4:3, the 3D world showing in the strips
+  beside it. The mask's two side bars now reach the screen edges, drawn unsqueezed (game-internals.md 6f "Scope mask",
+  `src/game/vcs_hud.cpp`, `VCS_SCOPE_FILL=0` = before). Checked: screenshots at 4:3 / 16:9 with HUD Keep 4:3 and Screen
+  edges (strips at most 2 of 255, as the PS2's own mask at 4:3); regress step "scopemask" (fails with
+  `VCS_SCOPE_FILL=0`: 253); `menu_check.py` 33 / 0 failed, `hud_check.py` passes.
+- **Purple Haze's haze across the whole picture** (2026-11-10, GitHub issue 93): the tunnel vision
+  (SET_TUNNEL_VISION_INTENSITY) is eight quarter-screen sprites drawn by CHud::Draw; in widescreen they were grouped
+  with the HUD into one element kept at 4:3 in the middle, so the sides of the picture stayed clear and the clock /
+  weapon moved in from the right edge. They are now a screen effect: unsqueezed, never grouped (game-internals.md 6f
+  "Tunnel vision", `src/game/vcs_hud.cpp`, `VCS_HAZE_FILL=0` = before). Checked: screenshots at 16:9 with HUD Keep 4:3
+  and Screen edges, 21:9, 4:3 (unchanged); `tools/haze_check.py` (every piece anchored "stretch" in 376 frames, the
+  HUD's right cluster at the right edge in all of them).
 
 - **Trainer** (2026-10-26, docs/TRAINER.md): an RDR2 Native Trainer style menu (F5 / Back + RB) - god mode, never
   wanted, wanted level, money, every weapon and loadouts, unlimited ammo, no reload, spawning all 110 vehicles,
@@ -791,6 +907,64 @@ dropped on uploads (lazy render-target patching).
   Same day: a mission launched under it hung on "Loading..." (the first version replaced the camera's update, which
   drives a cutscene's end); fixed, and a launch turns it off. `--freecam` 8 checks (Soldier's cutscene played out
   under it), 0 failed; the full check 41, 0 failed.
+- **The game's pause menu with the keyboard and the mouse** (2026-11-05, the user's request; CONTROLS.md, DECISIONS.md,
+  game-internals.md 6m, `src/game/vcs_frontend.cpp`): Start is Escape (was Enter); in the menu Enter = Cross, Escape =
+  Triangle (back; closes it from the tab bar); the cursor shows; pointing moves the game's highlight, a click selects,
+  sliders follow the cursor, the wheel turns choices / scrolls / zooms the map, the map drags, the right button goes
+  back - all as pad input, the gamepad unchanged. `tools/menu_check.py`: 27 checks, 0 failed; `saves.py` (Escape now
+  opens the menu) passes.
+- **Button prompts by device** (2026-11-07, the user's request; the new F2 page **Enhancements**, DECISIONS.md,
+  game-internals.md 6n, `src/game/vcs_prompts.cpp`, `vcs_glyph_art.cpp`): Enhancements > Button prompts - Original (PS2,
+  the default), Automatic, PlayStation, Xbox, Keyboard & mouse. The help text's controls (`~k~ ~ACTION~`, words such as
+  "R3 button" and the cross / circle / triangle / square glyphs) and the pause menu's help-bar buttons become glyphs of
+  the set: the keys / mouse buttons the player bound (on foot, or the Driving keys in a vehicle; Enter / Escape in the
+  menu), or the physical pad button bound on the Gamepad page, drawn by code into an atlas at the window's size (97
+  glyphs, 512x512 at 640x448, 13 ms on a helper thread). Automatic follows the device used last (a key, a click or the
+  mouse moved past a nudge vs a pad button or a stick / trigger past half way), and a help box already up switches with
+  it. Original runs the game's own code. `tools/prompts_check.py`: 5 checks (expand, sets, automatic, menu, original),
+  0 failed; screenshots at 4:3 and 16:9 with the HUD at the screen edges. Not done: the Controls page's controller
+  picture, a Nintendo set (a Nintendo pad shows Xbox glyphs for now).
+- **Traffic / pedestrian density and draw distance** (2026-11-07, the user's request; DECISIONS.md, game-internals.md
+  6o / 12d, `src/game/vcs_world_detail.cpp`): Enhancements > World - **Traffic density**, **Pedestrian density**,
+  **Draw distance**, 100% (the original) to 300%. Density scales the spawners' own constants (the scripts' multipliers
+  stay theirs: a mission's 0 still empties the streets), raises the caps (cars 16 -> 28, peds 25 / 30 -> 45) only
+  while 16 slots stay free in each pool (the game deletes the closest car / ped, visible or not, below 8), and
+  scales each spawner's chance per road class. Draw distance writes the game's own unused LOD scale `0x4887F8` as
+  set. Cars in view are not removed while any World setting is above 100% (the user saw them vanish ahead while
+  driving: the game's 160 m on-screen removal, inside the longer draw distance). Measured: peds at a Little Haiti spot 22-24 -> 34-36, random cars while
+  driving 7-9 -> 9-10 (the spawn spots limit cars, 12d); draw distance 300%: about +9% draws in an emptied street,
+  more with people about, the packet buffer at most 220 KB of 921 KB. The far plane was tried (`VCS_FAR_CLIP`) and
+  kept at 2000. `tools/world_check.py`: 10 checks (original, inview, peds, poolroom, script0, lod, packets, vanish,
+  back; traffic reported), 0 failed; scenes with the module on and off (`VCS_WORLD_DETAIL_HOOKS=0`) differ only as two
+  captures with it off do (the loading art, the flyover's timing) at the defaults. Cars vanishing in view, 16:9, all
+  three at 300%, 3 min AI drives: with `VCS_WORLD_KEEP=0` 6 at about 175 m (even at 100% traffic, draw distance 300%),
+  with the fix 0 in 30 min (three 10 min drives) and in every world_check since; two earlier fixed runs each lost one
+  car 4-6 m from the camera: the test drive's own CREATE_CAR clearing its spot (ClearSpaceForMissionEntity, the game's
+  behaviour at every setting; reproduced, game-internals.md 12d). Another 20 min of fixed driving: 0; with the fix off
+  13 cars lost at ~175 m in one 10 min drive. Shakedown and Last Stand's credits pass at 300% on all three.
+- **Drive-by fire rate** (2026-11-08, the user's report and request; DECISIONS.md, game-internals.md 12c,
+  `src/game/vcs_driveby.cpp`): NPCs in vehicles fired their SMGs once a frame - 30 shots/s on the PS2 (the SMG's own
+  rate is 11), 144/s at 144 fps. Enhancements > Combat - **Drive-by fire rate**: *As on the PS2* (default) / *The
+  gun's own rate*, through a hook on CWeapon::Fire for the NPC drive-by's two calls. Measured (a passenger with an
+  SMG in a parked car, threat on the player, 20 game seconds a run, per-frame trace of his clip), shots a second
+  within a burst / averaged with pauses and reloads: PS2 30.0 / 13.2 at 30 fps (identical to the original: nothing held
+  back), 30.0 / 13.4 at 60, 29.9 / 12.8 at 144; the gun's rate 10.8 / 6.3, 11.0 / 6.2, 11.1 / 6.5 (gap 90 ms at 144
+  fps); the original (`VCS_DRIVEBY_HOOKS=0`) 144 / 29.4 at 144. The setting changes live (rig `setting`, `driveby`).
+  No tool of its own yet: the measurement was a scratch script (`trace` of the weapon slot).
+- **The mouse wheel on the radio** (2026-11-10, GitHub issue 90; game-internals.md 12a "The radio",
+  `src/game/vcs_input.cpp`): while driving a notch down is the next station and a notch up the one before. The game has
+  one station button, L1, forwards only; a step back writes the vehicle's station two back and presses L1, and takes
+  the write back when the game did not take the press (an announcement on the radio, a vehicle without one). Part of
+  Keyboard > **Mouse wheel** (on by default). Checked with a scratch script (`press wheelup / wheeldown`, the vehicle's
+  station and `VCS_MUSIC_LOG`'s stream opens): down 1 -> 2 -> 3, up 3 -> 2 -> 1 -> 0, three notches up 0 -> 7, two
+  down 7 -> 9 (off), and no change while the announcement plays.
+- **GitHub issues round, 2026-11-10** (DECISIONS.md): the graphics card on a PC with two (issue 112: Graphics >
+  **Graphics card**, Fastest by default - D3D11 through DXGI's ranking, Vulkan by device type; `[rhi] graphics cards` in
+  the log; only one card here, so the choice between two is not checked; since 2026-11-12 the setting lists the cards
+  by name, "(integrated)" after the CPU's chip - DECISIONS.md 2026-11-12); F12's frame dump only with
+  `PS2X_HW_DUMP_KEY=1` (issue 89: Bandicam's and Steam's key; checked: 0 `[draw]` lines without, 893 with); vcs.exe's
+  icon and version information (issue 91: the launcher's icon - since 2026-11-11 its own, the same scene by day in lighter colours -, VERSION through a header only the resource file sees;
+  checked: Explorer's details read 0.2.4, "GTA: Vice City Stories PC port").
 
 ## Milestone 9 - Linux (started 2026-10-30)
 
@@ -870,12 +1044,63 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
       AppImage updates, `deps.py --platform linux`, apt.llvm.org for old Debian / Ubuntu (`linux_packages.py`), one
       `publish` job for both platforms. Checked end to end on the laptop: AppImage -> files -> game built in 18 min ->
       played; an update's rebuild 1.7 s. Not checked: CI's 22.04 build, an older distribution, apt.llvm.org for real.
+
+- [x] **The issues round of 2026-11-10 (0.2.5's changes) on Linux** (2026-11-10, the user's request): the five commits
+      after 0.2.4 build with clang 20 without a warning (quick build; CI never compiles the game, only the launcher).
+      Checked on the laptop, first **with its desktop locked**, so without the card (LINUX.md "A locked desktop"):
+      the null renderer for everything that reads the game's memory or the log, llvmpipe for one picture.
+      - rotor blades: `framerate_audit.py --only rotor`: 375 / 382 / 383 / 397 health a second at 1/30 / 60 / 144 /
+        240 (Windows: 375 / 391 / 389 / 395); with `VCS_PHYSICS_TIMESTEP=0` 382 at 1/30 and 1830 at 1/144;
+      - the radio wheel: `controls_check.py` 74 of 75, "wheel: radio stations" from 8: down took, up 8, up 7. The one
+        failure is "screenshot key" - the null renderer's PNG is black;
+      - Purple Haze: `haze_check.py` passes (state 60, both thugs at 100, the truck parked once, 2928 haze pieces all
+        "stretch" in 366 frames with the HUD's right cluster at the edge in each; one `[script-fix] mission audio`
+        line and no "slot was freed" one, so no line is dropped on the way); `hud_check.py` passes; `shakedown.py`
+        (the same wait loop): the shop entered, the shopkeeper there, no script left in the audio wait - its
+        brightness term fails on the null renderer's black picture;
+      - F12: 0 `[draw]` lines and no file without `PS2X_HW_DUMP_KEY=1`; 6643 lines and the `hw_*.ppm` dumps with it;
+      - the graphics card: F2 > Graphics has the row with Fastest and Power saving (no System default: D3D11's),
+        `VCS_GPU=2` is refused (`[settings] VCS_GPU: ignoring display.gpu=2`). **Fixed**: the Vulkan backend did not
+        print the `[rhi] graphics cards` line the docs and the setting promise. It does now - every device with its
+        kind and what an unusable one lacks -, and it says so when only Mesa's software renderer is left (a player
+        without a Vulkan driver got ~6 fps and not a word in the log).
+      **Then on the card** (the same day, the desktop unlocked; HD 520, Mesa 25.2.8 ANV, the window shown):
+      - the log names both devices: `[rhi] graphics cards: Intel(R) HD Graphics 520 (SKL GT2) (integrated), llvmpipe
+        (LLVM 20.1.2, 256 bits) (software) (choice: fastest)`; with `VCS_GPU=1` "(choice: power saving)" and still the
+        Intel card - the software renderer stays last either way;
+      - `haze_check.py` passes (2184 haze pieces, all "stretch", 273 frames) and its picture is right: the haze
+        reaches both sides of the 16:9 picture, the clock and money at the right edge, the radar at the left;
+      - `controls_check.py` 75 of 75 (the screenshot key's PNG is 1920x993, 700 KB); `shakedown.py` passes with its
+        picture (luma 73.8 / 73.9 / 73.9);
+      - frame rate, measured as PERFORMANCE.md 16 did (75 s flyover + intro from an empty card, independent timing, a
+        60 cap, no control channel) but in a 1920x993 window, not 960x672: game 57.5 fps (58-59 after the first 10 s),
+        p50 16.7 ms, p95 18.2 ms, host 60.2 fps - where it was. (With the control channel, in the city at 1920x1080,
+        `gamectl.py perf` reads 35-48: the brightness probe's readback every frame, as section 16 says.)
+      **2026-11-12, merged with the setting's new form** (the cards by name, DECISIONS.md 2026-11-12; what is above is
+      as it was on the 10th - Fastest / Power saving, `VCS_GPU=0|1` and that log line are gone). Both sides had given
+      Vulkan a `[rhi] graphics cards` line; they are one now: D3D11's form plus what the Linux check had added. The
+      merged tree builds with clang 20 without a warning (quick build). On the HD 520, the window shown:
+      - `[rhi] graphics cards, fastest first: Intel(R) HD Graphics 520 (SKL GT2) (integrated) [364574466]; not in the
+        list: llvmpipe (LLVM 20.1.2, 256 bits) (software); using Intel(R) HD Graphics 520 (SKL GT2)` - the first run of
+        the Vulkan list and its "(integrated)" mark (Windows had no such chip and only syntax-checked that file);
+      - F2 > Graphics > Graphics card has the one card by name. The closed row cuts the mark short - "Intel(R) HD
+        Graphics 520 (SKL GT2) (integr": Mesa's name is longer than the box. Not changed here;
+      - `VCS_GPU=364574466` takes it; `VCS_GPU=1` (an old value) is refused (`[settings] VCS_GPU: ignoring
+        display.gpu=1`), the card the same; `VCS_VK_DEVICE=llvmpipe` ends the line "using llvmpipe (LLVM 20.1.2, 256
+        bits) (VCS_VK_DEVICE)", and the software renderer's warning follows it.
+      Not run again after the merge: `haze_check.py`, `controls_check.py`, `shakedown.py`, `framerate_audit.py`.
+      Not checked: a ThinLTO build (the quick build was used), and - never checkable here - the choice between two
+      cards. Not done, for the user to decide: the game's window has no icon on Linux (issue 91 gave vcs.exe one
+      through its resources; DECISIONS.md).
 ## Useful switches
 | Env var | Effect |
 |---|---|
 | `PS2X_GS=cpu\|hw\|gpu\|null` | GS renderer (vcs.exe: default hw, set by src/main.cpp; the runtime's own default cpu) |
 | `PS2X_HW_SCALE=n`, `PS2X_HW_DEBUG=1` | hardware renderer scale / stats |
 | `VCS_CPU=AVX2\|AVX\|SSE4` | build tools: the CPU the build is for (default: this PC's, `toolchain.cpu_level`); an older one's build runs here (tests) |
+| `VCS_TOOLCHAIN=mingw\|msvc` | build tools, Windows: llvm-mingw (default; no Visual Studio) or Visual Studio's clang-cl; switching sets the build tree up again (everything rebuilt) |
+| `VCS_LLVM_MINGW=<folder>` | build tools, Windows: an llvm-mingw to use instead of the one in `build/build-tools` (clang 19+) |
+| `-DVCS_DXBC_CHECK_FXC=<fxc.exe>` | CMake: every D3D11 shader from `tools/hlsl_dxbc.py` also compiled by that fxc, the build failing on any byte that differs |
 | `VCS_FPS_LOG=1` | VBlanks and flips per second (was `VCS_FPS=1`; `VCS_FPS` is the frame rate cap) |
 | `VCS_TIMING=0\|1`, `VCS_FPS=30\|60\|120\|144\|-1\|0` | game timing original / frame-rate independent; frame rate cap (-1 display refresh, 0 unlimited) |
 | `VCS_TIMESTEP=N` | independent timing: exactly 1/N s per game frame, unpaced (frame-dependence tests) |
@@ -896,11 +1121,17 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_FOG_DISTANCE=10..100`, `VCS_FOG_START=0..300` | Graphics > Fog for one run: the game's fog range in percent (100 = original; game/vcs_fog.cpp) |
 | `VCS_OBJECT_DISTANCE=100..400` | Graphics > Draw distance > Object distance for one run: CRenderer::ms_lodDistScale (0x4887F8) in percent, the entities' LOD / stream distances (100 = original; game/vcs_distance.cpp, game-internals.md 9h); `distancestate` reports the scale and the camera's LOD / generation multipliers |
 | `VCS_FOG_HOOK=0`, `VCS_TRACE_FOG=1` | the fog-range setter left alone (the reference); the game's (start, end) pairs every 5 s |
+| `VCS_CARCAM=0` | the hook on the camera behind a vehicle not installed: the mouse moves the right stick there, as before 2026-11-03; Car camera return does nothing |
+| `VCS_FOOT_WALL=0` | on foot the mouse's turn does not ask the camera's update for the pull-in at walls: the camera stands at a wall's edge while its heading turns on, as before 2026-11-11 |
 | `VCS_FREEAIM=0` | free aim's hooks not installed (CGame::Process, CCamera::Process, the weapons' line test): the game's aiming untouched, the setting does nothing |
 | `VCS_INPUT_MAP=0` | the runtime's fixed built-in key / gamepad mapping instead of the player's bindings (`ps2_pad.cpp`; the reference) |
 | `VCS_VSYNC=0\|1\|2` | Vertical sync for one run: off, on, off with tearing allowed |
+| `VCS_REFLECTIONS=0\|1\|2` | Car reflections for one run: Original, Smooth, Auto (Smooth above 1x; always used otherwise, no setting) - game-internals.md 6g |
 | `VCS_SCRIPT_TIMESTEP=0` | mission meters that count per frame stay on the frame rate (game-internals.md 11f; the reference) |
-| `VCS_PHYSICS_TIMESTEP=0` | the push of a body under a wheel and the rolling resistance stay per frame (game-internals.md 4; the reference) |
+| `VCS_SCRIPT_FIXES=0` | the mission script fixes off: the wait for an audio line never ends when its slot is freed, Purple Haze's truck is not parked early (game-internals.md 11h; the reference: sticks on "Loading..." at 60 fps) |
+| `VCS_PHYSICS_TIMESTEP=0` | the push of a body under a wheel, the rolling resistance and a bike's brake wobble stay per frame (game-internals.md 4; the reference) |
+| `VCS_TURN_LOG=<model>` | every ApplyTurnForce on vehicles of that model (212 = PCJ-600): caller, its change to the yaw / pitch rate (sum by caller to find a per-frame push) |
+| `VCS_WHEEL_LOG=1` | each bike wheel's ProcessWheel inputs per frame: brake, grip, the contact's forward / sideways speed, wheel state |
 | `VCS_COLL_LOG=1` | each ApplyCollisionAlt (FUN_0034D670) of the player's vehicle: the other entity, contact point, normal, speeds |
 | `VCS_SCRIPT_TIMESTEP_LOG=1`, `VCS_SCRIPT_TIMESTEP_CHECK=1` | per scaled instruction every 2 s game time: runs, the game's amount vs applied; log each listed instruction found in a newly loaded mission |
 | `VCS_PERF_OVERLAY=0\|1` | the perf overlay setting for one run |
@@ -964,10 +1195,16 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `PS2X_HLE_CLIPPED=1` | draw world packets that cross the clip planes with GPU clipping (wrong in places, game-internals.md 6h) |
 | `PS2X_HLE_CLIPPER=0` | clipped world packets on the VU1 instead of the C++ clipper |
 | `PS2X_HLE_ENV=0` | the environment-map pass (stage table 0x13) on the VU1 |
+| `PS2X_HLE_ENV_PASS1=native` | the env packets' pass 1 drawn natively as before 2026-11-06 (stripes on car paint: its depth is not pass 2's) |
 | `PS2X_HLE_REDRAW=0` | 0x02c0's re-draws / shine passes and the float-image prelit packets on the VU1 |
 | `VCS_HUD_RW=0` | no HUD context at the RenderWare level (the 16:9 weapon icon goes back to the screen edge; no native HUD, no anchoring) |
 | `VCS_HUD=0/2/1` | HUD in widescreen: keep 4:3 in the middle / screen edges / stretch (the menu's Display > HUD) |
 | `VCS_WIDE_CULL=0` | widescreen: entities culled by the game's 4:3 camera planes (models vanish at the screen edges, as before 2026-10-27) |
+| `VCS_CUTSCENE_BARS=0/1` | the cutscene letterbox off / on for one run (Display > Cutscene black bars; always on at 4:3) |
+| `VCS_WIDESCREEN=1` / `=game` | the game's own (PS2, anamorphic Vert-) widescreen preference forced on / left to the game and its saves (normally kept off); both show its pause-menu row again |
+| `VCS_SCOPE_FILL=0` | widescreen: the scope / camera mask's side bars squeezed into the middle 4:3 as before 2026-11-06 (the world shows beside the scope) |
+| `VCS_HAZE_FILL=0` | widescreen: the tunnel vision's quarters grouped with the HUD and kept at 4:3 in the middle as before 2026-11-10 (Purple Haze's haze leaves the sides clear) |
+| `VCS_HIDE_WIDESCREEN=0` | the pause menu's Display page keeps the game's Widescreen row (the preference still kept off) |
 | `VCS_TRACE_VISIBLE=1` | CCamera::IsSphereVisible: visible ratio every 5 s, samples with the camera-space point and the planes |
 | `VCS_HUD_NATIVE=0` | the HUD drawn into the PS2 frame buffer instead of the native layer at the window's size |
 | `PS2X_HW_PIXEL_CENTRE=0` | draws without the GS pixel-centre offset (softer copies, as before 2026-10-23) |
@@ -994,6 +1231,16 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `PS2X_HW_FRAME=WxH` | the native frame's size whatever the window (tests) |
 | `PS2X_HW_DUMP_ALLVERTS=1` | the F12 draw log prints every vertex of every draw |
 | `VCS_MENU_NATIVE=0` | menus drawn into the PS2 frame buffer instead of the native layer |
+| `VCS_MENU_MOUSE=0` | the game's pause menu without the mouse (Enter / Escape as Cross / Triangle stay; game/vcs_frontend.h) |
+| `VCS_PROMPTS=0..4` | Enhancements > Button prompts for this run: 0 Original, 1 Automatic, 2 PlayStation, 3 Xbox, 4 Keyboard & mouse (the menu shows it read-only) |
+| `VCS_PROMPTS_HOOKS=0` | none of the button prompts' hooks (the setting then does nothing; game/vcs_prompts.h) |
+| `VCS_PROMPTS_DUMP=<file.png>` | each glyph atlas made, written over grey (to look at the glyphs) |
+| `VCS_TRAFFIC=100..300`, `VCS_PEDS=100..300`, `VCS_DRAW_DISTANCE=100..300` | Enhancements > World for this run (percent; the menu shows them read-only) |
+| `VCS_WORLD_DETAIL_HOOKS=0` | density and draw distance write nothing (the settings then do nothing; game/vcs_world_detail.h) |
+| `VCS_WORLD_KEEP=0` | density without the pool reserve and cars in view not kept (the first version, to compare); the log still names each car that vanishes in view (`[world] car vanished in view`) |
+| `VCS_FAR_CLIP=<metres>` | a test: the far plane and so the fog end at this distance instead of 2000, outdoors (2000 < m <= 20000; game-internals.md 6o) |
+| `VCS_DRIVEBY_RATE=0\|1` | Enhancements > Combat > Drive-by fire rate for this run: 0 as on the PS2, 1 the gun's own rate (the menu shows it read-only) |
+| `VCS_DRIVEBY_HOOKS=0` | the NPC drive-by's fire rate left alone: a shot every frame, as the original game (the setting then does nothing; game/vcs_driveby.h) |
 | `VCS_LOADING_NATIVE=0` | loading screens drawn into the PS2 frame buffer instead of the native layer |
 | `PS2X_HW_PATH2_PACKED=0` | PATH2 draw packets (Im2D, effect strips) through the GS front end vertex by vertex instead of recorded whole |
 | `PS2X_TRACE_PATH2_TAGS=1` | PATH2 (VIF DIRECT) packets by the shape of their first GIFtag, and the register sequence of A+D packets that draw, every 5 s (`[path2]`) |
@@ -1015,8 +1262,10 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_RSL_CENSUS=1` | every 5 s: what the VIF1 chain still carries outside marked blocks and items - top-level tags by DMA id, first VIFcode and data region, per chain (FULLY_NATIVE.md step 5) |
 | `VCS_RSL_SKIP=0`, `VCS_RSL_SKIP_VERIFY=1`, `VCS_RSL_SKIP_KINDS=<mask>` | copy every marked block; decide skips but copy anyway and check each against the recording it would have replayed; which kinds may be skipped (bit 0 world, 1 model, 2 model-b, 3 other call; default all) |
 | `VCS_RSL_MEASURE=1` | with `VCS_RSL_WORLD_LOG`: per chain the bytes copied, the marked blocks and the distinct ones |
+| `VCS_RSL_RECORDINGS_MB=<n>` | the memory the RSL recordings may hold before the least recently used are dropped (256; 0: no limit, as before 2026-11-10 - GitHub issue 115). `VCS_RSL_WORLD_LOG`'s `memory:` line has what they hold, what was dropped and the game thread's map sizes |
 | `PS2X_HW_RT_LOG=1` | the render targets with their names (gsHwSetTargetRole), sizes and scales, every 5 s |
 | `PS2X_HW_REFLECTION_SCALE=0` | the reflection map stays 1x with "Match window" |
+| `PS2X_HW_DUMP_STEPS=1` with F12 | the target after every full-screen draw or render-target read, as `hw_stepN_fbpF.ppm` (the reflection map: the first `_fbp420` file - the end-of-frame dump of FBP 420 is the bloom) |
 | `VCS_RSL_RASTERS=0` | textures not named by raster (no upload REFs recorded) |
 | `PS2X_HW_DECODE_FROM_UPLOAD=0`, `PS2X_HW_DECODE_VERIFY=1` | textures decoded from emulated VRAM (writing the queued uploads there first) instead of the queued upload's data; both, compared (`[gs-hw] textures from upload`) |
 | `PS2X_HW_CLUT_FROM_UPLOAD=0`, `PS2X_HW_CLUT_VERIFY=1` | CLUT loads read emulated VRAM (writing the queued uploads there first) instead of the queued upload's data; both, compared (`[gs-hw] clut from upload`) |
@@ -1066,6 +1315,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_COUNT_CALLS=addr,...` | calls per 5 s of guest functions |
 | `VCS_RWATCH=lo,hi` | which code reads a guest range |
 | `PS2X_HW_DUMP=<frame>` | dump HW render targets + display as PPM |
+| `PS2X_HW_DUMP_KEY=1` | F12 does the same for the next frame with draws (the draw log on stderr). Off by default since 2026-11-10: F12 is the screenshot / record key of Steam, Bandicam and others (GitHub issue 89) |
 | `python tools/run.py N name --hidden` + `python tools/gamectl.py ...` | hidden test run driven over the control channel |
 | `python tools/gamectl.py gameinfo` | the F3 game-state panel's lines: player (position, heading, state, health), vehicle, camera, clock / area / pauses, pools, scripts |
 | `python tools/scenes.py capture OUT` / `compare REF NEW` | reference scenes (screenshots + perf) from an empty card; diff two captures |
@@ -1074,6 +1324,10 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_RHI=d3d11\|d3d12\|vulkan\|null` | the renderer for one run (Graphics > Graphics API; D3D12 on Windows: NATIVE_RENDERER.md; Vulkan: docs/LINUX.md) |
 | `PS2X_RHI_DEBUG=1` | the API's validation layer: D3D11 / D3D12 debug layer (D3D12's messages into the log) / Vulkan's Khronos validation |
 | `PS2X_RHI_STATS=1` | D3D12: draws, passes, barriers, texture uploads, textures / buffers / pipelines made, tables, fence waits per frame every 5 s; Vulkan: draws, descriptor writes, passes, suspended passes, barriers, uploads, CPU waits per frame, and input to GPU done (avg / p50 / p95) every 5 s; gs_hw: the input delay by stage |
+| `VCS_RHI=d3d11\|vulkan\|null` | the renderer for one run (Graphics > Graphics API when the build has two; docs/LINUX.md) |
+| `PS2X_RHI_DEBUG=1` | the API's validation layer: D3D11 debug layer / Vulkan's Khronos validation; their messages in the log (`[rhi] d3d11` once per kind, `[rhi] vulkan`) |
+| `PS2X_RHI_WARP=1` | D3D11 on WARP, Windows' software rasteriser: a third implementation for a picture that differs between GPU vendors (a few frames a second) |
+| `PS2X_RHI_STATS=1` | Vulkan: draws, descriptor writes, passes, suspended passes, barriers, uploads, CPU waits per frame, and input to GPU done (avg / p50 / p95) every 5 s; gs_hw: the input delay by stage |
 | `PS2X_RHI_GPU_TIME=1` | Vulkan: GPU time of the passes and the whole frame (`PS2X_GPU_TIMING=1`: per draw, breaking passes) |
 | `PS2X_HOST_SPIKES=<ms>` | main-loop frames whose work went over it, by phase (events, begin, frames, ui, window, present) with the main thread's CPU time; Vulkan: the frame's waits, draws with their CPU time in `prepareDraw` / `vkCmdDraw`, pipeline binds, descriptor pushes, passes, uploads, and the fence wait after it (PERFORMANCE.md 26) |
 | `PS2X_RHI_LOG_MEMORY=1` | Vulkan: every device memory allocation / free VMA makes, with its size and time |
@@ -1082,13 +1336,15 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `PS2X_RHI_REDUNDANT=1` | Vulkan: viewport, scissor, blend constants and vertex / index buffers recorded at every draw that set them, as before 2026-11-02 (now only when they change) |
 | `PS2X_HW_CB_DEDUPE=0`, `PS2X_HW_CB_LOG=1` | the GS draw / native constants written at every draw, as before 2026-11-02 (now only when they change); writes and skips every 5 s |
 | `PS2X_HW_NATIVE_MERGE=0` | one native draw per VU1 batch, not joined (PERFORMANCE.md 32) |
-| `PS2X_HW_SHADER_DEPTH=1` / `=0` | the GS pixel shader writes the depth / uses the rasterised depth, early depth rejection on (the default with D3D11 and Vulkan since 2026-11-03: with the shader depth D3D11 lost the game's fire, game-internals.md 6m; PERFORMANCE.md 26) |
+| `PS2X_HW_SHADER_DEPTH=1` / `=0` | the GS pixel shader writes the depth / uses the rasterised depth, early depth rejection on (the default with D3D11 and Vulkan since 2026-11-03: with the shader depth D3D11 lost the game's fire, game-internals.md 6u; PERFORMANCE.md 26) |
+| `PS2X_HW_SHADER_DEPTH=1` / `=0` | the GS pixel shader writes the depth (the default with D3D11 until 2026-11-04) / uses the rasterised depth, early depth rejection on (the default; PERFORMANCE.md 26, DECISIONS.md 2026-11-04) |
 | `PS2X_RHI_FULL_BARRIERS=1` | Vulkan: whole-pipeline barriers, as before the layout-based ones |
 | `PS2X_HOST_PACED=0`, `PS2X_FRAME_LEAD=0`, `PS2X_FRAME_LEAD_MARGIN_US=<us>` | frame-rate independent timing: the game's own deadline instead of the host's frames; no frame lead; the lead's margin (1500) - PERFORMANCE.md 19 |
 | `PS2X_WRITE_WATCH=1` (Linux) / `=0` (Windows) | the guest RAM write watch on Linux (opt-in there) / off on Windows - PERFORMANCE.md 20 |
 | `PS2X_HW_SPECIALISE=0` | the GS pixel shader's full version for every draw (not one per texture read; PERFORMANCE.md 18) |
 | `PS2X_HW_QUEUE=<n>`, `PS2X_HW_BATCH_MAX=<n>` | frames the game may queue ahead / frames rendered per host frame (0: all); defaults 1 / 1 with frame-rate independent timing, 3 / all with the original (PERFORMANCE.md 17) |
 | `VCS_VK_DEVICE=<n or name>` | Vulkan: which GPU |
+| `VCS_GPU=<id>` | Graphics > Graphics card for one run: the card with that id - the number after each name in the log's `[rhi] graphics cards` line (made from the card's PCI ids, the same every start and under D3D11 and Vulkan). An id no card has is ignored (the saved card, else the fastest) |
 | `PS2X_HLE=0` | draw the world through the VU1 program instead of natively (src/game/vcs_hle_world.cpp) |
 | `PS2X_HLE_VERIFY=1` | compare the C++ world pipeline with the VU1's output (bit-exact expected) |
 | `PS2X_HLE_SURVEY=1`, `PS2X_HLE_SURVEY_DUMP=n`, `PS2X_HLE_SURVEY_DUMP_EVERY=n` | VU1 program / layout survey, sample dumps |

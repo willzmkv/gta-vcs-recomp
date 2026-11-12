@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <iterator>
+#include "runtime/ps2_host_std.h"
 
 #if defined(_WIN32) // [gta-recomp] file creation times (card directory order)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1040,7 +1041,7 @@ namespace ps2_stubs
             static std::chrono::steady_clock::time_point s_last{};
             static bool s_any = false;
             const char *env = std::getenv("PS2X_MC_BACKUP");
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             if ((env && env[0] == '0') || (s_any && now - s_last < kMcBackupQuiet))
             {
                 return;

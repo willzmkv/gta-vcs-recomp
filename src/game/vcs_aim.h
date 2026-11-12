@@ -11,7 +11,9 @@
 // Two scripts start the game's free aim themselves (game-internals.md 12c): in a car a mission's drive-by mode
 // (SET_PLAYER_DRIVEBY_MODE: Jive Drive, Vic shooting from the passenger seat while Lance drives), on foot the forced
 // free aim (SET_PLAYER_FORCE_FREE_AIMING: Phil's shooting range). There, with free aim on for either device, the mouse
-// and the right stick turn its dummy in place of the left stick, with no button to hold.
+// and the right stick turn its dummy in place of the left stick, with no button to hold. The same for a gun on a vehicle
+// a script attaches Vic to (ATTACH_CHAR_TO_CAR: Farewell To Arms, the helicopter's door), whose first-person camera is
+// the aim: the mouse and the right stick turn it.
 #pragma once
 
 #include <cstdint>

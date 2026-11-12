@@ -132,6 +132,16 @@ namespace screens
                 y += row({r.x, y, r.w, 0}, "This version", app.sourceVersion);
                 text(r, y, "Update this folder with git pull, then build again (Update the build on Home).", theme::kFaint);
             }
+            else if (!app.updatedTo.empty())
+            {
+                // updated, the restart put off ("Later"): this window is still the old launcher
+                const std::string tag = "VERSION " + app.updatedTo + " INSTALLED";
+                ui::pill({r.x, y, ui::pillWidth(tag), px(22)}, tag, theme::kTeal);
+                y += px(34);
+                text(r, y, "Restart the launcher to use the new version, then update the build.", theme::kFaint);
+                if (action(r, y, "Restart", ButtonStyle::Primary, theme::icon::kRefresh))
+                    restartLauncher(app);
+            }
             else if (app.updateInfo["newer"].boolean())
             {
                 const std::string tag = "VERSION " + app.updateInfo["latest"].str() + " AVAILABLE";
