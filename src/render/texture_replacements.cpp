@@ -223,6 +223,10 @@ namespace render
         std::mutex mutex;
         std::condition_variable cv;
         std::deque<uint32_t> queue;
+        // find()'s "[textures] matched" lines: written by the worker, not by the GS stage that finds them (the log is
+        // unbuffered - a call to the file system per line; 145 first matches in one frame held the GS stage ~9 ms,
+        // PERFORMANCE.md 41)
+        std::vector<std::string> matchedLines;
         std::vector<std::shared_ptr<const ReplacementImage>> ready;
         std::thread worker;
         bool stopping = false;
@@ -234,12 +238,24 @@ namespace render
             for (;;)
             {
                 uint32_t id;
+                std::vector<std::string> lines;
                 {
                     std::unique_lock lock(mutex);
-                    cv.wait(lock, [&] { return stopping || !queue.empty(); });
+                    cv.wait(lock, [&] { return stopping || !queue.empty() || !matchedLines.empty(); });
                     if (stopping) return;
-                    id = queue.front(); queue.pop_front();
+                    lines.swap(matchedLines);
+                    if (queue.empty())
+                        id = 0;
+                    else
+                    {
+                        id = queue.front();
+                        queue.pop_front();
+                    }
                 }
+                for (const std::string &line : lines)
+                    std::fputs(line.c_str(), stderr);
+                if (!id)
+                    continue;
                 auto image = load(files[id].path, id, blockCompression.load(std::memory_order_relaxed));
                 std::unique_lock lock(mutex);
                 if (!image)
@@ -344,6 +360,8 @@ namespace render
         { std::lock_guard lock(m->mutex); m->stopping = true; }
         m->cv.notify_all();
         if (m->worker.joinable()) m->worker.join();
+        for (const std::string &line : m->matchedLines)
+            std::fputs(line.c_str(), stderr);
         if (!m->names.empty())
             std::fprintf(stderr, "[textures] summary: %u/%zu pack files matched, %u image loads\n", m->matched, m->names.size(), m->loaded);
     }
@@ -361,7 +379,14 @@ namespace render
         if (!file.matched)
         {
             file.matched = true; ++m->matched;
-            std::fprintf(stderr, "[textures] matched %s (%u/%zu)\n", file.path.filename().string().c_str(), m->matched, m->names.size());
+            char line[512];
+            std::snprintf(line, sizeof(line), "[textures] matched %s (%u/%zu)\n", file.path.filename().string().c_str(), m->matched,
+                          m->names.size());
+            {
+                std::lock_guard lock(m->mutex);
+                m->matchedLines.emplace_back(line);
+            }
+            m->cv.notify_all();
         }
         return it->second;
     }

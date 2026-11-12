@@ -1067,6 +1067,34 @@ use): a leaner layout would hold more recordings per MB - how many more was not 
 beyond the recordings and the 300 MB without them (meshes and textures made for replays, both LRU-bounded; the heap's
 own) was not taken apart.
 
+### 41. The player's stutters with their mods: the texture pack's log on the GS stage (2026-11-12)
+
+The player recorded 5.4 minutes of play (F4's CSV; 3840x2160, all of Distance and population at 100, HD world radius
+3, their four mods with the HD texture pack): 67 fps, 200 hitches, the worst 237 ms, 1.1 s lost a minute. In every
+large one the game thread computed as usual (~11 ms) and waited: on the render worker (`render_ms` 32-151, normally
+1.3) and idle (`wait_ms` 50-130), with 55-145 new textures (3-14 MB) in the frame.
+
+The cruise with the player's settings and mods (`cruise.py run --fps 0`, `VCS_TEST_MODS=1`, 1x - `PS2X_HW_SCALE=5` is
+not a choice), the spike profiler on the game thread, the render worker, the GS stage and the main thread:
+- **The pack is not the main cost**: with it 114.6 fps, max 138 ms, 1662 ms lost a minute; without it 107.0 fps, max
+  92 ms, 1413 ms.
+- In the worst spikes the GS stage sat in `NtWriteFile` (15-19 samples): the pack's `[textures] matched` line, written
+  by the GS stage for every first match - stderr is unbuffered, a file-system call per line, and the launcher sends it
+  to a file (`build/run/launcher_game.log`). 2,600 matched and 3,400 loaded lines in 140 s. The matched lines now go
+  through the pack's loader thread (`texture_replacements.cpp`; the same lines, `texture_check.py` still counts them).
+- Disc reads are not it (the player's idea of a dumped disc): the game's streaming reads the ISO natively on a host
+  thread (game-internals.md 9, 14 MB in ~5 ms), the ISO and the pack are on an NVMe SSD; only `sceCdSt` (music,
+  movies) is paced at a 4x DVD's rate.
+
+| cruise, the player's mods and pack | fps | p99.9 | max | frames > 50 / 100 ms |
+|---|---|---|---|---|
+| before | 114.6 | 35.0 | 138 | 5 / 2 |
+| the matched lines off the GS stage | 112.6 | 32.0 | **63** | **1 / 0** |
+
+What is left in the largest frames (~48 s into the route, 14,000 draws): the GS stage working - `UploadImage`, `LoadClut`,
+`recordPrimitive`, the GS path's own work - with the game thread and the render worker waiting on it. Outputs:
+`build/cruise/user_full`, `user_notex`, `user_full2`.
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker
