@@ -2065,6 +2065,31 @@ Found by a helper agent reading the decompiled code (its findings are also the h
   lit at ~720 m, the two nearest at Original; from above, every street's lamps. Switches: `VCS_HD_CORONAS=0`,
   `VCS_HD_CORONADEBUG=1` (projections logged; `=2` the quads six times larger, to find them in a picture); command
   `farcoronas`.
+- **Light types** (2dfx +0x28, ProcessLightsForEntity's switch at `0x27E638`, as in VC): 0 always on, 1 at night
+  (19:00-06:59), 2 flicker, 3 flicker at night (or with rain `0x4CD13C` > 0.5) - the neon signs -, 4 / 6 / 8 flash on
+  `(clock + index * 0x80 / 0x100 / 0x200) & 0x200 / 0x400 / 0x800` (5 / 7 / 9 the same at night), 10 / 11 flicker by the
+  entity's own bits (11 at night), 12 none here (the traffic lights, below). Flicker: on unless both `((seed ^ clock) &
+  0x60)` and `((seed ^ clock >> 11) & 3)` are zero, seed = the entity's 64-bit word at +0x48 >> 54 (type 10/11: `seed &
+  0xFF` > 0x10 always on, else `((clock ^ seed << 3) & 0x60)` for the first term); off registers a black corona (a fade).
+  Clock = `0x4CD104` (ms).
+- **Traffic lights**: `CEntity::PreRender` calls `FUN_00313480` (CTrafficLights::DisplayActualLight) for the special
+  model ids at `*0x48A040` + 2 / 4 / 6 / 8. The light's group by its heading (`FUN_003155C0`: atan2(+0x14, +0x10) in
+  60-150 or 240-330 degrees -> 1, else 2); the phase `FUN_003132B0` (group 1) / `FUN_00313318` (group 2) from `t =
+  (clock & 0x7FFF) >> 1`: group 1 green < 5000, amber < 6000, red; group 2 red < 6000, green < 11000, amber < 12000, red;
+  all green while `0x4883C0` != 0; `0x4CD2A4` > 1.1 (a storm) flashes amber on `clock & 0x400`. The lamp is placed from
+  the box of the model's six lights (green at its bottom, amber the middle, red the top; the face whose y is the box's
+  max when the camera looks against the light's forward, else the min), registered through `FUN_0027DD10` with the
+  default texture, size 1.75, far clip 50 m, colour {0,255,0} / {255,128,0} / {255,0,0} x 0.7 x `*(0x486838) + 0x3300`.
+  `FUN_001E0B38` / `FUN_001E0E08` (models +0x4E / +0x50) are rotating pickups, not lights.
+- **Far coronas, second version** (the player's report, 2026-11-12: shimmering, shrinking, neon pulsing, too big, no
+  traffic lights): every light type is taken and switched as above, so a far neon sign flickers as the near one does
+  (the first version drew type 3 steady and took the complement of the game's slot alpha, which followed the game's
+  flicker - the two pulsed against each other); a light the game draws itself fades by the render's fixed fade (half
+  the show distance to all of it), not the slot's alpha; traffic lights from their dummies with the phase above. Sizes
+  as Project2DFX's distant lights do it (`source/LODLights.ixx`: no screen-size floor, the world size growing with
+  distance): at most 1.25 m, x1 at 100 m to x2 at 1000 m; dimmer with distance (50 % at the reach) and fading over its
+  last 100 m - a row of lamps far down a street seen from its pavement summed into one blob at full brightness. The
+  nearest 1000 lights when more.
 
 ### 9l. Parked cars: the car generators (2026-11-12)
 

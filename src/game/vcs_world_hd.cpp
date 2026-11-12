@@ -1046,8 +1046,11 @@ namespace vcs::world_hd
                     float before, after;
                     std::memcpy(&before, &i.z, 4);
                     std::memcpy(&after, &z, 4);
+                    // (the header checked as build() does: a walk from a header that is no list wrote floats anywhere)
                     const uint32_t b0 = rd32(i.original + 8u), b8 = rd32(i.original + 0x28u);
-                    for (uint32_t r = b0; r < b8 && valid(r, kRecord); r += kRecord)
+                    if (b8 < b0 || (b8 - b0) % kRecord || (b8 - b0) / kRecord > 0x2000u || !valid(b0, b8 - b0))
+                        continue;
+                    for (uint32_t r = b0; r < b8; r += kRecord)
                         wrf(r + 0x48u, rdf(r + 0x48u) + (before - after));
                 }
                 ++g_stats.restores;
@@ -1593,8 +1596,10 @@ namespace vcs::world_hd
                     // tried again in ~5 s (marking it empty for good left a hole in the detailed city, 2026-11-11)
                     g_retry[key(bx, by)] = g_frame + 300u;
                     if (++g_stats.failures <= 50u)
-                        std::fprintf(stderr, "[hdworld] cell %d,%d not read (arena %u KB used, largest free %u KB): again later\n", bx, by,
-                                     g_arena.used / 1024u, g_arena.largest() / 1024u);
+                        std::fprintf(stderr, "[hdworld] cell %d,%d not read (arena %u KB used, largest free %u KB): again later; entry 0x%08x: "
+                                     "%08x %08x %08x %08x %08x %08x %08x %08x\n", bx, by, g_arena.used / 1024u, g_arena.largest() / 1024u,
+                                     entry, rd32(entry), rd32(entry + 4u), rd32(entry + 8u), rd32(entry + 0xCu), rd32(entry + 0x10u),
+                                     rd32(entry + 0x14u), rd32(entry + 0x18u), rd32(entry + 0x1Cu));
                 }
             }
         }

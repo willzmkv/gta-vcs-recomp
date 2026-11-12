@@ -59,14 +59,24 @@ namespace vcs::world_hd_coronas
         constexpr float kBias = 1.5f; // the slots' depth bias (RegisterCorona's 0x3FC00000)
         constexpr uint32_t kBuffer = 0x07C00000u, kBufferBytes = 0x40000u; // our vertices (free guest memory)
         constexpr uint32_t kFakeId = 0x7C000001u;
-        constexpr uint32_t kMaxLights = 400u;
-        // how far the lamps reach per setting (the detailed city's), and the fade at the edge
+        constexpr uint32_t kMaxLights = 1000u; // the nearest ones when more
+        // how far the lamps reach per setting (the detailed city's), and the fade over its last metres
         constexpr float kReach[] = {0.0f, 450.0f, 580.0f, 720.0f};
-        constexpr float kEdgeFade = 80.0f;
-        // A lamp's corona projected at its real size is 2 pixels wide (of 640) at 600 m, its colour scaled down by the
-        // alpha: invisible - the player saw the coronas appear only close (2026-11-12). Far lamps keep at least this half
-        // height on screen (as PC mods such as Project2DFX do for their far lamps), their width following the aspect.
-        constexpr float kMinHalf = 3.0f;
+        constexpr float kEdgeFade = 100.0f;
+        // A far light's size (Project2DFX's distant lights, source/LODLights.ixx): at most kMaxSize metres (the game's
+        // neon signs register 3-5 m: too big from afar - the player, 2026-11-12), times a growth from 1 at kGrowFrom to
+        // kGrowMax at kGrowTo, so a light 600 m away is still a few pixels without a floor on its screen size (the earlier
+        // 3-pixel floor kept every far light the same size - pixel-snapped, shimmering).
+        constexpr float kMaxSize = 1.25f, kGrowFrom = 100.0f, kGrowTo = 1000.0f, kGrowMax = 2.0f;
+        // and dimmer with distance, down to kFarDim at the reach: a row of lamps far down a street seen from its pavement
+        // overlaps, and additive sprites at full brightness summed into one orange blob (pictures, 2026-11-12)
+        constexpr float kDimFrom = 150.0f, kFarDim = 0.5f;
+        constexpr float kMinHalf = 1.5f;
+        constexpr uint32_t kSpecialModels = 0x0048A040u; // *this: the special model ids (+2, +4, +6, +8: traffic lights)
+        constexpr uint32_t kTrafficFlash = 0x004CD2A4u;  // > 1.1: the traffic lights flash amber (a storm)
+        constexpr uint32_t kTrafficGreen = 0x004883C0u;  // non-zero: every traffic light green
+        constexpr uint32_t kRain = 0x004CD13Cu;
+        constexpr uint32_t kTrafficBright = 0x3300u;     // *(kRenderGlobals) + this: the traffic coronas' brightness
 
         PS2Runtime::RecompiledFunction g_render = nullptr, g_im2d = nullptr, g_stateSet = nullptr;
         uint8_t *g_ram = nullptr;
@@ -78,6 +88,7 @@ namespace vcs::world_hd_coronas
         {
             float x, y, z, size, show;
             uint8_t r, g, b;
+            float d; // from the camera
         };
         std::vector<Light> g_lights; // this frame's far lamps (game thread)
         uint32_t g_texture = 0;      // RwRenderStateSet(1, texture): the current one
@@ -120,13 +131,15 @@ namespace vcs::world_hd_coronas
         void wr8(uint32_t a, uint8_t v) { g_ram[a & PS2_RAM_MASK] = v; }
         void wrf(uint32_t a, float v) { std::memcpy(g_ram + (a & PS2_RAM_MASK), &v, 4); }
 
-        // a model's lamp lights: 2dfx entries of kind 0 (a light) whose corona is on at night (+0x28 type 1, or 3: type 1
-        // with the rain too) and not a switch (flags +0x2C bit 3); cached per model index
+        // a model's lights: 2dfx entries of kind 0 (a light) that are not a switch (flags +0x2C bit 3), with their light
+        // type (+0x28: when they are on and how they flash - lightOn) and index in the model (the flash's phase); cached
+        // per model index
         struct Effect
         {
             float x, y, z, size, show;
             uint8_t r, g, b;
             uint32_t texture;
+            uint8_t type, index;
         };
         std::unordered_map<uint16_t, std::vector<Effect>> g_models;
         uint32_t g_modelTable = 0;
@@ -154,13 +167,13 @@ namespace vcs::world_hd_coronas
                     {
                         const uint32_t e = base + (uint32_t(first) + k) * 0x40u;
                         const uint8_t kind = rd8(e + 0x14u), type = rd8(e + 0x28u), flags = rd8(e + 0x2Cu);
-                        if (kind != 0 || (type != 1 && type != 3) || (flags & 8u))
+                        if (kind != 0 || type > 11u || (flags & 8u))
                             continue;
                         const float size = rdf(e + 0x20u), show = rdf(e + 0x18u);
                         if (!(size > 0.0f) || !(show > 0.0f))
                             continue;
                         out.push_back({rdf(e), rdf(e + 4u), rdf(e + 8u), size, show, rd8(e + 0x10u), rd8(e + 0x11u), rd8(e + 0x12u),
-                                       rd32(e + 0x30u)});
+                                       rd32(e + 0x30u), type, uint8_t(k)});
                     }
             }
             return g_models.emplace(model, std::move(out)).first->second;
@@ -172,7 +185,84 @@ namespace vcs::world_hd_coronas
             return hour > 18 || hour < 7;
         }
 
-        // this frame's far lamps: the used dummies with lamp lights within reach
+        // Whether a light is on now, as ProcessLightsForEntity (FUN_0027E430) decides it per light type (+0x28): 0 always,
+        // 1 at night (19:00-06:59), 2 flickering, 3 flickering at night (or in the rain), 4 / 6 / 8 flashing every 0x400 /
+        // 0x800 / 0x1000 ms (phase by the light's index), 5 / 7 / 9 the same at night, 10 / 11 flickering by the entity's
+        // own random bits (11: at night). The flicker: off while both ((seed ^ clock) & 0x60) and ((seed ^ clock >> 11) &
+        // 3) are zero, the seed being the entity's bits 54-63 at +0x48 - the neon signs (type 3) the player saw pulse when
+        // they were drawn steady and the game's own corona flickered beside them (2026-11-12).
+        bool lightOn(const Effect &f, uint64_t bits)
+        {
+            const uint8_t hour = rd8(kHour);
+            const bool day = hour > 6 && hour < 19;
+            const uint32_t clock = rd32(kClock), seed = uint32_t(bits >> 54), k = f.index;
+            auto flicker = [&](uint32_t s) { return ((s ^ clock) & 0x60u) != 0 || ((uint32_t(bits >> 54) ^ (clock >> 11)) & 3u) != 0; };
+            switch (f.type)
+            {
+            case 0:
+                return true;
+            case 1:
+                return !day;
+            case 2:
+                return flicker(seed);
+            case 3:
+                return !day || rdf(kRain) > 0.5f ? flicker(seed) : false;
+            case 4:
+            case 5:
+                return (f.type == 4 || !day) && ((clock + k * 0x80u) & 0x200u) != 0;
+            case 6:
+            case 7:
+                return (f.type == 6 || !day) && ((clock + k * 0x100u) & 0x400u) != 0;
+            case 8:
+            case 9:
+                return (f.type == 8 || !day) && ((clock + k * 0x200u) & 0x800u) != 0;
+            case 10:
+            case 11:
+            {
+                if (f.type == 11 && day)
+                    return false;
+                const uint32_t s8 = seed & 0xFFu;
+                return s8 > 0x10u || flicker(s8 << 3);
+            }
+            }
+            return false;
+        }
+
+        // A traffic light's lit lamp (CTrafficLights::DisplayActualLight FUN_00313480, for the special models +2..+8):
+        // the light's group by its heading (FUN_003155C0: 60-150 or 240-330 degrees -> 1, else 2), the phase by the clock
+        // (FUN_003132B0 / FUN_00313318: 0 green, 1 amber, 2 red; amber flashing in a storm, all green when switched so),
+        // the lamp the box of the model's lights gives (green at the bottom, amber in the middle, red on top) on the face
+        // turned to the camera; 1.75 m, colour x 0.7 x the traffic brightness.
+        bool isTrafficLight(uint16_t model)
+        {
+            const uint32_t ids = rd32(kSpecialModels);
+            if (!valid(ids, 0x10u))
+                return false;
+            for (uint32_t o = 2; o <= 8; o += 2)
+                if (rd16(ids + o) == model)
+                    return true;
+            return false;
+        }
+
+        int trafficPhase(uint32_t e)
+        {
+            float a = std::atan2(rdf(e + 0x14u), rdf(e + 0x10u));
+            if (a < 0.0f)
+                a += 6.2831855f;
+            a *= 57.295776f;
+            const int group = (a > 60.0f && a < 150.0f) || (a > 240.0f && a < 330.0f) ? 1 : 2;
+            const uint32_t clock = rd32(kClock);
+            if (rdf(kTrafficFlash) > 1.1f)
+                return (clock & 0x400u) ? -1 : 1;
+            if (rd32(kTrafficGreen) != 0)
+                return 0;
+            const uint32_t t = (clock & 0x7FFFu) >> 1;
+            if (group == 1)
+                return t < 5000u ? 0 : t < 6000u ? 1 : 2;
+            return t < 6000u ? 2 : t < 11000u ? 0 : t < 12000u ? 1 : 2;
+        }
+
+        // this frame's far lights: the used dummies with lights on within reach (lamps, signs, traffic lights)
         void collect(float reach)
         {
             g_lights.clear();
@@ -188,7 +278,7 @@ namespace vcs::world_hd_coronas
                 return;
             const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u), cz = rdf(kCameraPos + 8u);
             const float limit = reach + 10.0f;
-            for (uint32_t i = 0; i < size && g_lights.size() < kMaxLights; ++i)
+            for (uint32_t i = 0; i < size && g_lights.size() < kMaxLights * 4u; ++i)
             {
                 if (rd8(flags + i) & 0x80u)
                     continue;
@@ -196,13 +286,43 @@ namespace vcs::world_hd_coronas
                 const float ex = rdf(e + 0x30u), ey = rdf(e + 0x34u);
                 if (std::fabs(ex - cx) > limit || std::fabs(ey - cy) > limit)
                     continue;
-                const std::vector<Effect> &fx = effects(rd16(e + 0x56u));
+                const uint16_t model = rd16(e + 0x56u);
+                const std::vector<Effect> &fx = effects(model);
                 if (fx.empty())
                     continue;
                 ++g_dummiesLit;
                 const float ez = rdf(e + 0x38u);
+                uint64_t bits;
+                std::memcpy(&bits, g_ram + ((e + 0x48u) & PS2_RAM_MASK), 8);
+                if (isTrafficLight(model))
+                {
+                    const int phase = trafficPhase(e);
+                    if (phase < 0)
+                        continue;
+                    float x0 = fx[0].x, y0 = fx[0].y, y1 = fx[0].y, z0 = fx[0].z, z1 = fx[0].z;
+                    for (const Effect &f : fx)
+                    {
+                        y0 = std::min(y0, f.y), y1 = std::max(y1, f.y);
+                        z0 = std::min(z0, f.z), z1 = std::max(z1, f.z);
+                    }
+                    const float fwd = rdf(kCameraFwd) * rdf(e + 0x10u) + rdf(kCameraFwd + 4u) * rdf(e + 0x14u) + rdf(kCameraFwd + 8u) * rdf(e + 0x18u);
+                    const float ly = fwd < 0.0f ? y1 : y0, lz = phase == 0 ? z0 : phase == 1 ? (z0 + z1) * 0.5f : z1;
+                    const float x = rdf(e) * x0 + rdf(e + 0x10u) * ly + rdf(e + 0x20u) * lz + ex;
+                    const float y = rdf(e + 4u) * x0 + rdf(e + 0x14u) * ly + rdf(e + 0x24u) * lz + ey;
+                    const float z = rdf(e + 8u) * x0 + rdf(e + 0x18u) * ly + rdf(e + 0x28u) * lz + ez;
+                    const uint32_t globals = rd32(kRenderGlobals);
+                    const float bright = 0.7f * (valid(globals + kTrafficBright) ? rdf(globals + kTrafficBright) : 1.0f);
+                    const float r = phase == 0 ? 0.0f : 255.0f, g = phase == 0 ? 255.0f : phase == 1 ? 128.0f : 0.0f;
+                    const float d = std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy) + (z - cz) * (z - cz));
+                    if (d <= limit)
+                        g_lights.push_back({x, y, z, 1.75f, 50.0f, uint8_t(std::clamp(r * bright, 0.0f, 255.0f)),
+                                            uint8_t(std::clamp(g * bright, 0.0f, 255.0f)), 0, d});
+                    continue;
+                }
                 for (const Effect &f : fx)
                 {
+                    if (!lightOn(f, bits))
+                        continue;
                     // the matrix's rows: right (+0), forward (+0x10), up (+0x20)
                     const float x = rdf(e) * f.x + rdf(e + 0x10u) * f.y + rdf(e + 0x20u) * f.z + ex;
                     const float y = rdf(e + 4u) * f.x + rdf(e + 0x14u) * f.y + rdf(e + 0x24u) * f.z + ey;
@@ -218,8 +338,15 @@ namespace vcs::world_hd_coronas
                         continue;
                     }
                     g_maxDistance = std::max(g_maxDistance, d);
-                    g_lights.push_back({x, y, z, f.size, f.show, f.r, f.g, f.b});
+                    g_lights.push_back({x, y, z, f.size, f.show, f.r, f.g, f.b, d});
                 }
+            }
+            // the nearest when more than the buffer takes (the pool's order dropped lights here and there)
+            if (g_lights.size() > kMaxLights)
+            {
+                std::nth_element(g_lights.begin(), g_lights.begin() + kMaxLights, g_lights.end(),
+                                 [](const Light &a, const Light &b) { return a.d < b.d; });
+                g_lights.resize(kMaxLights);
             }
         }
 
@@ -268,8 +395,9 @@ namespace vcs::world_hd_coronas
             g_fakeSlot = -1;
         }
 
-        // the game's alpha for a lamp it draws itself at this position (0 when it does not): its slot's current alpha
-        // times the render's fade from half the show distance to all of it
+        // the game's share of a light it draws itself at this position (0 when it does not): the render's fade from half
+        // the show distance to all of it - not the slot's current alpha, which follows the game's flicker and fade-in and
+        // made ours pulse against it
         float gameAlpha(const Light &l, float depth)
         {
             for (uint32_t i = 0; i < kCoronaSlots; ++i)
@@ -287,7 +415,7 @@ namespace vcs::world_hd_coronas
                     k = 0.0f;
                 else if (depth >= half)
                     k = 1.0f - (depth - half) / half;
-                return float(rd8(s + 0x44u)) / 255.0f * k;
+                return k;
             }
             return 0.0f;
         }
@@ -336,6 +464,8 @@ namespace vcs::world_hd_coronas
                 // its alpha: what the game's own corona leaves (none beyond its show distance), fading at the reach
                 float a = 1.0f - gameAlpha(l, w);
                 a *= std::clamp((reach - d) / kEdgeFade, 0.0f, 1.0f);
+                a *= 1.0f - (1.0f - kFarDim) * std::clamp((d - kDimFrom) / (reach - kDimFrom), 0.0f, 1.0f);
+                const float growth = std::clamp(1.0f + (kGrowMax - 1.0f) * (d - kGrowFrom) / (kGrowTo - kGrowFrom), 1.0f, kGrowMax);
                 const int alpha = int(a * 255.0f);
                 if (alpha < 2)
                     continue;
@@ -343,7 +473,7 @@ namespace vcs::world_hd_coronas
                 // near the camera by kSizeGrow (0 in the city), the colour divided by the same
                 const float f = 1.0f + grow * std::min(w, 40.0f) * 0.025f;
                 const float h = 448.0f / w, ws = h * 1.4285715f / aspect;
-                const float size = l.size * scale * (g_debugLevel >= 2 ? 6.0f : 1.0f); // (=2: big, for a picture)
+                const float size = std::min(l.size, kMaxSize) * growth * scale * (g_debugLevel >= 2 ? 6.0f : 1.0f); // (=2: big)
                 float hw = size * ws * f, hh = size * h * f;
                 if (hh > 0.0f && hh < kMinHalf)
                 {
