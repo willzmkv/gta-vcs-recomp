@@ -2207,6 +2207,16 @@ its lists; `pokef` of the scale below with screenshots).
   ground height from `FUN_001967F8` (more than 3 m off: no spot). So a farthest-in-view of 0 finds nothing out of view
   either: the port's in-view cap that closed the ring as (1e6, 0) starved the whole crowd (PERFORMANCE.md 46). A ring is
   closed by nearest = farthest, the farthest in view kept at least the out-of-view reach (vcs_distance.cpp `bandRings`).
+- **How AddToPopulation makes the ped** (decompiled 2026-11-13, `build/analysis/decomp/pedspot.c`, `wander.c`): the model
+  from `FUN_002B35B0`(the zone's ped group) - or cops `FUN_002B3590`, gangs `FUN_002B3B90` / `FUN_002B3C80` - its ped
+  type the model info's +0x34 (`CModelInfo::ms_modelInfoPtrs` at `*0x486518`, `0x4CD10C` entries); the spot from the
+  finder, spread across the pavement by `FUN_0026B510`(node a, node b, rand, &x, &y); CPopulation::AddPed
+  **`FUN_002B2908`(type, model, &position, 0, 1)** (called at 0x2B2560); then, the usual way, **`FUN_00206568`(ped,
+  rand & 7)** = SetWanderPath (called at 0x2B275C): **+0x78A the wander direction**, 0 north (+y), 1 north-east ... 7
+  north-west, clockwise (the next node by it: `FUN_00218E90` -> `FUN_00267308`, which also writes the direction back from
+  the chosen link). A ped's **rotation +0x8E0 (now) / +0x8E4 (wanted)**, radians, forward = (-sin h, cos h) (read from
+  31 walking peds against their matrices' forward, 2026-11-13); walking random peds are in state +0x8C4 = 5. The other
+  branch (a few hours and zones: sitting about) sets +0x8E0 / +0x8E4 at random and does not set a path.
 - **CVisibilityPlugins** (VCS's, `FUN_0036ebf8(RwCamera)`, at each render from the frame function): squared
   distances its render callbacks compare with - `0x4CD5C0` vehicle components culled past 20 m x LODDistMultiplier
   (1e6 in camera modes 1 / 0x25), `0x4CD5D8` = `0x4CD5CC` peds drawn up to 70 m x LODDistMultiplier (the ped atomic

@@ -131,7 +131,7 @@ thread's packet building and the worker's replay copies.
 | 1 Baseline | done, on a busy machine (PERFORMANCE.md 49): to repeat on a quiet one |
 | 2 Real bands | in (`VCS_CROWD_BANDS=1`, off): near fills, the middle band 2-5 of 20 from out of view; game thread -1.6-1.9 ms |
 | 3 Walkers from 200 m | in (with the bands): up to 160 walkers at 205-505 m, placed by the nodes' density class; ~158 placed at Little Havana, the GS stage's share small (its time moved with the busy machine, with and without walkers) |
-| 4 Handover | - |
+| 4 Handover | in (with the bands; Graphics > Distance and population > **Crowd bands**, off): both ways, checked by log (`VCS_CROWD_BANDS_LOG`): the new ped at the walker's place (0.00 m), its model, its heading within ~0.1 rad, walking (state 5) a second later; the middle band fills (18-22 of 20) |
 | 5 Default | - |
 | 6 GPU skinning | - |
 | 7 RSL submission | - |

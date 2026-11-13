@@ -180,11 +180,14 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         // Crowd bands (docs/CROWD_BANDS_PLAN.md, the player's plan, 2026-11-13): with the population raised, few real peds -
         // VCS_CROWD_NEAR within 100 m, VCS_CROWD_MID at 100-200 m - and the decorative walkers from 200 m out
         // (realPedOuterRadius). No ring in view (a ped made there is seen standing up) but the camera-cut fill's; out of
-        // view the ring goes to the band that is short; past 210 m a ped fades (trimCrowd). VCS_CROWD_BANDS=1 (off).
-        const bool g_bands = envFloat("VCS_CROWD_BANDS", 0.0f) > 0.0f;
+        // view the ring goes to the band that is short; past 210 m a ped becomes a walker in view, fades out of view
+        // (trimBands); walkers coming in become real peds (the handover). Graphics > Distance and population > Crowd bands
+        // (world.crowd_bands, VCS_CROWD_BANDS; off).
+        std::atomic<bool> g_bands{false};
         const int g_bandNear = static_cast<int>(envFloat("VCS_CROWD_NEAR", 20.0f));
         const int g_bandMid = static_cast<int>(envFloat("VCS_CROWD_MID", 20.0f));
         constexpr float kBandNear = 100.0f, kBandEdge = 200.0f, kBandOut = 210.0f;
+        constexpr float kBandAdoptMax = 450.0f; // past it a ped in view is a few pixels: faded, not made a walker
         std::atomic<uint32_t> g_births{0}; // popview's births= (the ped count's rises, once a game frame)
         uint32_t g_carRing = 0;
         float g_carSpawnK = 1.0f; // the car spawner's factor this call (the node list's shift follows it)
@@ -238,7 +241,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             return p <= 1.0f ? p : std::min(1.0f + (p - 1.0f) * 2.0f, kMaxPedDistance);
         }
         float pedDensityDistance() { return std::min(pedDistance(), kMaxPedDensityDistance); }
-        bool bandsOn() { return g_bands && pedDistance() > 1.0f; }
+        bool bandsOn() { return g_bands.load(std::memory_order_relaxed) && pedDistance() > 1.0f; }
 
         // a random ped on foot that the crowd's numbers count: the population's own (+0x8F4 1), not in a vehicle, not dying
         // or dead (0x37, 0x39, 0x3A), not fading out (+0x1CC bit 31)
@@ -365,14 +368,67 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         // 250 m (in view only that far: a ped the player can make out never fades away), the farthest first, while fewer
         // than two fade - and the spawner fills its slot, near out of view or far in view.
         constexpr float kRecycleOutOfView = 40.0f, kRecycleAnywhere = 250.0f;
-        // With the crowd bands: a ped past kBandOut goes, in view too (a few pixels tall there; the handover to a walker is
-        // the plan's step 4), and while the bands hold more than their numbers (just switched on, the camera-cut fill's
-        // hundred tries) the farthest out of view beyond 40 m; the farthest first, while fewer than four fade.
+        // a ped model's info (CModelInfo::ms_modelInfoPtrs at *0x486518, 0x4CD10C entries; 0: none)
+        uint32_t modelInfo(uint32_t model)
+        {
+            const uint32_t table = static_cast<uint32_t>(rd32(0x00486518u));
+            return table && model < static_cast<uint32_t>(rd32(0x004CD10Cu)) ? static_cast<uint32_t>(rd32(table + model * 4u)) : 0u;
+        }
+        // the live peds wearing a model (a walker of it is drawn on one of them: vcs_distant.cpp's templates)
+        int pedsOfModel(uint32_t model)
+        {
+            const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
+            if (!pool)
+                return 0;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
+            const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), kLargePeds);
+            int n = 0;
+            for (uint32_t i = 0; i < size; ++i)
+            {
+                const uint32_t ped = entries + i * 0xD20u;
+                if (!(g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u) && rd16(ped + 0x56u) == model && !(rd32(ped + 0x4Cu) & 1))
+                    ++n; // (not one leaving the world)
+            }
+            return n;
+        }
+        std::atomic<uint32_t> g_handIns{0}, g_handOuts{0}; // popview's handovers: walkers made real, real peds made walkers
+        // VCS_CROWD_BANDS_LOG: each handover logged, and a ped handed in looked at again a second later (still there, its
+        // height and heading)
+        const bool g_bandsLog = std::getenv("VCS_CROWD_BANDS_LOG") != nullptr;
+        struct HandWatch
+        {
+            uint32_t ped = 0;
+            int32_t frame = 0;
+            float heading = 0.0f, z = 0.0f;
+        };
+        HandWatch g_handWatch[8];
+        uint32_t g_handWatchNext = 0;
+        void watchHandovers()
+        {
+            const int32_t now = rd32(0x004CD124u);
+            for (HandWatch &w : g_handWatch)
+                if (w.ped && now - w.frame >= 60)
+                {
+                    std::fprintf(stderr, "[bands] in +1 s: ped %08x model %d at %.1f %.1f %.1f (made at z %.1f) heading %.2f (made %.2f) state %#x\n",
+                                 w.ped, rd16(w.ped + 0x56u), rdf(w.ped + 0x30u), rdf(w.ped + 0x34u), rdf(w.ped + 0x38u), w.z,
+                                 rdf(w.ped + 0x8E0u), w.heading, rd32(w.ped + 0x8C4u));
+                    w.ped = 0;
+                }
+        }
+
+        // With the crowd bands: a ped past kBandOut in view (the walkers' cone, +-60 degrees) becomes a walker of its model
+        // on the nearest pavement link and leaves the world at once (bRemoveFromWorld, +0x48 bit 32: CWorld::Process
+        // removes it this frame; the walker is drawn this frame too) - while another ped wears its model (the walker's
+        // template) and a walker is free, else it stays until out of view. Out of view a ped past kBandOut fades, and while
+        // the bands hold more than their numbers (just switched on, the camera-cut fill's hundred tries) the farthest out
+        // of view beyond 40 m; the farthest first, while fewer than four fade.
         void trimBands()
         {
+            if (g_bandsLog)
+                watchHandovers();
             const Bands bands = bandCounts();
             const bool over = bands.nearCount + bands.midCount > g_bandNear + g_bandMid;
-            if (bands.fading >= 4 || (!over && bands.outCount == 0))
+            if (!over && bands.outCount == 0)
                 return;
             const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
             if (!pool)
@@ -380,19 +436,38 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
             const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), kLargePeds);
             const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
-            const float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u);
+            const float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u), fl = std::max(0.001f, std::hypot(fx, fy));
             uint32_t pick[2] = {0, 0};
             float far[2] = {0.0f, 0.0f};
+            int adopted = 0, adoptTries = 0; // (a failed try scans the pavement nodes: a few a frame)
             for (uint32_t i = 0; i < size; ++i)
             {
                 if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
                     continue;
                 const uint32_t ped = entries + i * 0xD20u;
-                if (!crowdPed(ped) || fadingOut(ped))
+                if (!crowdPed(ped) || fadingOut(ped) || (rd32(ped + 0x4Cu) & 1))
                     continue;
                 const float dx = rdf(ped + 0x30u) - cx, dy = rdf(ped + 0x34u) - cy, d = std::hypot(dx, dy);
                 const bool past = d > kBandOut;
-                const bool spare = over && d > kRecycleOutOfView && dx * fx + dy * fy <= 0.2f * d;
+                const float along = dx * fx + dy * fy;
+                if (past && d < kBandAdoptMax && along >= 0.5f * d * fl)
+                {
+                    // walking away (forward (-sin, cos) of +0x8E0 from the camera): one coming back stays real
+                    const uint32_t model = rd16(ped + 0x56u);
+                    const float heading = rdf(ped + 0x8E0u), away = -std::sin(heading) * dx + std::cos(heading) * dy;
+                    if (adopted < 4 && away > 0.0f && ++adoptTries <= 8 && pedsOfModel(model) >= 2 &&
+                        vcs::distant::adoptPed(rdf(ped + 0x30u), rdf(ped + 0x34u), rdf(ped + 0x8E0u), model))
+                    {
+                        if (g_bandsLog)
+                            std::fprintf(stderr, "[bands] out: ped %08x model %u at %.1f %.1f heading %.2f, %.0f m -> a walker\n", ped,
+                                         model, rdf(ped + 0x30u), rdf(ped + 0x34u), rdf(ped + 0x8E0u), d);
+                        wr32(ped + 0x4Cu, rd32(ped + 0x4Cu) | 1);
+                        ++adopted;
+                        g_handOuts.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    continue; // in view: never faded
+                }
+                const bool spare = over && d > kRecycleOutOfView && along <= 0.2f * d * fl;
                 if (!past && !spare)
                     continue;
                 const float key = past ? d + 1e4f : d; // past the edge first
@@ -409,7 +484,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                         break;
                     }
             }
-            for (int k = 0; k < std::min(2, 4 - bands.fading); ++k)
+            for (int k = 0; k < std::min(2, 4 - bands.fading); ++k) // (none while four fade)
                 if (pick[k])
                     wr32(pick[k] + 0x1CCu, rd32(pick[k] + 0x1CCu) | static_cast<int32_t>(0x80000000u));
         }
@@ -1040,9 +1115,39 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 ctx->f[12] = ctx->f[13] = ctx->f[15];
         }
 
+        // The crowd bands' handover in (CROWD_BANDS_PLAN.md step 4): a walker come in past 200 m in view becomes a real ped
+        // in its place through AddToPopulation's own making of one - its spot finder answered with the walker's place
+        // and link (here), AddPed given its model, type and place (addPed), the new ped turned its way and set walking
+        // that way (setWanderPath: +0x8E0 / +0x8E4 the rotation now / wanted, forward (-sin, cos); +0x78A the wander
+        // direction, 0 north .. 7 north-west clockwise - game-internals.md "The ped spot finder"). One per AddToPopulation
+        // call, while the middle band has room and a ped of its model lives (its model is loaded).
+        constexpr uint32_t kAddPed = 0x002B2908u, kAddPedReturn = 0x002B2568u;
+        constexpr uint32_t kSetWanderPath = 0x00206568u, kSetWanderReturn = 0x002B2764u;
+        struct HandIn
+        {
+            bool active = false, made = false;
+            vcs::distant::Handover h{};
+        };
+        HandIn g_handIn;
+
         PS2_GUEST_CC void pedSpotFinder(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_rdram = rdram; // (farInView reads through it)
+            if (ctx->pc == kPedSpotFinder && g_handIn.active && GPR_U32(ctx, 31) == kAddToPopulationFinds)
+            {
+                // the walker's spot: position (a3), its link's nodes (t0, t1) and place along it (t2); found
+                const vcs::distant::Handover &h = g_handIn.h;
+                const uint32_t pos = GPR_U32(ctx, 7);
+                wrf(pos, h.x);
+                wrf(pos + 4u, h.y);
+                wrf(pos + 8u, h.z);
+                wr32(GPR_U32(ctx, 8), h.from);
+                wr32(GPR_U32(ctx, 9), h.to);
+                wrf(GPR_U32(ctx, 10), h.t);
+                SET_GPR_U32(ctx, 2, 1);
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
             if (ctx->pc == kPedSpotFinder && bandsOn() && GPR_U32(ctx, 31) == kAddToPopulationFinds)
                 bandRings(ctx);
             if (ctx->pc == kPedSpotFinder)
@@ -1596,10 +1701,14 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 const uint32_t ra = GPR_U32(ctx, 31);
                 const float k = pedDistance(), kd = pedDensityDistance();
                 g_rdram = rdram;
+                g_handIn.active = g_handIn.made = false;
                 if (bandsOn())
                 {
                     g_bandFill = ra >= kFill && ra < kFillEnd;
                     bandRings(ctx);
+                    if (!g_bandFill && bandCounts().midCount < g_bandMid && vcs::distant::pendingHandover(g_handIn.h) &&
+                        modelInfo(g_handIn.h.model) && pedsOfModel(g_handIn.h.model) > 0)
+                        g_handIn.active = true;
                     return g_addToPopulation(rdram, ctx, runtime);
                 }
                 if (ra >= kFill && ra < kFillEnd)
@@ -1613,6 +1722,66 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 ctx->f[15] *= ko * (k > 1.0f && !(ra >= kFill && ra < kFillEnd) ? g_pedOutFarK : 1.0f);
             }
             g_addToPopulation(rdram, ctx, runtime);
+        }
+
+        // the handover's AddPed (AddToPopulation's call): the walker's model, its ped type (model info +0x34, as
+        // AddToPopulation reads it) and its place (x, y: the game has spread the spot across the pavement since)
+        PS2Runtime::RecompiledFunction g_addPed = nullptr, g_setWanderPath = nullptr;
+        PS2_GUEST_CC void addPed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (ctx->pc == kAddPed && g_handIn.active && GPR_U32(ctx, 31) == kAddPedReturn)
+            {
+                g_rdram = rdram;
+                g_handIn.active = false; // (a group's next peds are the game's own)
+                const vcs::distant::Handover &h = g_handIn.h;
+                if (const uint32_t info = modelInfo(h.model))
+                {
+                    SET_GPR_U32(ctx, 4, static_cast<uint32_t>(rd32(info + 0x34u)));
+                    SET_GPR_U32(ctx, 5, h.model);
+                    const uint32_t pos = GPR_U32(ctx, 6);
+                    wrf(pos, h.x);
+                    wrf(pos + 4u, h.y);
+                    g_handIn.made = true;
+                    vcs::distant::handoverTaken(h.slot);
+                    g_handIns.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            g_addPed(rdram, ctx, runtime);
+        }
+        // the handover's new ped, set walking (AddToPopulation's call, right after AddPed): turned the walker's way, its
+        // wander direction the nearest of the eight
+        PS2_GUEST_CC void setWanderPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (ctx->pc == kSetWanderPath && g_handIn.made && GPR_U32(ctx, 31) == kSetWanderReturn)
+            {
+                g_rdram = rdram;
+                g_handIn.made = false;
+                const uint32_t ped = GPR_U32(ctx, 4);
+                if (ped < 0x00100000u) // (no ped)
+                    return g_setWanderPath(rdram, ctx, runtime);
+                const float h = g_handIn.h.heading, sn = std::sin(h), cs = std::cos(h);
+                wrf(ped + 0x8E0u, h);
+                wrf(ped + 0x8E4u, h);
+                wrf(ped, cs); // right
+                wrf(ped + 4u, sn);
+                wrf(ped + 8u, 0.0f);
+                wrf(ped + 0x10u, -sn); // forward
+                wrf(ped + 0x14u, cs);
+                wrf(ped + 0x18u, 0.0f);
+                const long dir = std::lround(-h / 0.78539816f);
+                SET_GPR_U32(ctx, 5, static_cast<uint32_t>(((dir % 8) + 8) % 8));
+                if (g_bandsLog)
+                {
+                    g_handWatch[g_handWatchNext++ % 8] = {ped, rd32(0x004CD124u), h, g_handIn.h.z};
+                }
+                if (g_bandsLog)
+                    std::fprintf(stderr, "[bands] in: walker %.1f %.1f %.1f model %u -> ped %.1f %.1f %.1f model %d (%.2f m off), %.0f m\n",
+                                 g_handIn.h.x, g_handIn.h.y, g_handIn.h.z, g_handIn.h.model, rdf(ped + 0x30u), rdf(ped + 0x34u),
+                                 rdf(ped + 0x38u), rd16(ped + 0x56u),
+                                 std::hypot(rdf(ped + 0x30u) - g_handIn.h.x, rdf(ped + 0x34u) - g_handIn.h.y),
+                                 std::hypot(g_handIn.h.x - rdf(kCameraPos), g_handIn.h.y - rdf(kCameraPos + 4u)));
+            }
+            g_setWanderPath(rdram, ctx, runtime);
         }
 
         // a slider 0..100 (0 the game's own) to a percent of the game's, up to `most`
@@ -1768,6 +1937,21 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                   "How many people walk around: 0 is the original (the PS2 keeps it low), 100 four times as many. "
                   "Missions still empty the streets when they want. More than the PS2 needs Streaming memory above PS2.",
                   "VCS_PEDESTRIAN_DENSITY", 400, g_pedestrians);
+        {
+            settings::Spec s;
+            s.key = "world.crowd_bands";
+            s.page = "Graphics";
+            s.section = "Distance and population (experimental)";
+            s.label = "Crowd bands";
+            s.help = "With the population distance raised: about 20 real people within 100 m and 20 more out to 200 m, "
+                     "and past that the distant crowd (Distant crowds) - a person walking in from it becomes a real one in "
+                     "its place, and back. Fewer real people to simulate for the same busy streets.";
+            s.type = settings::Type::Toggle;
+            s.defaultValue = 0;
+            s.env = "VCS_CROWD_BANDS";
+            s.onChange = [](int v) { g_bands.store(v != 0, std::memory_order_relaxed); };
+            settings::add(s);
+        }
     }
 
     float realCarOuterRadius()
@@ -1835,6 +2019,11 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             runtime.replaceFunction(kNodeList, &nodeList);
         if ((g_addToPopulation = runtime.lookupFunction(kAddToPopulation)))
             runtime.replaceFunction(kAddToPopulation, &addToPopulation);
+        // the crowd bands' handover (CROWD_BANDS_PLAN.md step 4; they pass the call on unless one is under way)
+        if ((g_addPed = runtime.lookupFunction(kAddPed)))
+            runtime.replaceFunction(kAddPed, &addPed);
+        if ((g_setWanderPath = runtime.lookupFunction(kSetWanderPath)))
+            runtime.replaceFunction(kSetWanderPath, &setWanderPath);
         if ((g_nodeNew = runtime.lookupFunction(kNodeNew)))
             runtime.replaceFunction(kNodeNew, &nodeNew);
         if ((g_nodeDelete = runtime.lookupFunction(kNodeDelete)))
@@ -1886,7 +2075,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         // popview -> ok peds=<total> <in view within 50 / 100 / 200 m> cars=<total> <in view within 50 / 100 / 200 m>: what the
         // player sees of the population (a cone of +-40 degrees round the camera's forward), not the pools' totals;
         // bands=<on> near=<n>/<number> mid=<n>/<number> out=<past 200 m> fading=<n>: the crowd bands' counts (all around);
-        // births=<the ped count's rises so far>
+        // births=<the ped count's rises so far> handin=<walkers made real> handout=<real peds made walkers> (the handovers)
         ps2control::addCommand("popview", [](const std::string &, ps2control::Reply reply) {
             if (!g_rdram)
                 return reply("error the camera has not run yet");
@@ -1920,10 +2109,11 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             count(kCarPool, 0x8C0u, cars);
             const Bands bands = countBands();
             char text[256];
-            std::snprintf(text, sizeof(text), "ok peds=%d %d %d %d cars=%d %d %d %d bands=%d near=%d/%d mid=%d/%d out=%d fading=%d births=%u",
+            std::snprintf(text, sizeof(text), "ok peds=%d %d %d %d cars=%d %d %d %d bands=%d near=%d/%d mid=%d/%d out=%d fading=%d births=%u handin=%u handout=%u",
                           peds[0], peds[1], peds[2], peds[3], cars[0], cars[1], cars[2], cars[3], bandsOn() ? 1 : 0,
                           bands.nearCount, g_bandNear, bands.midCount, g_bandMid, bands.outCount, bands.fading,
-                          g_births.load(std::memory_order_relaxed));
+                          g_births.load(std::memory_order_relaxed), g_handIns.load(std::memory_order_relaxed),
+                          g_handOuts.load(std::memory_order_relaxed));
             reply(text);
         });
         ps2control::addCommand("distancestate", [](const std::string &, ps2control::Reply reply) {

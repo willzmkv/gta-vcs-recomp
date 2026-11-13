@@ -97,9 +97,15 @@ namespace vcs::distant
             uint32_t model = 0;
             float side = 0.0f; // to the right of the link (walkers: a pavement's width)
             bool alive = false;
+            // the crowd bands' handover (walkers): 1 waiting to become a real ped, 2 taken (gone at the next tick); where
+            // it stood when last moved
+            uint8_t hand = 0;
+            uint16_t handFrames = 0;
+            float at[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // x, y, z, heading
         };
         Car g_cars[kMaxProxies];
         Car g_walkers[kMaxWalkers];
+        uint32_t g_wantedWalkers = 0; // this tick's (adoptPed takes a free one below it)
         std::mt19937 g_rng{0x5643u};
 
         std::mutex g_publishMutex;
@@ -263,6 +269,7 @@ namespace vcs::distant
                     c.speed = std::uniform_real_distribution<float>(1.1f, 1.7f)(g_rng);
                     c.side = std::uniform_real_distribution<float>(-2.0f, 2.0f)(g_rng);
                     c.model = g_pedModels.empty() ? 0u : g_pedModels[g_rng() % g_pedModels.size()];
+                    c.hand = 0;
                 }
                 else
                 {
@@ -317,6 +324,11 @@ namespace vcs::distant
                     c.alive = false;
                     continue;
                 }
+                if (c.alive && c.hand == 2) // a real ped stands in its place now
+                {
+                    c.alive = false;
+                    c.hand = 0;
+                }
                 if (!c.alive)
                 {
                     if (placed >= (walker ? 8u : 4u))
@@ -345,11 +357,35 @@ namespace vcs::distant
                 const float x = a.x + (b.x - a.x) * c.t + rx * c.side, y = a.y + (b.y - a.y) * c.t + ry * c.side;
                 const float z = a.z + (b.z - a.z) * c.t + height;
                 const float d = std::hypot(x - cx, y - cy);
-                if (d < lo || d > hi * 1.05f || (x - cx) * vx + (y - cy) * vy < -20.0f)
+                const float ahead = (x - cx) * vx + (y - cy) * vy;
+                if (walker && d < lo && ahead > 0.0f && vcs::distance::crowdBands())
+                {
+                    // come in past the band in view: it waits to become a real ped (vcs_distance.cpp takes it), walking
+                    // on; not taken within ~a second (the bands full) it turns back - never gone in plain sight
+                    if (c.hand == 0)
+                    {
+                        c.hand = 1;
+                        c.handFrames = 0;
+                    }
+                    if (c.hand == 1 && ++c.handFrames > 60)
+                    {
+                        std::swap(c.from, c.to);
+                        c.t = 1.0f - c.t;
+                        c.side = -c.side;
+                        c.hand = 0;
+                    }
+                }
+                else if (d < lo || d > hi * 1.05f || ahead < -20.0f)
                 {
                     c.alive = false;
                     continue;
                 }
+                else if (c.hand == 1)
+                    c.hand = 0;
+                c.at[0] = x;
+                c.at[1] = y;
+                c.at[2] = z;
+                c.at[3] = std::atan2(-fx, fy);
                 Proxy p{};
                 const float m[16] = {rx, ry, 0.0f, 0.0f, fx, fy, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, x, y, z, 1.0f};
                 std::memcpy(p.m, m, sizeof(m));
@@ -365,6 +401,7 @@ namespace vcs::distant
             const int setting = g_setting.load(std::memory_order_relaxed), crowds = g_crowds.load(std::memory_order_relaxed);
             uint32_t nodes, count, links, peds = 0;
             std::vector<Proxy> cars, walkers;
+            g_wantedWalkers = 0; // (no walkers this tick: none offered or adopted)
             if ((setting > 0 || crowds > 0) && network(nodes, count, links, &peds))
             {
                 if (setting > 0)
@@ -381,6 +418,7 @@ namespace vcs::distant
                     crowdBand(pedLo, pedHi);
                     const uint32_t most = vcs::distance::crowdBands() ? kMaxWalkers : kWalkers;
                     const uint32_t wantedWalkers = std::min<uint32_t>(most, static_cast<uint32_t>(crowds) * most / 100u);
+                    g_wantedWalkers = wantedWalkers;
                     move(g_walkers, kMaxWalkers, wantedWalkers, true, nodes, count,
                          count + peds, links, pedLo, pedHi, kPedHeight, walkers);
                 }
@@ -1012,6 +1050,95 @@ namespace vcs::distant
     {
         if (outcome >= 0 && outcome < 3)
             g_statProxy[outcome].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    bool pendingHandover(Handover &out)
+    {
+        for (uint32_t i = 0; i < g_wantedWalkers && i < kMaxWalkers; ++i)
+        {
+            const Car &c = g_walkers[i];
+            if (!c.alive || c.hand != 1 || !c.model)
+                continue;
+            out = {i, c.at[0], c.at[1], c.at[2] - kPedHeight, c.at[3], c.model, c.from, c.to, c.t};
+            return true;
+        }
+        return false;
+    }
+
+    void handoverTaken(uint32_t slot)
+    {
+        if (slot < kMaxWalkers && g_walkers[slot].hand == 1)
+            g_walkers[slot].hand = 2;
+    }
+
+    bool adoptPed(float x, float y, float heading, uint32_t model)
+    {
+        uint32_t nodes, count, links, peds = 0;
+        if (!g_rdram || !network(nodes, count, links, &peds) || !peds)
+            return false;
+        float lo, hi; // only where a walker lives (move() drops it past the band)
+        crowdBand(lo, hi);
+        const float d = std::hypot(x - rdf(kCameraPos), y - rdf(kCameraPos + 4u));
+        if (d < lo || d > hi)
+            return false;
+        uint32_t slot = kMaxWalkers;
+        for (uint32_t i = 0; i < g_wantedWalkers && i < kMaxWalkers; ++i)
+            if (!g_walkers[i].alive)
+            {
+                slot = i;
+                break;
+            }
+        if (slot == kMaxWalkers)
+            return false;
+        // the nearest pavement link (a usable node's within 20 m, the segment's nearest point), walked the ped's way; not
+        // when the ped stands more than 1.5 m off it (the walker would jump)
+        const float hx = -std::sin(heading), hy = std::cos(heading);
+        uint16_t from = 0xFFFFu, to = 0xFFFFu;
+        float bestErr = 1.5f, bestT = 0.0f, bestSide = 0.0f;
+        for (uint32_t i = count; i < count + peds; ++i)
+        {
+            const Node n = node(nodes, i);
+            if ((n.x - x) * (n.x - x) + (n.y - y) * (n.y - y) > 20.0f * 20.0f || !usable(n))
+                continue;
+            for (uint32_t k = 0; k < n.links; ++k)
+            {
+                const uint16_t m = neighbour(links, n, k);
+                if (m < count || m >= count + peds)
+                    continue;
+                const Node o = node(nodes, m);
+                // the ped's way along it: from this node to the neighbour, or back
+                const bool fwd = (o.x - n.x) * hx + (o.y - n.y) * hy >= 0.0f;
+                const Node &a = fwd ? n : o, &b = fwd ? o : n;
+                const float len = std::max(1.0f, std::hypot(b.x - a.x, b.y - a.y));
+                const float ux = (b.x - a.x) / len, uy = (b.y - a.y) / len;
+                const float t = ((x - a.x) * ux + (y - a.y) * uy) / len;
+                const float side = (x - a.x) * uy - (y - a.y) * ux; // to the right of the way (rx, ry = uy, -ux)
+                const float err = (t < 0.0f ? -t * len : t > 1.0f ? (t - 1.0f) * len : 0.0f) + std::max(0.0f, std::abs(side) - 3.0f);
+                if (err < bestErr)
+                {
+                    bestErr = err;
+                    from = static_cast<uint16_t>(fwd ? i : m);
+                    to = static_cast<uint16_t>(fwd ? m : i);
+                    bestT = std::clamp(t, 0.0f, 1.0f);
+                    bestSide = std::clamp(side, -3.0f, 3.0f);
+                }
+            }
+        }
+        if (from == 0xFFFFu)
+            return false;
+        const Node a = node(nodes, from), b = node(nodes, to);
+        const float len = std::max(1.0f, std::hypot(b.x - a.x, b.y - a.y));
+        Car &c = g_walkers[slot];
+        c.from = from;
+        c.to = to;
+        c.length = len;
+        c.t = bestT;
+        c.side = bestSide;
+        c.speed = std::uniform_real_distribution<float>(1.1f, 1.7f)(g_rng);
+        c.model = model;
+        c.hand = 0;
+        c.alive = true;
+        return true;
     }
 
     void workerItem(uint32_t itemFrame, uint16_t group)
