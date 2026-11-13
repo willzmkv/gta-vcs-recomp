@@ -3563,6 +3563,37 @@ probes in the game (rig, `worlddetail`).
   +0x578 + slot*0x1C; 12c) picks the fire trigger's weapon effect: automatics (22, 24-29, 33-35) buzz while firing, the
   rest give a wall that breaks at the shot.
 
+### 12f. The clump animation update and its node loop (2026-11-13)
+
+Found from the decompiles (`build/analysis/t2_agents/x.c`, `y.c`, `z.c`: the research spec `anim.md` there) and checked
+in the game with src/game/vcs_anim.cpp's verify modes (PERFORMANCE.md 48).
+
+- **FUN_00154d10(dt $f12, clump $a0, full $a1)** = the clump's animation update, from each entity's UpdateAnim
+  (FUN_003c50a8, vtable +0x48) in CWorld::Process' first loop. `ad = *(clump + 0x18)` (+0 the association list, +8 the
+  node count, +0xC the root-motion delta's pointer, +0x10 the nodes, 0x18 bytes each: +0 flags, +4 default position,
+  +0x10 the node's frame). It stores `ad` in the global **0x481A68** (the callbacks read it), advances each association
+  (FUN_00156800: blend; may delete it and call its callback), collects their node-state arrays into an `args` array on
+  its stack (a flag word, then up to 11 pointers, 0 ended), then **FUN_00401ad8(ad, callback, args)**: for each node,
+  callback(node, args) - 0x155068 (quaternion + position: skinned clumps, the peds), 0x155c08 (3x3 matrix + position),
+  0x1552F8 (root motion only, `full` = 0: an off-screen entity). Then each association's time (FUN_00156710: end
+  callbacks) and dirty flags (FUN_001b4688).
+- **The per-node callbacks** read the node's state of every association (`args[k]`, node i's at + 0x20 i: +0 angle,
+  +4 1/sin, +8 / +0xC key offsets, +0x10 time left in the key, +0x14 / +0x1C the sequence, +0x18 the association),
+  sample and blend (FUN_002805f0 and its keyframe / slerp / half-float helpers; sinf / cosf / rem_pio2f are host stubs),
+  and write only: the node's frame ([+8, +0x24) quaternion + position, [+0x10, +0x4C) the matrix form), its node states
+  (+0 .. +0x10), each `args[k]` moved on by 0x20 (every pointer, every node: also the root-motion variants
+  FUN_00155338 / 001557e0), and a root-motion node (flags & 8, the delta pointer set) the clump's delta. No allocation,
+  no callback, no other global: so the nodes of one clump are independent of each other - computing them in slices on
+  several threads gives the same bytes as the game's order (16189 loops compared, 0 differences).
+- An association's node-state array has its **animation's** node count (animation at association + 0x20, + 0x18 the
+  count), often fewer than the clump's nodes (a ped's): the pointers of the nodes past it run into memory the callbacks
+  find no sequence in, and those nodes are skipped.
+- After the update the game itself turns some bones of the same clump (a head looking, a torso aiming) before the
+  next one: a compare of a node's frame much later than the loop sees those, not the animation's (verify compares at
+  the next FUN_00154d10's entry, same game frame only).
+- Guest RAM **0x20000 - 0x5FFFF** (16 KB slots) holds the worker copies' stacks and args copies while the loop runs
+  (the EE kernel's area below the game, all zero in play; vcs_aim.cpp's scratch is at 0x60000).
+
 ## 13. Open questions / next research targets
 
 - Main loop, frame limiter, CTimer (section 4) - milestone 4 (60 fps).

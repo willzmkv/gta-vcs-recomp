@@ -2564,7 +2564,9 @@ namespace
                     std::fprintf(stderr, "[proxy] culled (%s): z %.1f size %.2f W %.1f %.1f %.1f P %.1f %.1f %.1f\n", reason, z_cam,
                                  size, W[0], W[1], W[2], P[12], P[13], P[14]);
             };
-            if (z_cam <= 0.0f || size < 0.001f * z_cam)
+            // (0.0004 since 2026-11-13: at 0.001 a head or a hand around ~1.5 pixels came and went with every sub-pixel
+            // step - the far crowd flickered; instanced, the extra parts cost little)
+            if (z_cam <= 0.0f || size < 0.0004f * z_cam)
             {
                 why(z_cam <= 0.0f ? "behind" : "small");
                 vcs::distant::noteProxy(1);

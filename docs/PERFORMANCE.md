@@ -1187,6 +1187,25 @@ when it came into the game's own draw - and past 110 / 180 m peds moved 15 / 10 
 No real ped proxy was ever shown as another model (the `proxies` command's `realorphans=`: 0 at both spots). The cost
 of the farther tiers is to be measured again.
 
+Then the far crowd **flickered** (the player's report, 2026-11-13, like the street lamps once): a template was the first
+ped of its key drawn in a frame - or, for the proxies' table, the farthest - and the draw order changes from frame to
+frame, so every proxy of a model took another ped's pose (another walking phase) each frame. Now a template stays the
+same ped while it is drawn (vcs_distant.cpp `stickyTemplate`, `keptTemplate`); a ped stays a proxy until 10 m nearer
+than where it became one (no back and forth on the 150 m line); and a proxy's part is drawn down to ~0.6 pixels of a
+1080-line picture (`drawLitProxies`: 0.0004 of the distance, was 0.001 - a head or a hand around 1.5 pixels came and
+went with each sub-pixel step). A template's parts drawn later in the frame from the sorted alpha list (another group
+of the same entity) now carry the same proxies (vcs_distant.cpp `frameKicked`), and a template is kept only while it
+was drawn the frame before.
+
+The player's picture also showed the crowd **piled in one band far down the street** in view and thin near them: the
+in-view spawn ring starts at 35 x the generation factor (~105 m with the population distance at its most, up to the
+node cache's ~155-200 m) and nothing in view nearer than 250 m is recycled, so new peds kept collecting there. Now the
+ring out of view reaches 60 m instead of 20 (`VCS_PED_OUT_FAR_K`, not for the camera-cut fill): side streets and the
+ones behind fill too, out of sight. At the player's spot (their card, 4K, two pictures after 2 minutes): in view within
+200 m 49-57 -> 41-43 peds, the total kept (~140). Closing the in-view ring while 20 peds stood far in view
+(`VCS_PED_INVIEW_CAP`, off by default) was tried: the game makes nearly every ped through that ring, and the city kept
+40 of its 140.
+
 ### 47. The distant proxies instanced (2026-11-13)
 
 Every proxy - a distant walker, a far car, a real ped past 150 m - was one native draw per part of its template: the
@@ -1213,6 +1232,42 @@ one round, the frame held (`pause on`):
 
 One round only (the machine was then busy with other work): to be measured again with alternating rounds. The
 sections above measured with the population governor at work may have measured less population than they say.
+
+### 48. The animation's node loop on worker threads (2026-11-13)
+
+The game thread is single: the game's simulation (AI, physics, scripts, the population) reads and writes shared state
+everywhere and in a fixed order. What can leave it is pure arithmetic with no effect on anyone else. The largest such
+piece with the population full (127 peds, the player's card; VCS_PROFILE inclusive): the clump animation update's node
+loop (game-internals.md 12f) - FUN_00401ad8 6.4% of the game thread, ~1.4 ms; the skin palette (FUN_0039EC18, 9.2%) is
+next.
+
+- **The game's own code, copied to run anywhere** (`tools/anim_worker_gen.py`): the 52 recompiled functions the
+  per-node callbacks reach (sampling, slerp, half floats, sinf / cosf / rem_pio2f stubs) copied out of generated/ee
+  into generated/anim/anim_worker.cpp, each direct call a plain C++ call, the scheduler checkpoints and the EE clock's
+  dispatch charge dropped - nothing else changed, so bit for bit the game's arithmetic, without a hand port. It refuses
+  if the call graph reaches anything else (an indirect call, a syscall, a non-pure stub). CMake runs it at configure
+  time; the copies are game code, never committed.
+- **vcs_anim.cpp** replaces FUN_00401ad8 (quaternion and matrix callbacks; the root-motion-only one stays the game's):
+  a clump's nodes split in slices (6 nodes or more each, up to the workers + 1), each slice on its own context, its
+  own 16 KB of guest RAM (0x20000..: its args copy, its stack), the game thread's MXCSR; the game thread takes the first
+  slice and waits for the rest - the order of everything around it is the game's. A clump stays in one piece when two
+  root-motion nodes share its delta, two nodes' frames overlap, or one association's node states reach another's.
+  3 workers by default (a ped's ~25 nodes make 4 slices; 6 spinning workers starved the GS stage on a busy machine).
+- **Checked**: `VCS_NATIVE_ANIM=serial` against the game's loop (verify, compared at the next clump update's entry,
+  same game frame): 0 differences in 23810 loops; `=slices` (one piece against slices on the same input, at once):
+  0 differences in 16189 loops with no independence check at all, 13580 with it. The verify mode's other differences
+  were the game turning bones after the update (a head looking at something) and node states freed in between.
+- **Cost**, the player's benchmark (tools/bench_avenue.py: Little Havana's avenue to downtown's police station on
+  the roads, their card and settings, 4K, the population full; 2 alternating rounds, ~10600 frames each):
+
+  | | frame | game thread | host | p99 | frames > 25 ms | > 33 ms |
+  |---|---|---|---|---|---|---|
+  | in slices (3 workers) | 9.93 ms | 7.87 ms | 8.78 ms | 24.1 ms | 90 | 8 |
+  | the game's loop | 10.01 ms | 7.88 ms | 8.95 ms | 25.0 ms | 106 | 10 |
+
+  Within the noise on the game thread: at this population the node loop is ~0.5 ms, and the fork / join per clump
+  (127 clumps a frame, a few microseconds each) takes most of what the slices save. It stays on - bit for bit the
+  game's, a little better on the slow frames - as the base for the skin palette (9% of the game thread, the same way).
 
 ## Next
 

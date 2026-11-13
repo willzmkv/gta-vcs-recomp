@@ -25,6 +25,7 @@
 #include "game/vcs_sound.h"
 #include "game/vcs_stream.h"
 #include "game/vcs_aim.h"
+#include "game/vcs_anim.h"
 #include "game/vcs_distance.h"
 #include "game/vcs_distant.h"
 #include "game/vcs_carcam.h"
@@ -1192,6 +1193,7 @@ namespace
         vcs::prompts::install(runtime);    // button prompts by device (game/vcs_prompts.h; chains onto the 2D hooks above)
         vcs::freecam::install(runtime);    // the trainer's free camera (game/vcs_freecam.h)
         vcs::aim::install(runtime);        // free aim with the mouse / right stick (game/vcs_aim.h)
+        vcs::anim::install(runtime);       // the animation's node loop on worker threads (game/vcs_anim.h)
         vcs::distance::install(runtime);   // the draw distance settings, around aim's CCamera::Process (game/vcs_distance.h)
         vcs::distant::install(runtime);    // decorative distant traffic's simulation (game/vcs_distant.h)
         vcs::carcam::install(runtime);     // the mouse on the camera behind a vehicle (game/vcs_carcam.h)

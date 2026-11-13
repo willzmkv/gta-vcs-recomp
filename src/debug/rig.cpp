@@ -574,8 +574,12 @@ namespace vcs::rig
                     FILE *f = std::fopen(path.c_str(), "r");
                     if (!f)
                         return reply("error cannot read " + path);
-                    for (float px, py, pz; std::fscanf(f, "%f %f %f", &px, &py, &pz) == 3;)
+                    // a point a line; `#` lines are comments (tools/routes/*.txt say where a route goes)
+                    char line[256];
+                    for (float px, py, pz; std::fgets(line, sizeof(line), f);)
                     {
+                        if (line[0] == '#' || std::sscanf(line, "%f %f %f", &px, &py, &pz) != 3)
+                            continue;
                         if (!c.x.empty())
                         {
                             const float dx = px - c.x.back(), dy = py - c.y.back(), dz = pz - c.z.back();

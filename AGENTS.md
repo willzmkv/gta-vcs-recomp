@@ -45,7 +45,7 @@ choices).
 | Path | What |
 |---|---|
 | `src/main.cpp` | Launcher: ISO, settings registration, runtime start |
-| `src/game/` | Game-specific code: overrides / hooks (`vcs_overrides.cpp`), native draw HLE (`vcs_hle_world.cpp`), display (`vcs_display.cpp`), the trainer (`vcs_trainer.cpp`), frame timing (`vcs_framerate.cpp`, per-frame mission meters `vcs_script_timing.cpp`), the player's controls (`vcs_input.cpp`; free aim `vcs_aim.cpp`; the pause menu's keys and mouse `vcs_frontend.cpp`), the game's music / effects levels as settings (`vcs_volume.cpp`), button prompts by device (`vcs_prompts.cpp`, its glyphs `vcs_glyph_art.cpp`), traffic / pedestrian density and draw distance (`vcs_world_detail.cpp`), the NPC drive-by's fire rate (`vcs_driveby.cpp`), mission scripts stuck above 30 fps (`vcs_script_fixes.cpp`) |
+| `src/game/` | Game-specific code: overrides / hooks (`vcs_overrides.cpp`), native draw HLE (`vcs_hle_world.cpp`), display (`vcs_display.cpp`), the trainer (`vcs_trainer.cpp`), frame timing (`vcs_framerate.cpp`, per-frame mission meters `vcs_script_timing.cpp`), the animation's node loop on worker threads (`vcs_anim.cpp`), the player's controls (`vcs_input.cpp`; free aim `vcs_aim.cpp`; the pause menu's keys and mouse `vcs_frontend.cpp`), the game's music / effects levels as settings (`vcs_volume.cpp`), button prompts by device (`vcs_prompts.cpp`, its glyphs `vcs_glyph_art.cpp`), traffic / pedestrian density and draw distance (`vcs_world_detail.cpp`), the NPC drive-by's fire rate (`vcs_driveby.cpp`), mission scripts stuck above 30 fps (`vcs_script_fixes.cpp`) |
 | `src/render/`, `src/rhi/`, `src/platform/` | Presenter + shaders (HLSL; DXBC by fxc, SPIR-V by `tools/hlsl_spirv.py`), the RHI (backends `d3d11/`, `vulkan/`, `null/`; only they see a graphics API), SDL3 platform layer |
 | `src/sound/` | Sony's libsd on the host (the native sound driver in `src/game/vcs_sound.cpp` drives the SPU2 through it) |
 | `src/settings/`, `src/ui/` | Settings registry + vcs.ini, the in-game settings menu (F2), the trainer menu (F5) |
@@ -68,6 +68,10 @@ python tools/build.py --opt none|lto|pgo    # game optimisation, kept until chan
 python tools/bench.py [OUT]                  # game-thread benchmark: fixed city spots + an AI drive (game / worker ms)
 python tools/cruise.py run [OUT] [ENV=VAL]   # stutter rig: the car along a fixed route at 144 km/h, every frame timed;
                                              # hitches with their texture / main-thread / game-thread cause (PERFORMANCE.md 21)
+                                             # (--route F, --save user: the player's card copy, --wait S at the start)
+python tools/bench_avenue.py [OUT] [--rounds 2] [ENV=A,B]   # THE performance benchmark (the player's choice): Little
+                                             # Havana's avenue to downtown's police station on the roads, their card,
+                                             # settings, a 4K window and the population full; ENV=A,B alternates an A / B
 python tools/clean.py [--apply] [--keep-days 7]   # delete test output in build/ (lists first; builds, saves, baselines kept)
 python tools/build.py --launcher             # the launcher (VCSLauncher(.exe) in the root; no disc, ~20 s the first time)
 python3 tools/build.py --install-deps        # Linux: the missing packages through pkexec (what the launcher's button runs)
@@ -134,6 +138,8 @@ python tools/prompts_check.py [OUT]                           # button prompts: 
                                                               # device switch, Original unchanged
 python tools/irxdis.py --decompile X.IRX OUT.c                # an IOP module as C (headless Ghidra; analysis only)
 python tools/eedecomp.py 0x2f7d58 [...] [--out FILE]          # game functions as C (the analysed EE project; analysis only)
+python tools/anim_worker_gen.py [GENERATED_EE] [OUT.cpp]      # worker copies of the animation node code (CMake runs it at
+                                                              # configure; generated/anim/, never committed; vcs_anim.cpp)
 ```
 
 The rig (`src/debug/rig.cpp`, `tools/rig.py`) drives the game through its own script VM: `Game.teleport`,

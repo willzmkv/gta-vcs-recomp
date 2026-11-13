@@ -167,6 +167,15 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         const float g_pedOutK = envFloat("VCS_PED_OUT_K", 1.0f);
         const float g_pedInMin = envFloat("VCS_PED_INVIEW_MIN", 55.0f);
         const float g_pedInMaxK = envFloat("VCS_PED_INVIEW_K", 0.0f);
+        // (2026-11-13) The in-view ring is far (105-200 m with the population distance at its most) and nothing in view
+        // nearer than 250 m is ever recycled: the new peds piled up in one band far down the street the player looks
+        // along while the street near them stayed thin (the player's picture: "concentrated there, not spread over the
+        // streets"). So the ring out of view reaches VCS_PED_OUT_FAR_K x the game's 20 m: the side streets and the ones
+        // behind fill too (at the player's spot: 49-57 -> 41-43 in view within 200 m, the total kept at ~140).
+        // VCS_PED_INVIEW_CAP=n closes the in-view ring while n peds stand in view beyond 90 m - off: the game makes
+        // nearly all its peds through the in-view ring, and with it closed (n = 20) the city kept 40 peds of 140.
+        const int g_pedInViewCap = static_cast<int>(envFloat("VCS_PED_INVIEW_CAP", 0.0f));
+        const float g_pedOutFarK = envFloat("VCS_PED_OUT_FAR_K", 3.0f);
         constexpr float kFillInViewK = 1.5f; // the camera-cut fill's farthest in view (the picture is new then)
         uint32_t g_carRing = 0;
         float g_carSpawnK = 1.0f; // the car spawner's factor this call (the node list's shift follows it)
@@ -851,8 +860,42 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         // cached pavement node window so raising Population distance populates the visible range without leaving a hollow
         // gap near the player. It begins at the caller's nearest (35 x the factor: 175 m at the most) - nearer, peds appear
         // in plain sight; VCS_PED_INVIEW_K brings it in for a test (the spawn rings' note above).
+        // the peds in view (+-40 degrees round the camera's forward) beyond 90 m, counted once a game frame
+        int farInView()
+        {
+            static int32_t frame = -1;
+            static int count = 0;
+            const int32_t now = rd32(0x004CD124u); // the game's frame counter (kFrameCounter, below)
+            if (now == frame)
+                return count;
+            frame = now;
+            count = 0;
+            const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
+            if (!pool)
+                return 0;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
+            const uint32_t size = static_cast<uint32_t>(rd32(pool + 8u));
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u);
+            const float fl = std::hypot(fx, fy);
+            fx /= fl > 0.0f ? fl : 1.0f;
+            fy /= fl > 0.0f ? fl : 1.0f;
+            for (uint32_t i = 0; i < size && i < 512u; ++i)
+            {
+                if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
+                    continue;
+                const uint32_t e = entries + i * 0xD20u;
+                if (rd32(e + 0x8F4u) != 1) // the population's own (not the player, cops, a mission's)
+                    continue;
+                const float dx = rdf(e + 0x30u) - cx, dy = rdf(e + 0x34u) - cy, d = std::hypot(dx, dy);
+                count += d > 90.0f && dx * fx + dy * fy >= 0.766f * d;
+            }
+            return count;
+        }
+
         PS2_GUEST_CC void pedSpotFinder(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
+            g_rdram = rdram; // (farInView reads through it)
             if (ctx->pc == kPedSpotFinder)
             {
                 const float k = pedDistance();
@@ -868,7 +911,13 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                     const float cacheReach = 155.0f + g_pedNodeShift;
                     const float maxHi = std::max(minLo + 45.0f, std::min(70.0f * base * kIn, cacheReach));
                     const uint32_t pass = g_pedSpotPass++ & 3u;
-                    if (maxHi > minLo + 40.0f)
+                    if (g_pedInViewCap > 0 && farInView() >= g_pedInViewCap)
+                    {
+                        // enough far down the street already: no ring in view this time (out of view only)
+                        ctx->f[12] = 1e6f;
+                        ctx->f[13] = 0.0f;
+                    }
+                    else if (maxHi > minLo + 40.0f)
                     {
                         const float span = maxHi - minLo;
                         const float band = std::max(55.0f, span * 0.42f);
@@ -1403,7 +1452,8 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 }
                 const float ko = g_pedOutK > 0.0f ? g_pedOutK : kd;
                 ctx->f[14] *= ko; // nearest out of view
-                ctx->f[15] *= ko; // farthest out of view
+                // farthest out of view: the side streets too - not for the camera-cut fill (already factor x 60 there)
+                ctx->f[15] *= ko * (k > 1.0f && !(ra >= kFill && ra < kFillEnd) ? g_pedOutFarK : 1.0f);
             }
             g_addToPopulation(rdram, ctx, runtime);
         }

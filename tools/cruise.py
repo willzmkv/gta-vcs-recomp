@@ -124,7 +124,7 @@ def report(rows, out_json=None, label=""):
 
 
 # ---- run ----------------------------------------------------------------------------------------------------------
-def run(out, route, speed, laps, fps, extra_env, name, settle=4.0, shots=0.0):
+def run(out, route, speed, laps, fps, extra_env, name, settle=4.0, shots=0.0, save_name=None, wait=0.0):
     out = os.path.abspath(out)
     pts = load_route(route)
     os.makedirs(out, exist_ok=True)
@@ -136,9 +136,10 @@ def run(out, route, speed, laps, fps, extra_env, name, settle=4.0, shots=0.0):
     env.update(extra_env)
     # the Fort Baxter card copy, else a copy of the player's card (build/rig/saves/user, copied from the live card - never
     # the live card itself). A new game does not do: its first mission keeps the player out of the cruise's car
+    # (--save NAME: that copy - user for the player's own progress, the city's full population)
     saves = os.path.join(ROOT, "build", "rig", "saves")
-    save = next((os.path.join(saves, s) for s in ("fortbaxter", "user") if os.path.isdir(os.path.join(saves, s, "mc0"))),
-                None)
+    save = next((os.path.join(saves, s) for s in ((save_name,) if save_name else ("fortbaxter", "user"))
+                 if os.path.isdir(os.path.join(saves, s, "mc0"))), None)
     if not save:
         sys.exit("[cruise] no card copy in %s (fortbaxter/ or user/, each holding mc0/): copy a card with a save "
                  "past the first mission there" % os.path.relpath(saves, ROOT))
@@ -160,6 +161,8 @@ def run(out, route, speed, laps, fps, extra_env, name, settle=4.0, shots=0.0):
               S.op(S.CREATE_CAR, S.i(211), S.f(x), S.f(y), S.f(z + 1.0), car) +
               S.op(S.WARP_CHAR_INTO_CAR, S.PLAYER, car) + S.op(S.SET_CAR_PROOFS, car, *([S.i(1)] * 5)) +
               S.op(S.MARK_MODEL_AS_NO_LONGER_NEEDED, S.i(211)))
+        if wait > 0:  # --wait: the population fills around the start first (it takes the game a minute or two)
+            time.sleep(wait)
         reply = g.cmd("cruise start %s %.1f%s" % (os.path.abspath(route), speed, " loop" if laps > 1 else ""))
         total = float(reply.split()[1])
         mark = next_shot = time.time()
@@ -247,6 +250,8 @@ def main():
     r.add_argument("--name", default="cruise")
     r.add_argument("--shots", type=float, default=0.0, help="a screenshot every S seconds (checking the route; each "
                    "is a hitch of its own, so not while measuring)")
+    r.add_argument("--save", help="the card copy in build/rig/saves to start from (default: fortbaxter, else user)")
+    r.add_argument("--wait", type=float, default=0.0, help="seconds at the start before driving (the population fills)")
     r.add_argument("env", nargs="*", help="ENV=VAL for the game")
     p = sub.add_parser("report")
     p.add_argument("csv")
@@ -266,7 +271,7 @@ def main():
             pairs.append(a.out)
             a.out = None
         run(a.out or os.path.join(ROOT, "build", "cruise", a.name), a.route, a.speed, a.laps, a.fps,
-            dict(x.split("=", 1) for x in pairs), a.name, shots=a.shots)
+            dict(x.split("=", 1) for x in pairs), a.name, shots=a.shots, save_name=a.save, wait=a.wait)
     elif a.cmd == "report":
         report(perf_report.load(a.csv, a.t_from, a.t_to), a.json)
     else:

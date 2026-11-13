@@ -1758,3 +1758,24 @@ turned stick (the pull-in toward the player), through the game's own switch for 
   missions) decides (+40 % peds, +2 ms on the game thread). What stays open: the street in front by the police
   station stays below the PS2's (its crowd 100-200 m down the avenue); more there needs larger ped pools (280 checked)
   or a smaller ped radius - which the distant crowds' band forbids while they are on (T2 plan).
+
+## 2026-11-13 - Taking work off the game thread: pure pieces only, the game's own code copied (the user's request)
+
+- **The game thread stays one thread.** The user asked for the population (and "like the cars and the map") on several
+  cores. Cars are no different from peds: the whole simulation - AI, physics, collisions, scripts, the population - is the
+  PS2 game's single thread, recompiled; what runs elsewhere is the drawing (render worker, GS stage, main thread), the
+  world's streaming and texture decoding. Its code shares state everywhere (one ped pushes another, enters a car, starts
+  a script; one `rand()` for all, in a fixed update order the missions depend on) and returns to the EE scheduler mid
+  function. Splitting it would mean writing the simulation again with clear ownership - re3 / reVC, the PC Vice City's
+  full decompilation, kept a single-threaded simulation too. So: pieces that are pure arithmetic with no effect on
+  anyone else leave the thread, one by one, each checked bit for bit against the game (PERFORMANCE.md 48: the
+  animation's node loop first, the skin palette next); later, from Ghidra, "read in parallel, apply in order" for the
+  pure queries in the AI (neighbour scans, lines of sight).
+- **reVC as a reference, never as code.** The user asked about using reVC as the base. It was taken down by Take-Two
+  (2021) and is reconstructed game code: copying it would break the project's rule (no game code) and expose the fork.
+  It is also another engine (VCS is the LCS / VCS engine, its own structures and animation system) and single-threaded.
+  It stays a reading aid - names, structure - while the VCS functions are reversed with Ghidra and checked against the
+  game.
+- **No hand ports where the game's code can be copied.** The node loop's 52 functions are the recompiled code itself,
+  rewritten only where it calls the runtime (tools/anim_worker_gen.py): no port to get wrong, and the generator refuses
+  anything that is not plain code.

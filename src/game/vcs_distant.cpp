@@ -468,6 +468,31 @@ namespace vcs::distant
         int32_t g_proxyFrame = -1;
         int32_t g_proxySlot[512];
         uint32_t pedSlot(uint32_t entity) { return (entity - rd32(rd32(kPedPool))) / kPedSize; }
+        // a template per model and per walking / standing: a proxy wears a pose like its own (a standing ped shown
+        // walking on the spot, then stopping as it came into the game's own draw, read as fake: the player's report)
+        uint32_t templateKey(uint32_t entity)
+        {
+            uint16_t model;
+            std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
+            return model | (pedMoving(entity) ? 0x10000u : 0u);
+        }
+        // The templates stay the same peds from frame to frame (key, ped): the first of a key a frame used to be the
+        // template, and the draw order changes - every proxy of that model took another ped's pose each frame and the
+        // far crowd flickered (the player's report, 2026-11-13). Last frame's template of a key is this frame's while
+        // it is still a random ped of that key; a proxy then waits for it, drawn later in the frame.
+        std::vector<std::pair<uint32_t, uint32_t>> g_templatesBefore, g_templatesNow;
+        std::vector<uint32_t> g_drawnPedsBefore; // the peds the last frame's draw reached (frameKicked: g_rendered)
+        uint32_t stickyTemplate(uint32_t key)
+        {
+            // still a random ped of the key, and drawn last frame (one the camera turned from takes no proxies)
+            for (const auto &t : g_templatesBefore)
+                if (t.first == key)
+                    return isRandomPed(t.second) && templateKey(t.second) == key &&
+                                   std::find(g_drawnPedsBefore.begin(), g_drawnPedsBefore.end(), t.second) != g_drawnPedsBefore.end()
+                               ? t.second
+                               : 0u;
+            return 0u;
+        }
         bool decideProxy(uint32_t entity)
         {
             if (!realPedProxies() || !isRandomPed(entity))
@@ -477,27 +502,33 @@ namespace vcs::distant
             {
                 g_proxyFrame = frame;
                 g_realPedModels.clear();
+                g_templatesBefore.swap(g_templatesNow);
+                g_templatesNow.clear();
             }
-            uint16_t model;
-            std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
-            // a template per model and per walking / standing: a proxy wears a pose like its own (a standing ped shown
-            // walking on the spot, then stopping as it came into the game's own draw, read as fake: the player's report)
-            const uint32_t key = model | (pedMoving(entity) ? 0x10000u : 0u);
+            const uint32_t key = templateKey(entity);
+            const uint32_t sticky = stickyTemplate(key);
             const bool known = std::find(g_realPedModels.begin(), g_realPedModels.end(), key) != g_realPedModels.end();
+            const uint32_t slot = pedSlot(entity);
+            if (slot >= 512u)
+                return false;
+            // a ped stays a proxy until 10 m nearer than where it became one (on the line it went back and forth every
+            // frame: proxy, then the game's draw)
+            const bool wasProxy = g_proxySlot[slot] >= frame - 1 && g_proxySlot[slot] <= frame;
+            const float d = wasProxy ? std::max(0.0f, pedProxyDistance() - 10.0f) : pedProxyDistance();
             const float dx = rdf(entity + 0x30u) - rdf(kCameraPos), dy = rdf(entity + 0x34u) - rdf(kCameraPos + 4u);
             const float dz = rdf(entity + 0x38u) - rdf(kCameraPos + 8u);
-            if (dx * dx + dy * dy + dz * dz <= pedProxyDistance() * pedProxyDistance() || !known)
+            const bool near = dx * dx + dy * dy + dz * dz <= d * d;
+            const bool isTemplate = entity == sticky || (!sticky && !known);
+            if (near || isTemplate)
             {
-                if (!known)
+                if (isTemplate && !known)
                 {
                     g_realPedModels.push_back(key); // drawn by the game: this model's (and pose's) template this frame
+                    g_templatesNow.emplace_back(key, entity);
                     g_statRealDrawn.fetch_add(1, std::memory_order_relaxed);
                 }
                 return false;
             }
-            const uint32_t slot = pedSlot(entity);
-            if (slot >= 512u)
-                return false;
             g_proxySlot[slot] = frame;
             return true;
         }
@@ -807,6 +838,7 @@ namespace vcs::distant
         realPeds.swap(g_realPedProxies);
         if (g_rendered.empty())
         {
+            g_drawnPedsBefore.clear();
             if (g_frames[itemFrame & 7u])
             {
                 std::lock_guard<std::mutex> lock(g_framesMutex);
@@ -826,6 +858,22 @@ namespace vcs::distant
             pedProxies = g_publishedPeds;
         }
         pedProxies.insert(pedProxies.end(), realPeds.begin(), realPeds.end());
+        // the templates chosen at the last frame, kept while still drawn (keptTemplate)
+        static std::vector<uint32_t> chosenBefore;
+        std::vector<uint32_t> chosenNow;
+        auto keptTemplate = [&](const Rendered &r) {
+            if (std::find(chosenBefore.begin(), chosenBefore.end(), r.entity) != chosenBefore.end())
+                return true;
+            for (const auto &t : g_templatesNow)
+                if (t.second == r.entity)
+                    return true;
+            return false;
+        };
+        struct KeepChoice
+        {
+            std::vector<uint32_t> &before, &now;
+            ~KeepChoice() { before.swap(now); }
+        } keepChoice{chosenBefore, chosenNow};
         for (int kind = 0; kind < 2; ++kind)
         {
         const bool peds = kind == 1;
@@ -843,11 +891,21 @@ namespace vcs::distant
                 templates.push_back(i);
             else
             {
+                // last frame's choice first (or the real proxies' template): the same ped's pose frame after frame -
+                // another each frame made the proxies flicker
                 const Rendered &was = g_rendered[*at];
-                if ((r.moving && !was.moving) || (r.moving == was.moving && r.distance > was.distance))
+                const bool rKeep = keptTemplate(r), wasKeep = keptTemplate(was);
+                if (rKeep != wasKeep)
+                {
+                    if (rKeep)
+                        *at = i;
+                }
+                else if ((r.moving && !was.moving) || (r.moving == was.moving && r.distance > was.distance))
                     *at = i;
             }
         }
+        for (uint32_t t : templates)
+            chosenNow.push_back(g_rendered[t].entity);
         std::sort(templates.begin(), templates.end(), [](uint32_t a, uint32_t b) { return g_rendered[a].model < g_rendered[b].model; });
         if (!templates.empty())
         {
@@ -904,11 +962,38 @@ namespace vcs::distant
                         table->matrices[table->matrices.size() - 4u + c] += t.origin[c];
                 }
                 g_statAssigned += g.count;
+                // the template's other draws this frame - its parts with alpha (hair, see-through bits) drawn later from
+                // the sorted alpha list, after other entities, open a group of their own: the same proxies there, or
+                // every proxy lacked those parts (the player's report, 2026-11-13: parts missing on the far crowd)
+                for (uint32_t j = 0; j < g_rendered.size(); ++j)
+                {
+                    const Rendered &o = g_rendered[j];
+                    if (j == templates[k] || o.entity != t.entity || table->groups[j].count)
+                        continue;
+                    FrameGroups::Group &og = table->groups[j];
+                    float om[16];
+                    std::memcpy(om, o.m, sizeof(om));
+                    for (int c = 0; c < 3; ++c)
+                        om[12 + c] += o.origin[c];
+                    invertRigid(om, og.inverse);
+                    og.first = static_cast<uint32_t>(table->matrices.size() / 16u);
+                    og.count = g.count;
+                    for (const Proxy *p : by[k])
+                    {
+                        table->matrices.insert(table->matrices.end(), p->m, p->m + 16);
+                        for (int c = 0; c < 3; ++c)
+                            table->matrices[table->matrices.size() - 4u + c] += o.origin[c];
+                    }
+                }
             }
             g_statTemplates += templates.size();
         }
         }
         ++g_statFrames;
+        g_drawnPedsBefore.clear();
+        for (const Rendered &r : g_rendered)
+            if (r.ped)
+                g_drawnPedsBefore.push_back(r.entity);
         g_rendered.clear();
         std::lock_guard<std::mutex> lock(g_framesMutex);
         g_frames[itemFrame & 7u] = std::move(table);

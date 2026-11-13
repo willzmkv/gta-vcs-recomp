@@ -67,6 +67,24 @@ list(FILTER VCS_SOURCES EXCLUDE REGEX "/src/(platform|rhi|render)/")
 if(EXISTS "${CMAKE_SOURCE_DIR}/generated/vu1/vu1_compiled.cpp")
     list(APPEND VCS_SOURCES "${CMAKE_SOURCE_DIR}/generated/vu1/vu1_compiled.cpp")
 endif()
+# Worker copies of the animation node code (tools/anim_worker_gen.py, from generated/ee; src/game/vcs_anim.cpp): made
+# again when the generated code or the tool changes
+set(VCS_ANIM_WORKER OFF)
+if(VCS_HAVE_GENERATED)
+    find_package(Python3 COMPONENTS Interpreter) # (tools/build.py passes its own; without one: no worker copies)
+endif()
+if(VCS_HAVE_GENERATED AND Python3_FOUND)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/tools/anim_worker_gen.py" "${VCS_GENERATED_DIR}/register_functions.cpp")
+    execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/anim_worker_gen.py" "${VCS_GENERATED_DIR}"
+                            "${CMAKE_SOURCE_DIR}/generated/anim/anim_worker.cpp"
+                    RESULT_VARIABLE _vcs_anim_result OUTPUT_VARIABLE _vcs_anim_out ERROR_VARIABLE _vcs_anim_out)
+    message(STATUS "${_vcs_anim_out}")
+    if(_vcs_anim_result EQUAL 0 AND EXISTS "${CMAKE_SOURCE_DIR}/generated/anim/anim_worker.cpp")
+        list(APPEND VCS_SOURCES "${CMAKE_SOURCE_DIR}/generated/anim/anim_worker.cpp")
+        set(VCS_ANIM_WORKER ON)
+    endif()
+endif()
 
 set(PS2X_RUNNER_SOURCE_DIR "${VCS_GENERATED_DIR}" CACHE PATH "" FORCE)
 set(PS2X_RUNNER_EXTRA_SOURCES "${VCS_SOURCES}" CACHE STRING "" FORCE)
@@ -126,6 +144,10 @@ if(VCS_HAVE_GENERATED)
     set_source_files_properties(${VCS_SOURCES} "${CMAKE_SOURCE_DIR}/src/main.cpp"
         TARGET_DIRECTORY ps2EntryRunner
         PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE SKIP_PRECOMPILE_HEADERS TRUE)
+    if(VCS_ANIM_WORKER)
+        set_source_files_properties("${CMAKE_SOURCE_DIR}/src/game/vcs_anim.cpp" TARGET_DIRECTORY ps2EntryRunner
+            PROPERTIES COMPILE_DEFINITIONS VCS_ANIM_WORKER=1)
+    endif()
 else()
     message(STATUS "No generated code in ${VCS_GENERATED_DIR}: building tools only. Run python tools/build.py --recompile.")
 endif()

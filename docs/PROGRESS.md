@@ -1192,7 +1192,10 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_VIEW_DISTANCE`, `VCS_DETAIL_DISTANCE`, `VCS_POPULATION_DISTANCE`, `VCS_VEHICLE_DENSITY`, `VCS_PEDESTRIAN_DENSITY` | Graphics > Distance and population for one run (0..100) |
 | `VCS_CAR_RINGS=n`, `VCS_PED_INVIEW_K=k`, `VCS_PED_OUT_K=k`, `VCS_PED_INVIEW_MIN=m` | the spawn rings (1, 0, 1, 55 m; `VCS_PED_OUT_K=0`: out of view at the population distance's, as before 2026-11-12; rings / k > 1 bring spawns in view near: they appear) |
 | `VCS_PED_PROXY=<m>` | real random peds past it drawn as proxies (default 150 m with the population raised; 0 off; PERFORMANCE.md 43, 46) |
+| `VCS_PED_INVIEW_CAP=n`, `VCS_PED_OUT_FAR_K=k` | the in-view spawn ring closes while n random peds stand in view beyond 90 m (default 0, off: it starves the population); the out-of-view ring reaches k x the game's 20 m (default 3; with the population distance raised) - the crowd spread over the streets instead of piled far down the one in view (PERFORMANCE.md 46) |
 | `VCS_CROWD_LOD_TIERS=a,b` | far random peds processed every a-th frame past 150 m, every b-th past 220 m (default 4,6; 3,3 as the game's LOD before; PERFORMANCE.md 44, 46) |
+| `VCS_NATIVE_ANIM=0\|serial\|verify\|slices` | the animation's node loop (PERFORMANCE.md 48): 0 the game's; serial the worker copies on the game thread; verify the copies against the game's loop (`animstate`: mismatches, late, freed); slices the sliced copies against one piece on the same input; default: in slices on workers |
+| `VCS_ANIM_THREADS=n`, `VCS_ANIM_GUARD=0` | the animation workers (default half the hardware threads less 2, 1 to 6; 0: one piece on the game thread); no independence check before slicing a clump (tests) |
 | `VCS_PROXY_INSTANCING=0` | the distant proxies drawn one by one instead of one instanced draw per template part (PERFORMANCE.md 47) |
 | `VCS_RETICLE=0\|1` | the free-aim reticle: the game's circle, or a dot (`enhance.reticle`; CONTROLS.md) |
 | `VCS_PED_DRAW_MAX=<m>` | probe: peds drawn no farther (what drawing the far crowd costs) |
