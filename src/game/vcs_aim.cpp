@@ -188,6 +188,14 @@ namespace vcs::aim
             wrVec(ped + kPedAimPoint, at);
         }
 
+        // The aim along where the camera `cam` looks (its Front), about level.
+        void aimAlongCamera(uint32_t cam)
+        {
+            const float fx = rdf(cam + 0x10), fy = rdf(cam + 0x14), fz = rdf(cam + 0x18);
+            g_yaw = std::atan2(fy, fx);
+            g_pitch = std::clamp(std::asin(std::clamp(fz, -1.0f, 1.0f)), -kStartPitchLimit, kStartPitchLimit);
+        }
+
         void stop(const char *why)
         {
             if (g_state == State::Active)
@@ -626,16 +634,15 @@ namespace vcs::aim
         case State::Held: // a gun in hand again, the button still held: free aim again
         case State::Idle:
         {
-            // aim where the camera looks
-            const float fx = rdf(cam + 0x10), fy = rdf(cam + 0x14), fz = rdf(cam + 0x18);
-            g_yaw = std::atan2(fy, fx);
-            g_pitch = std::clamp(std::asin(std::clamp(fz, -1.0f, 1.0f)), -kStartPitchLimit, kStartPitchLimit);
+            aimAlongCamera(cam);
             g_state = State::Entering;
             g_wait = 0;
             g_quickBlend = 30; // until a few frames after the free-aim lock is there
             g_blendMs = kBlendInMs;
             g_handBack = 0;
-            out.camera = true;
+            // The camera is the game's until its free aim is there: the mouse keeps turning it meanwhile. Sprinting the
+            // game never enters free aim, and taking the camera from the first R1 froze it for each try (20 frames,
+            // then 8 turning: the user's "incredibly choppy" turn with the right button held while running).
             out.r1 = out.l3 = true;
             return out;
         }
@@ -644,9 +651,10 @@ namespace vcs::aim
             const uint32_t target = rd32(ped + kPedTarget);
             if (!(isObject(target) && freeAimBit(ped)))
             {
-                // not yet (Vic may still be busy: firing, reloading, changing weapon). The game took R1 without L3
-                // and locked on to a ped, or ~20 frames went by: let go a few frames, then try again
-                out.camera = true;
+                // not yet (Vic may still be busy: firing, reloading, changing weapon; sprinting he never gets there).
+                // The game took R1 without L3 and locked on to a ped, or ~20 frames went by: let go a few frames, then
+                // try again. The camera turns as without the button meanwhile; the aim starts where it then looks.
+                aimAlongCamera(cam);
                 out.r1 = !target && ++g_wait < 20;
                 if (!out.r1)
                 {

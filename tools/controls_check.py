@@ -12,7 +12,8 @@ locks on to a ped, the Driving keys (W / S / Space
 accelerate, brake, handbrake in a car, and nothing else there), the mouse on the vehicle camera (turned 1:1, held while
 the mouse moves, standing and driving, then back behind the car; the right stick takes it back at once), on foot again after
 leaving the car; free aim (src/game/vcs_aim.cpp: the right button enters the game's free aim, the mouse turns it, a shot
-hits a man on the aim line and not one beside it, Vic strafes while aiming, the camera stays where the aim looked, fists
+hits a man on the aim line and not one beside it, Vic strafes while aiming, the camera stays where the aim looked,
+sprinting with the button held the mouse still turns the camera every frame and the aim starts after the sprint, fists
 and free aim off still lock on, the gamepad's RB and right stick, the sniper scope turned 1:1 and zoomed by the wheel,
 the wheel changing weapons; in a car, the game's drive-by free aim as in Jive Drive: the left stick with free aim off,
 the mouse / right stick with it on, the height limits, a shot through the circle, leaving the car; on foot, the game's
@@ -581,6 +582,33 @@ class Check:
         fx, fy = fx / n, fy / n
         return self.ped_at(px + fx * ahead + fy * side, py + fy * ahead - fx * side)
 
+    def sprint_aim(self):
+        """Sprinting (W + Shift) the game never enters free aim: with a gun and the right button held the mouse still
+        turns the follow camera, every frame (it froze while free aim tried to start: 20 frames still, 8 turning - the
+        user's report, 2026-11-14), and free aim starts once Vic stops sprinting. Free aim on, a gun in hand."""
+        g = self.g
+        g.cmd("key w down")
+        g.cmd("key shift down")
+        time.sleep(1.0)
+        g.cmd("key mouseright down")
+        time.sleep(0.5)
+        _, _, b0 = self.cam()
+        for _ in range(30):  # 300 counts over 30 frames (a full try and its retry): -0.75 radians at 100%
+            g.cmd("mouse 10 0")
+            g.wait_frames(1)
+        g.wait_frames(10)
+        mode, _, b1 = self.cam()
+        turn = (b1 - b0 + math.pi) % (2 * math.pi) - math.pi
+        g.cmd("key shift up")
+        g.cmd("key w up")
+        time.sleep(1.5)
+        after = self.aim()[0]
+        g.cmd("key mouseright up")
+        time.sleep(1.0)
+        # -0.62 at 30 fps (the camera swinging after the running Vic takes back a little); -0.19 when it froze
+        self.ok("sprinting, right button held: the mouse turns the camera", mode == 4 and -1.2 < turn < -0.45 and after == 1,
+                "mode %d heading %+.3f, free aim after the sprint %d" % (mode, turn, after))
+
     def aim(self):
         """(active, shots) from aimstate; the dummy's heading from Vic (radians)."""
         d = dict(re.findall(r"(\w+)=(\d+)", self.g.cmd("aimstate")))
@@ -681,6 +709,7 @@ class Check:
         self.ok("released: the camera stays", mode == 4 and abs(dh) < 0.05 and self.aim()[0] == 0,
                 "mode %d heading %+.3f" % (mode, dh))
 
+        self.sprint_aim()
         self.setting("mouse.free_aim", 0)
 
         # the gamepad: Gamepad > Free aim, RB (R1) aims, the right stick turns it (2 radians a second at full tilt), the

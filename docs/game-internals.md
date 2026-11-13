@@ -3358,6 +3358,12 @@ hidden run (rig `peek` / `poke`, snapshots diffed).
   does locked on with that weapon (a pistol strafes: 3.3 m in a second with D), facing it, and moving the object moves
   the aim (the camera follows). **The lock drops when the dummy is over ~30 m from Vic** (25 m held, 40 m dropped:
   the weapons' lock-on range); behind a wall or behind Vic it holds.
+- **Sprinting (Cross held) the game never enters free aim**: R1 + L3 leave +0x820 at 0 and the follow camera (mode 4)
+  stays, for as long as he sprints; walking or running without Cross it locks the frame after. Found 2026-11-14 at
+  144 fps from a per-frame log of the pad read (camera mode, beta, the aim's state) with a steady mouse: vcs_aim.cpp
+  had taken the camera from the first R1, so the mouse turned nothing while it tried (20 frames) and the camera only
+  turned in the 8 frames between tries - the user's "incredibly choppy" turn with the right button held while running.
+  The mouse now turns the follow camera until the lock is there, and the aim starts where that camera looks.
 - Lock-on camera (FUN_0029c280, modes 11 and 28): with a target it turns alpha (+0x78) / beta (+0x7C) toward the
   target's direction from Vic at most `0.1 x time step` a frame (1000 on its first frame, CCam +0xAC set); with no
   target (+0x820 = 0) the right stick turns it like the follow camera. Alpha (pitch) follows the target's elevation

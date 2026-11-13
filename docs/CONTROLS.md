@@ -59,6 +59,8 @@ game-internals.md 12c):
   is added. Letting go leaves the camera looking where the aim did. The camera moves into the aim in 0.1 s and out of
   it in 0.2 s, with every gun (the game blends 0.35-0.4 s, and cuts out of the aim with the guns that stand Vic still;
   its other camera changes keep their blends and cuts).
+- Sprinting the game doesn't aim: with the button held the mouse turns the camera as without it, and the aim starts
+  when Vic stops sprinting.
 - When the gun runs dry while aiming the game puts the fists in Vic's hand: with the button still held nothing
   locks on until it is let go, and choosing another gun (the wheel) aims again at once.
 - Fists, melee weapons, thrown weapons and the scoped guns (sniper rifles, rocket launcher, camera, binoculars) keep

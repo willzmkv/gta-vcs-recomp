@@ -851,6 +851,15 @@ dropped on uploads (lazy render-target patching).
   circle hit and one beside him not, the script's end ends it. (Starting the range from the trainer's mission list
   drops Vic through the floor: the range is an interior the door's script loads - the game's, with or without free
   aim.)
+- **The right button held while running** (2026-11-14, the user's report: the camera turned "incredibly choppy"): with
+  free aim on and a gun in hand, sprinting (Shift) the game never enters free aim, and vcs_aim.cpp had taken the mouse
+  from the follow camera at the first R1 + L3: the camera stood still while it tried (20 frames), turned in the 8
+  between tries, and so on (a per-frame log at 144 fps with a steady synthetic mouse: 21 frames still, 8 turning, over
+  and over). Now the mouse turns the follow camera until the game's free aim is there, and the aim starts where it then
+  looks (game-internals.md 12c). Measured the same way after: every frame turns, 1:1 with the mouse; aiming once the
+  sprint ends still works. controls_check "sprinting, right button held: the mouse turns the camera" (-0.61 rad for
+  300 counts; -0.19 with the old code); 78 checks, 0 failed (one earlier run failed two drive-by checks with the car's
+  camera in mode 32 before any input - not seen again).
 - **Aiming in Farewell To Arms** (2026-11-03, a player's report and the user's: the aim snapped to the left now and then;
   0.0.2, before free aim, was fine): the mission attaches Vic to its helicopter's door (ATTACH_CHAR_TO_CAR, 70 deg
   either side), whose camera (mode 45) keeps its heading signed, relative to the door; the scopes' mouse wrapped it into
