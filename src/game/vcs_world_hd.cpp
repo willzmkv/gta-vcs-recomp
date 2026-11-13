@@ -1248,9 +1248,27 @@ namespace vcs::world_hd
             // detail - the rule the lists were made by (9h: replaced where that list's detailed sectors lie inside it):
             // otherwise a neighbour's coarse sectors for the places it sees from afar cover the slot's detail.
             Grid hd; // every list's detailed sectors; tag 0 the slot's, i + 1 extra[i]'s
+            // A sector of the low-detail ids on the very sphere of a detailed one the game hides in the slot's list (the
+            // same centre's halves, x y z, the radius within 2 %) is no low detail but the same building's other version,
+            // which the game switches in with a mission and the detailed one out (Phil's warehouse in Boomshine Blowout:
+            // 3167 hidden, 6285 shown, both at -1210,-267, radius 29.05 / 29.02; its real low detail 5829 sits lower, r
+            // 28.9) - never replaced (the player's report, 2026-11-13: the warehouse gone near it). A detailed twin the
+            // game shows leaves its low-detail twin to the usual rule (9h: 19 of 138 such twins in a view, true LOD)
+            std::unordered_map<uint64_t, float> twins;
+            auto centreKey = [&](uint32_t r) {
+                return uint64_t(rd16(r + 4u)) | uint64_t(rd16(r + 6u)) << 16 | uint64_t(rd16(r + 8u)) << 32;
+            };
+            auto twin = [&](uint32_t r) {
+                const auto it = twins.find(centreKey(r));
+                return it != twins.end() && std::fabs(half(rd16(r + 0xAu)) - it->second) <= 0.02f * it->second;
+            };
             for (uint32_t r = b0; r < b8; r += kRecord)
                 if (const uint16_t id = rd16(r) & 0x7FFFu; id >= 0x20u && id < kLodIds)
+                {
                     hd.add(half(rd16(r + 4u)), half(rd16(r + 6u)), 0);
+                    if (rd16(r) & 0x8000u)
+                        twins[centreKey(r)] = half(rd16(r + 0xAu));
+                }
             for (size_t i = 0; i < extra.size(); ++i)
                 for (const auto &p : extra[i]->hd)
                     hd.add(p[0], p[1], int(i + 1));
@@ -1258,7 +1276,8 @@ namespace vcs::world_hd
             std::bitset<0x8000> replacedNow;
             uint32_t lodHeld = 0;
             auto replaced = [&](uint16_t id, uint32_t r) {
-                if (g_keepLod.test(id) || std::find(std::begin(kAlwaysKeepLod), std::end(kAlwaysKeepLod), id) != std::end(kAlwaysKeepLod))
+                if (g_keepLod.test(id) || std::find(std::begin(kAlwaysKeepLod), std::end(kAlwaysKeepLod), id) != std::end(kAlwaysKeepLod) ||
+                    twin(r))
                     return false;
                 const float x = half(rd16(r + 4u)), y = half(rd16(r + 6u)), radius = half(rd16(r + 0xAu));
                 const bool is = hd.any(x, y, radius, [&](int tag) {
@@ -1342,8 +1361,9 @@ namespace vcs::world_hd
                         }
                     }
                     if (probing && probeNear(r))
-                        std::fprintf(stderr, "[hdprobe]   game  id %5u gid %5u at %.0f,%.0f r %.0f mat 0x%08x flag %u -> %s\n", rec.id,
-                                     rd16(r + 2u), half(rd16(r + 4u)), half(rd16(r + 6u)), half(rd16(r + 0xAu)), rd32(r + 0xCu),
+                        std::fprintf(stderr, "[hdprobe]   game  id %5u gid %5u at %.0f,%.0f r %.0f [%04x %04x %04x %04x] mat 0x%08x flag %u -> %s\n", rec.id,
+                                     rd16(r + 2u), half(rd16(r + 4u)), half(rd16(r + 6u)), half(rd16(r + 0xAu)), rd16(r + 4u), rd16(r + 6u),
+                                     rd16(r + 8u), rd16(r + 0xAu), rd32(r + 0xCu),
                                      rd16(r) >> 15, rec.hide == 1 ? "HIDDEN (replaced)" : (rd16(r) & 0x8000u) ? "hidden by the game" : "drawn");
                     out[k].push_back(rec);
                 }
