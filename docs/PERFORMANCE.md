@@ -1267,7 +1267,12 @@ next.
 
   Within the noise on the game thread: at this population the node loop is ~0.5 ms, and the fork / join per clump
   (127 clumps a frame, a few microseconds each) takes most of what the slices save. It stays on - bit for bit the
-  game's, a little better on the slow frames - as the base for the skin palette (9% of the game thread, the same way).
+  game's, a little better on the slow frames.
+- **The skin palette is not the next one.** Decompiled (`build/analysis/decomp/skin_39ec18.c`): the per-bone 3x4
+  product is a loop inside FUN_0039EC18 (the skinned clump's render: its packets, its meshes' draws through
+  FUN_002f7d58, the lights), not a function of its own - no hook point short of replacing the whole render, which calls
+  the game's functions throughout (the hook rule forbids calling them from host code). And the loop itself is small
+  (~30 bones of 3x4 products a ped, ~0.4 ms for 127 peds): the 9% is the render function as a whole.
 
 ## Next
 

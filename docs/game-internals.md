@@ -3594,6 +3594,27 @@ in the game with src/game/vcs_anim.cpp's verify modes (PERFORMANCE.md 48).
 - Guest RAM **0x20000 - 0x5FFFF** (16 KB slots) holds the worker copies' stacks and args copies while the loop runs
   (the EE kernel's area below the game, all zero in play; vcs_aim.cpp's scratch is at 0x60000).
 
+### 12g. Vic's models: gameplay and cutscene (2026-11-13)
+
+The player asked for the cutscene Vic's hands (fingers apart) in gameplay. Found with `tools/img.py table` (the
+model keys: CRC32 of the upper-case name, xor 0xFFFFFFFF) and the disc's sectors:
+
+- **Gameplay**: `plr.mdl` is model **0** (GTA3PS2.IMG sectors 23-66, its textures `plr.xtx` 0-22); the outfits `plr2`
+  .. `plr14` are models **155-167**. Bones: root, pelvis, spine, neck, head, jaw, the limbs, and **one finger bone a
+  hand** (`l_finger` / `r_finger`: the fingers one mitten); meshes `ig_vance_arms`, `ig_vance_head_new`,
+  `ig_vance_t_shirt`(`_back`), `ig_vance_trousers_camo`, `ig_vance_boots`, `ig_vance_dtag`, `ig_vance_arm_tattoo`.
+- **Cutscene**: `csplr.xtx` (and `csplr2` .. `csplr14`) are named texture dictionaries; their models are **not in the
+  streaming table** (loaded by name into the cutscene's special slots). The archive keeps a model right after its
+  dictionary (vice1.xtx 4304 + 5 -> vice1.mdl 4309), and after `csplr.xtx` (18844, 74 sectors) a 73-sector gap holds an
+  `ldm` model (1.65 times plr.mdl's size): **csplr.mdl**. Bones: the same body, **two finger bones a hand**
+  (`l_finger0` the thumb, `l_finger01` the other fingers) and a whole face rig (brows, lids, lips, cheeks, jaw
+  corners); meshes `shirt_arm` (arms and hands, the fingers apart), `cs_vance_head_x`, `cs_vic_head_details_x`,
+  `shirt_tattoo` and the same clothes as plr.
+- The way in (not done): a hybrid plr.mdl - plr's own model with csplr's `shirt_arm` hands in place of
+  `ig_vance_arms`' (or the whole arms), skinned to plr's bones (the thumb on `l_hand`, the fingers on `l_finger`: the
+  game's grip animations bend that one), its textures added to plr.xtx - as a mod-loader file (`modloader/<mod>/plr.mdl`,
+  docs/MODS.md). Needs a reader / writer for skinned ped `ldm` models (tools/mdlinfo.py reads vehicles only).
+
 ## 13. Open questions / next research targets
 
 - Main loop, frame limiter, CTimer (section 4) - milestone 4 (60 fps).
