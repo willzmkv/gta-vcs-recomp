@@ -106,6 +106,8 @@ namespace vcs::input
         constexpr uint32_t kPlayerPed = 0x004E4910u;   // CWorld::Players[0].m_pPed
         constexpr uint32_t kPedVehicle = 0x480u;       // the vehicle it is in (0 on foot)
         constexpr uint32_t kPedState = 0x8C4u;         // 0x37 driving
+        constexpr uint32_t kEntityModel = 0x56u;       // an entity's model id (u16)
+        constexpr uint16_t kForkliftModel = 251u;      // its D-pad's up / down move the forks (forklift.mdl, GTA3PS2.IMG 251)
         constexpr uint32_t kVehicleRadio = 0x2BAu;     // the vehicle's radio station (u8): 0..8 the stations, 9 off
         constexpr uint32_t kRadioPositions = 10u;      // L1 steps through them and round (game-internals.md 12a)
         constexpr int kRadioRetuneFrames = 40;         // the game adds its L1 presses to the station 30 frames after the
@@ -156,6 +158,7 @@ namespace vcs::input
             bool onFoot = false;     // no vehicle at all (getting in or out - states 0x3F / 0x3D - has one already)
             bool footCamera = false; // the on-foot follow camera, turned by the player (no script camera, controls on)
             bool paused = false;     // the pause menu or the game's own pause
+            bool forks = false;      // driving the forklift: the D-pad's up / down are its forks in every scheme
         };
 
         GameState gameState()
@@ -164,8 +167,15 @@ namespace vcs::input
             if (!g_rdram)
                 return s;
             const uint32_t ped = rd32(kPlayerPed);
-            s.driving = ped && rd32(ped + kPedVehicle) && rd32(ped + kPedState) == 0x37;
-            s.onFoot = ped && !rd32(ped + kPedVehicle);
+            const uint32_t vehicle = ped ? rd32(ped + kPedVehicle) : 0u;
+            s.driving = vehicle && rd32(ped + kPedState) == 0x37;
+            s.onFoot = ped && !vehicle;
+            if (s.driving)
+            {
+                uint16_t model;
+                std::memcpy(&model, g_rdram + ((vehicle + kEntityModel) & kRamMask), 2);
+                s.forks = model == kForkliftModel;
+            }
             int16_t disabled;
             std::memcpy(&disabled, g_rdram + kPad0 + 0x96, 2);
             const bool paused = g_rdram[kUserPause] || g_rdram[kCodePause];
@@ -776,8 +786,9 @@ namespace vcs::input
                 if (padButton(GAMEPAD_DPAD_LEFT) && !m.vLayout)
                     buttons |= kL2; // look left
                 // the D-pad's down looks behind (L2 + R2), with its left / right (the player's ask, 2026-11-12; GTA V's
-                // buttons: the sub-mission there, below)
-                if (padButton(GAMEPAD_DPAD_DOWN) && !m.vLayout)
+                // buttons: the sub-mission there, below) - not on the forklift, whose forks it lowers (the player's
+                // report, 2026-11-13: only up moved them)
+                if (padButton(GAMEPAD_DPAD_DOWN) && !m.vLayout && !game.forks)
                     buttons = static_cast<uint16_t>((buttons & ~kDown) | kL2 | kR2);
             }
 
@@ -824,10 +835,10 @@ namespace vcs::input
                     buttons |= kSelect;
                 if (game.driving)
                 {
-                    buttons &= static_cast<uint16_t>(~(kR3 | kLeft | kRight | kDown));
+                    buttons &= static_cast<uint16_t>(~(kR3 | kLeft | kRight | (game.forks ? 0 : kDown)));
                     if (padButton(GAMEPAD_RIGHT_STICK))
                         buttons |= kL2 | kR2; // look behind
-                    if (padButton(GAMEPAD_DPAD_DOWN))
+                    if (padButton(GAMEPAD_DPAD_DOWN) && !game.forks) // (the forklift's: its forks, above)
                         buttons |= kR3; // sub-mission
                     // L1 / R1 look / aim left / right (L2 / R2 on the PS2: the drive-by's side; the right stick only
                     // turned the camera there - no free aim in a vehicle: the player's report, 2026-11-12). With the

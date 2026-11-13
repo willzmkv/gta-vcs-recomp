@@ -157,6 +157,9 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
   fires guns** and **Circle is melee only** (with a gun in hand the pad's Circle does nothing, so the two never fire
   together). L3 is the horn, as in GTA V. VCS has no reload button (it reloads by itself). Checked by
   `tools/controls_check.py`.
+- **The forklift**: its forks are the **D-pad's up / down** (the PS2's own), in every scheme - driving it, the D-pad's
+  down neither looks behind nor starts a sub-mission (the player's report, 2026-11-13: with the triggers driving, only
+  up moved the forks).
 - **Vibration**: the DualShock 2's motors on the gamepad's rumble, 0-200% (100% as on the PS2, 0% off). The game
   drives them itself (crashes, explosions, gunfire; game-internals.md 12a).
 - **DualSense** (src/game/vcs_dualsense.cpp): extras a PS5 pad has, driven from the game's state, each off a no-op on
