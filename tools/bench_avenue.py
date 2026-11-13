@@ -49,7 +49,25 @@ def drive(out, speed, wait, env):
     ms = sorted(r["frame_ms"] for r in rows)
     return {"frames": len(rows), "frame_ms": perf_report.mean(rows, "frame_ms"), "game_ms": perf_report.mean(rows, "game_ms"),
             "host_ms": perf_report.mean(rows, "host_ms") if "host_ms" in rows[0] else 0.0, "p99_ms": perf_report.pct(ms, 0.99),
-            "over25": sum(1 for v in ms if v > 25.0), "over33": sum(1 for v in ms if v > 33.3)}
+            "over25": sum(1 for v in ms if v > 25.0), "over33": sum(1 for v in ms if v > 33.3), **population(out)}
+
+
+def population(out):
+    """The peds on the way, from cruise's popview.log: the pool's total and those in view within 200 m, averaged."""
+    total, view = [], []
+    path = os.path.join(out, "popview.log")
+    lines = []
+    if os.path.isfile(path):
+        with open(path) as f:
+            lines = f.readlines()
+    for line in lines:
+        f = line.split()
+        if f and f[1] == "ok":  # (the rig's cmd drops the reply's "ok")
+            f = f[:1] + f[2:]
+        if len(f) > 4 and f[1].startswith("peds="):
+            total.append(int(f[1][5:]))
+            view.append(int(f[4]))
+    return {"peds": sum(total) / len(total) if total else 0.0, "peds_view200": sum(view) / len(view) if view else 0.0}
 
 
 def main():
@@ -87,8 +105,9 @@ def main():
     print("\naverages over the rounds (every frame on the drive)")
     for label, rs in results.items():
         avg = {k: sum(x[k] for x in rs) / len(rs) for k in rs[0]}
-        print("%-28s frame %5.2f ms  game %5.2f ms  host %5.2f ms  p99 %5.1f ms  >25ms %4.0f  >33ms %4.0f  (%d rounds)" % (
-            label, avg["frame_ms"], avg["game_ms"], avg["host_ms"], avg["p99_ms"], avg["over25"], avg["over33"], len(rs)))
+        print("%-28s frame %5.2f ms  game %5.2f ms  host %5.2f ms  p99 %5.1f ms  >25ms %4.0f  >33ms %4.0f  peds %3.0f "
+              "(in view <200 m %2.0f)  (%d rounds)" % (label, avg["frame_ms"], avg["game_ms"], avg["host_ms"], avg["p99_ms"],
+                                                      avg["over25"], avg["over33"], avg["peds"], avg["peds_view200"], len(rs)))
 
 
 if __name__ == "__main__":

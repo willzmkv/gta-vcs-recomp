@@ -2195,6 +2195,18 @@ its lists; `pokef` of the scale below with screenshots).
   view get the root-only one (`$a1` = 0, `FUN_001552f8`). Vtables (+0x30 ProcessControl / +0x34 ProcessCollision /
   +0x48 UpdateAnim): random ped `0x490840` (`FUN_002d8788`), player `0x4902a8` (`FUN_00230640`), vehicles `0x4901c8`,
   `0x490f10`, object `0x48f848`; ProcessCollision `FUN_00348d40` and UpdateAnim shared by all.
+- **The ped spot finder** `FUN_00268048`(nearest in view, farthest in view, nearest out, farthest out, paths, centre,
+  ..., out position, out nodes, out t, camera) (decompiled 2026-11-13, `build/analysis/decomp/pedspot.c`; AddToPopulation
+  calls it at 0x2B1E34 with $f12 = its in-view nearest $f21 - its argument or, on one path, 35 x the factor
+  `FUN_002B44C8`, + 30-60 m on each retry - $f13 its farthest, $f14 / $f15 its out-of-view pair as passed). Every 64th
+  frame it rebuilds its node list (`FUN_00269228`: 160 m, up to 240 nodes, kept at paths +0x7DAC); otherwise it walks up
+  to 150 of them from a rotating index, and for each link of a node that passes the road-class chance (`rand & 15` against
+  `0x487498`) asks **`FUN_00267E98`(farthest in view, a, b, centre, &t0, &t1)** for the part of the link inside the circle
+  of that radius - **for both rings**: then 15 random points on that part, each tested against the camera
+  (`FUN_003816F8`, a 2 m sphere) and kept when strictly between the in-view pair (visible) or the out-of-view pair; its
+  ground height from `FUN_001967F8` (more than 3 m off: no spot). So a farthest-in-view of 0 finds nothing out of view
+  either: the port's in-view cap that closed the ring as (1e6, 0) starved the whole crowd (PERFORMANCE.md 46). A ring is
+  closed by nearest = farthest, the farthest in view kept at least the out-of-view reach (vcs_distance.cpp `bandRings`).
 - **CVisibilityPlugins** (VCS's, `FUN_0036ebf8(RwCamera)`, at each render from the frame function): squared
   distances its render callbacks compare with - `0x4CD5C0` vehicle components culled past 20 m x LODDistMultiplier
   (1e6 in camera modes 1 / 0x25), `0x4CD5D8` = `0x4CD5CC` peds drawn up to 70 m x LODDistMultiplier (the ped atomic

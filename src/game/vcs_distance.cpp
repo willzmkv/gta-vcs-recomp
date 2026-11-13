@@ -177,6 +177,15 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         const int g_pedInViewCap = static_cast<int>(envFloat("VCS_PED_INVIEW_CAP", 0.0f));
         const float g_pedOutFarK = envFloat("VCS_PED_OUT_FAR_K", 3.0f);
         constexpr float kFillInViewK = 1.5f; // the camera-cut fill's farthest in view (the picture is new then)
+        // Crowd bands (docs/CROWD_BANDS_PLAN.md, the player's plan, 2026-11-13): with the population raised, few real peds -
+        // VCS_CROWD_NEAR within 100 m, VCS_CROWD_MID at 100-200 m - and the decorative walkers from 200 m out
+        // (realPedOuterRadius). No ring in view (a ped made there is seen standing up) but the camera-cut fill's; out of
+        // view the ring goes to the band that is short; past 210 m a ped fades (trimCrowd). VCS_CROWD_BANDS=1 (off).
+        const bool g_bands = envFloat("VCS_CROWD_BANDS", 0.0f) > 0.0f;
+        const int g_bandNear = static_cast<int>(envFloat("VCS_CROWD_NEAR", 20.0f));
+        const int g_bandMid = static_cast<int>(envFloat("VCS_CROWD_MID", 20.0f));
+        constexpr float kBandNear = 100.0f, kBandEdge = 200.0f, kBandOut = 210.0f;
+        std::atomic<uint32_t> g_births{0}; // popview's births= (the ped count's rises, once a game frame)
         uint32_t g_carRing = 0;
         float g_carSpawnK = 1.0f; // the car spawner's factor this call (the node list's shift follows it)
 
@@ -229,6 +238,63 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             return p <= 1.0f ? p : std::min(1.0f + (p - 1.0f) * 2.0f, kMaxPedDistance);
         }
         float pedDensityDistance() { return std::min(pedDistance(), kMaxPedDensityDistance); }
+        bool bandsOn() { return g_bands && pedDistance() > 1.0f; }
+
+        // a random ped on foot that the crowd's numbers count: the population's own (+0x8F4 1), not in a vehicle, not dying
+        // or dead (0x37, 0x39, 0x3A), not fading out (+0x1CC bit 31)
+        bool crowdPed(uint32_t ped)
+        {
+            const int32_t state = rd32(ped + 0x8C4u);
+            return rd32(ped + 0x8F4u) == 1 && state != 0x37 && state != 0x39 && state != 0x3A && rd32(ped + 0x538u) == 0;
+        }
+        bool fadingOut(uint32_t ped) { return (rd32(ped + 0x1CCu) & 0x80000000) != 0; }
+
+        // the crowd's peds by band (2D from the camera)
+        struct Bands
+        {
+            int nearCount = 0, midCount = 0, outCount = 0, fading = 0;
+        };
+        Bands countBands()
+        {
+            Bands bands;
+            const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
+            if (!pool)
+                return bands;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
+            const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), kLargePeds);
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            for (uint32_t i = 0; i < size; ++i)
+            {
+                if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
+                    continue;
+                const uint32_t ped = entries + i * 0xD20u;
+                if (!crowdPed(ped))
+                    continue;
+                if (fadingOut(ped))
+                {
+                    ++bands.fading;
+                    continue;
+                }
+                const float d = std::hypot(rdf(ped + 0x30u) - cx, rdf(ped + 0x34u) - cy);
+                (d < kBandNear ? bands.nearCount : d < kBandEdge ? bands.midCount : bands.outCount) += 1;
+            }
+            return bands;
+        }
+        // once a game frame and again when the game's ped count moved (the camera-cut fill makes up to 100 in one frame), on
+        // the game thread (the control channel's popview counts its own)
+        Bands bandCounts()
+        {
+            static int32_t frame = -1, peds = -1;
+            static Bands bands;
+            const int32_t now = rd32(0x004CD124u), count = rd32(kPeds); // the game's frame counter, its ped count
+            if (now != frame || count != peds)
+            {
+                frame = now;
+                peds = count;
+                bands = countBands();
+            }
+            return bands;
+        }
         // the densities as they apply now (updateBudget): the sliders' at a budget of 1; at 0 the game's own numbers of
         // cars and peds, spread over the population distance's area (the distances never change: spawns stay far)
         float g_budget = 1.0f;
@@ -299,8 +365,59 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         // 250 m (in view only that far: a ped the player can make out never fades away), the farthest first, while fewer
         // than two fade - and the spawner fills its slot, near out of view or far in view.
         constexpr float kRecycleOutOfView = 40.0f, kRecycleAnywhere = 250.0f;
+        // With the crowd bands: a ped past kBandOut goes, in view too (a few pixels tall there; the handover to a walker is
+        // the plan's step 4), and while the bands hold more than their numbers (just switched on, the camera-cut fill's
+        // hundred tries) the farthest out of view beyond 40 m; the farthest first, while fewer than four fade.
+        void trimBands()
+        {
+            const Bands bands = bandCounts();
+            const bool over = bands.nearCount + bands.midCount > g_bandNear + g_bandMid;
+            if (bands.fading >= 4 || (!over && bands.outCount == 0))
+                return;
+            const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
+            if (!pool)
+                return;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
+            const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), kLargePeds);
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            const float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u);
+            uint32_t pick[2] = {0, 0};
+            float far[2] = {0.0f, 0.0f};
+            for (uint32_t i = 0; i < size; ++i)
+            {
+                if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
+                    continue;
+                const uint32_t ped = entries + i * 0xD20u;
+                if (!crowdPed(ped) || fadingOut(ped))
+                    continue;
+                const float dx = rdf(ped + 0x30u) - cx, dy = rdf(ped + 0x34u) - cy, d = std::hypot(dx, dy);
+                const bool past = d > kBandOut;
+                const bool spare = over && d > kRecycleOutOfView && dx * fx + dy * fy <= 0.2f * d;
+                if (!past && !spare)
+                    continue;
+                const float key = past ? d + 1e4f : d; // past the edge first
+                for (int k = 0; k < 2; ++k)
+                    if (key > far[k])
+                    {
+                        if (k == 0)
+                        {
+                            far[1] = far[0];
+                            pick[1] = pick[0];
+                        }
+                        far[k] = key;
+                        pick[k] = ped;
+                        break;
+                    }
+            }
+            for (int k = 0; k < std::min(2, 4 - bands.fading); ++k)
+                if (pick[k])
+                    wr32(pick[k] + 0x1CCu, rd32(pick[k] + 0x1CCu) | static_cast<int32_t>(0x80000000u));
+        }
+
         void trimCrowd()
         {
+            if (bandsOn())
+                return trimBands();
             const int32_t count = rd32(kPeds);
             const int32_t cap = rd32(0x00489F7Cu) == 0 ? rd32(kMaxPeds) : rd32(kMaxPedsB); // CGame::currArea: outdoors
             const bool full = pedDistance() > 1.0f && count >= cap - 1;
@@ -500,6 +617,12 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             {
                 updateBudget();
                 trimCrowd();
+                // the population's births, roughly: the rises of the game's ped count from one frame to the next
+                static int32_t lastPeds = -1;
+                const int32_t peds = rd32(kPeds);
+                if (lastPeds >= 0 && peds > lastPeds)
+                    g_births.fetch_add(static_cast<uint32_t>(peds - lastPeds), std::memory_order_relaxed);
+                lastPeds = peds;
             }
             const float cars = carDistance();
             wrf(kOffscreenSlots, 60.0f * cars);
@@ -893,13 +1016,39 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             return count;
         }
 
+        // The crowd bands' rings (g_bands), as AddToPopulation's four floats ($f12..$f15): a ring only where a band is short
+        // - in view for the camera-cut fill alone (the picture is new), out of view the near band first; a closed ring
+        // (nearest = farthest) finds no spot. Set at AddToPopulation's entry and again at its spot finder's call (0x2B1E34): on one
+        // path it makes its in-view ring again from its own 35 / 60 m (0x2B1A00, with the cars below their cap), and on
+        // retries it adds 30-60 m to that ring - closed it stays closed.
+        constexpr uint32_t kAddToPopulationFinds = 0x002B1E3Cu; // the return address of its call to FUN_00268048
+        bool g_bandFill = false;
+        void bandRings(R5900Context *ctx)
+        {
+            const Bands bands = bandCounts();
+            const bool nearShort = bands.nearCount < g_bandNear, midShort = bands.midCount < g_bandMid;
+            auto ring = [&](int lo, int hi, float nearHi, bool open) {
+                const bool n = open && nearShort, m = open && !nearShort && midShort;
+                ctx->f[lo] = n ? 10.0f : m ? kBandNear : 0.0f;
+                ctx->f[hi] = n ? nearHi : m ? kBandEdge - 10.0f : 0.0f;
+            };
+            ring(14, 15, 60.0f, true);
+            ring(12, 13, kBandNear, g_bandFill);
+            // the farthest in view is also the radius the finder takes links within, out of view too (FUN_00267E98):
+            // a closed in-view ring is empty (nearest = farthest) at the out-of-view ring's reach, never 0
+            if (ctx->f[13] <= ctx->f[12])
+                ctx->f[12] = ctx->f[13] = ctx->f[15];
+        }
+
         PS2_GUEST_CC void pedSpotFinder(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_rdram = rdram; // (farInView reads through it)
+            if (ctx->pc == kPedSpotFinder && bandsOn() && GPR_U32(ctx, 31) == kAddToPopulationFinds)
+                bandRings(ctx);
             if (ctx->pc == kPedSpotFinder)
             {
                 const float k = pedDistance();
-                if (k > 1.0f)
+                if (k > 1.0f && !bandsOn()) // (the crowd bands set the rings in addToPopulation)
                 {
                     const float base = g_genBase > 0.0f ? g_genBase : 1.0f;
                     const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
@@ -913,9 +1062,10 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                     const uint32_t pass = g_pedSpotPass++ & 3u;
                     if (g_pedInViewCap > 0 && farInView() >= g_pedInViewCap)
                     {
-                        // enough far down the street already: no ring in view this time (out of view only)
-                        ctx->f[12] = 1e6f;
-                        ctx->f[13] = 0.0f;
+                        // enough far down the street already: no ring in view this time (out of view only). Empty at
+                        // the out-of-view reach, not (1e6, 0): the farthest in view is the radius the finder takes
+                        // links within (FUN_00267E98), so 0 closed both rings - why this cap starved the city
+                        ctx->f[12] = ctx->f[13] = std::max(ctx->f[13], ctx->f[15]);
                     }
                     else if (maxHi > minLo + 40.0f)
                     {
@@ -950,7 +1100,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 }
                 else if (ra == kPedNodeListReturn)
                 {
-                    if (kp > 1.0f)
+                    if (kp > 1.0f && !bandsOn()) // (the crowd bands' rings lie round the player: the game's window)
                     {
                         g_rdram = rdram;
                         g_pedFarWindow = !g_pedFarWindow;
@@ -1445,6 +1595,13 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             {
                 const uint32_t ra = GPR_U32(ctx, 31);
                 const float k = pedDistance(), kd = pedDensityDistance();
+                g_rdram = rdram;
+                if (bandsOn())
+                {
+                    g_bandFill = ra >= kFill && ra < kFillEnd;
+                    bandRings(ctx);
+                    return g_addToPopulation(rdram, ctx, runtime);
+                }
                 if (ra >= kFill && ra < kFillEnd)
                 {
                     ctx->f[12] *= kd; // nearest in view
@@ -1621,6 +1778,8 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
 
     float realPedOuterRadius()
     {
+        if (bandsOn()) // the walkers take over at the bands' edge (CROWD_BANDS_PLAN.md)
+            return kBandEdge;
         const float base = g_genBase > 0.0f ? g_genBase : 1.0f;
         return 65.0f * base * pedDistance();
     }
@@ -1720,7 +1879,9 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         //                  gen=<GenerationDistMultiplier> population=<%> traffic=<%> pedestrians=<%> cars=<random>/<cap>
         //                  peds=<peds>/<cap> pools=<peds>,<vehicles> numbers=<car>,<ped>
         // popview -> ok peds=<total> <in view within 50 / 100 / 200 m> cars=<total> <in view within 50 / 100 / 200 m>: what the
-        // player sees of the population (a cone of +-40 degrees round the camera's forward), not the pools' totals
+        // player sees of the population (a cone of +-40 degrees round the camera's forward), not the pools' totals;
+        // bands=<on> near=<n>/<number> mid=<n>/<number> out=<past 200 m> fading=<n>: the crowd bands' counts (all around);
+        // births=<the ped count's rises so far>
         ps2control::addCommand("popview", [](const std::string &, ps2control::Reply reply) {
             if (!g_rdram)
                 return reply("error the camera has not run yet");
@@ -1752,9 +1913,12 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             int peds[4] = {0, 0, 0, 0}, cars[4] = {0, 0, 0, 0};
             count(kPedPool, 0xD20u, peds);
             count(kCarPool, 0x8C0u, cars);
-            char text[160];
-            std::snprintf(text, sizeof(text), "ok peds=%d %d %d %d cars=%d %d %d %d", peds[0], peds[1], peds[2], peds[3], cars[0],
-                          cars[1], cars[2], cars[3]);
+            const Bands bands = countBands();
+            char text[256];
+            std::snprintf(text, sizeof(text), "ok peds=%d %d %d %d cars=%d %d %d %d bands=%d near=%d/%d mid=%d/%d out=%d fading=%d births=%u",
+                          peds[0], peds[1], peds[2], peds[3], cars[0], cars[1], cars[2], cars[3], bandsOn() ? 1 : 0,
+                          bands.nearCount, g_bandNear, bands.midCount, g_bandMid, bands.outCount, bands.fading,
+                          g_births.load(std::memory_order_relaxed));
             reply(text);
         });
         ps2control::addCommand("distancestate", [](const std::string &, ps2control::Reply reply) {

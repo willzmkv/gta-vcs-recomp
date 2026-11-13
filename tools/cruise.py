@@ -165,18 +165,26 @@ def run(out, route, speed, laps, fps, extra_env, name, settle=4.0, shots=0.0, sa
             time.sleep(wait)
         reply = g.cmd("cruise start %s %.1f%s" % (os.path.abspath(route), speed, " loop" if laps > 1 else ""))
         total = float(reply.split()[1])
-        mark = next_shot = time.time()
+        mark = next_shot = next_pop = time.time()
         drive_secs = total * laps / speed
-        while time.time() - mark < drive_secs * 1.5 + 60.0:
-            st = g.cmd("cruise status").split()
-            if st[1] == "1" or (laps > 1 and time.time() - mark >= drive_secs):
-                break
-            if not g.alive():
-                raise RuntimeError("the game exited during the cruise")
-            if shots and time.time() >= next_shot:  # a GPU read-back each: a hitch of its own (not for measuring)
-                g.cmd("screenshot " + os.path.join(out, "shot_%04.0f.png" % (time.time() - mark)))
-                next_shot += shots
-            time.sleep(1.0)
+        with open(os.path.join(out, "popview.log"), "w") as pop_log:  # the population on the way (`popview`), every 10 s
+            while time.time() - mark < drive_secs * 1.5 + 60.0:
+                if time.time() >= next_pop:
+                    next_pop += 10.0
+                    try:
+                        pop_log.write("%.0f %s\n" % (time.time() - mark, g.cmd("popview")))
+                        pop_log.flush()
+                    except RuntimeError:  # (no camera yet: a sample skipped, the drive goes on)
+                        pass
+                st = g.cmd("cruise status").split()
+                if st[1] == "1" or (laps > 1 and time.time() - mark >= drive_secs):
+                    break
+                if not g.alive():
+                    raise RuntimeError("the game exited during the cruise")
+                if shots and time.time() >= next_shot:  # a GPU read-back each: a hitch of its own (not for measuring)
+                    g.cmd("screenshot " + os.path.join(out, "shot_%04.0f.png" % (time.time() - mark)))
+                    next_shot += shots
+                time.sleep(1.0)
         run_secs = time.time() - mark
         g.cmd("cruise stop")
     finally:

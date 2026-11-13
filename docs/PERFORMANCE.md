@@ -1274,6 +1274,42 @@ next.
   the game's functions throughout (the hook rule forbids calling them from host code). And the loop itself is small
   (~30 bones of 3x4 products a ped, ~0.4 ms for 127 peds): the 9% is the render function as a whole.
 
+### 49. Crowd bands, step 2: fewer real peds (2026-11-13)
+
+docs/CROWD_BANDS_PLAN.md (the player's plan). `VCS_CROWD_BANDS=1`: the real crowd held to 20 peds within 100 m and 20 at
+100-200 m, spawned out of view where a band is short, faded past 210 m (vcs_distance.cpp `bandRings`, `trimBands`).
+
+**Measured with the machine busy** (Premiere Pro and OBS open, the GPU shared): the same default drive took 9.9 ms a
+frame the night before, 13.9-18.1 ms in this session's runs. Only alternating A / B pairs within one session are
+compared; the absolute numbers are not.
+
+The avenue benchmark (`tools/bench_avenue.py`, now with the peds seen on the way - `popview` every 10 s: the pool's
+peds, drivers included, and those in view within 200 m):
+
+| | rounds | peds (in view < 200 m) | frame | game thread | p99 | frames > 25 ms |
+|---|---|---|---|---|---|---|
+| bands off | 2 | 117 (48) | 13.94 ms | 11.92 ms | 23.9 ms | 61 |
+| bands on | 2 | 56 (10) | 12.88 ms | 10.33 ms | 30.4 ms | 256 |
+| bands off | 1 | 112 (42) | 13.97 ms | 12.04 ms | 25.5 ms | 86 |
+| bands on | 1 | 59 (10) | 12.31 ms | 10.10 ms | 27.7 ms | 149 |
+| Vehicle density 100 | 2 | 107 (42) | 18.11 ms | 15.59 ms | 52.1 ms | 718 |
+| Vehicle density 0 | 2 | 92 (33) | 15.72 ms | 13.30 ms | 45.1 ms | 588 |
+
+- About **1.6-1.9 ms off the game thread** for ~55 fewer street peds (~0.03 ms each): less than the plan's guess (3-4
+  ms). The cars at density 100 against 0 cost about as much (2.3 ms).
+- More frames over 25 ms with the bands: those are frames where the game waits for the pipeline (`wait_ms` 40-110,
+  `game_ms` 8-20 - cruise's `worst`), not the game's own work. The churn is not it: births on the drive (`popview`
+  `births=`, the ped count's rises) 791 without the bands, 416 with. Likely the faster game thread meeting the shared GPU
+  more often; to measure again on a quiet machine.
+- The middle band fills poorly from out of view (2-5 of 20 at the Little Havana spot): the game's node list reaches
+  160 m. In view it is to be fed by the walkers' handover (step 4).
+- **The in-view cap's starvation explained** (PERFORMANCE.md 46): the ped spot finder takes links within the circle of
+  "farthest in view" for both rings (game-internals.md "The ped spot finder"), so closing the in-view ring as (1e6, 0)
+  closed the out-of-view one too. Closed now as nearest = farthest at the out-of-view reach.
+
+At a fixed spot (Little Havana, the free camera 12 m up looking north, 4K) the frame stays ~18-22 ms whatever the crowd:
+there the GPU at 4K is the limit (the game's own population: 18 ms; the full one at 1080p: 17 ms).
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker

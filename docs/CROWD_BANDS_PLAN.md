@@ -90,7 +90,12 @@ the walkers' draws stay instanced (draw count), no flicker.
   walker's place. Hook points to find in Ghidra (`tools/eedecomp.py 0x2b17a8 0x2b2908 0x268048`): the spot finder's
   result (`FUN_00268048` returns the node / position AddToPopulation uses) and the model choice inside AddToPopulation
   (the zone's ped group). With both answered from the walker, CPopulation::Update's own call makes the ped - no guest
-  call from host code (AGENTS.md rule 2). Then its heading set from the walker's (the ped's matrix and the heading
+  call from host code (AGENTS.md rule 2). Found (decompiled 2026-11-13, `build/analysis/decomp/pedspot.c`): the model is
+  `FUN_002B35B0`(the zone's ped group) (else gang / type paths `FUN_002B3B90` / `FUN_002B3C80`, the cops' 35 / 60 m rings
+  only with 3+ stars), chosen before the spot and again if the spot's zone differs; the spot is the finder's out position
+  (`&fStack_910`, the nodes in `iStack_a8` / `iStack_a4`); then `FUN_0026B510` jitters it across the pavement and
+  CPopulation::AddPed `FUN_002B2908`(type, model, position) makes the ped. So: the finder replaced for one call (the
+  walker's place, its nodes, return 1) and the model call answered from the walker. Then its heading set from the walker's (the ped's matrix and the heading
   fields, +0x30.. and the ped's own; to find), the walker dropped the same frame.
 - **Real -> walker** (a real random ped past 210 m in view): a walker of its model placed at its position and heading on
   the nearest pavement link, and the ped removed at once (not faded: a fade at 200 m reads as a ghost). The game's own
@@ -123,8 +128,8 @@ thread's packet building and the worker's replay copies.
 
 | Step | State |
 |---|---|
-| 1 Baseline | in progress |
-| 2 Real bands | - |
+| 1 Baseline | done, on a busy machine (PERFORMANCE.md 49): to repeat on a quiet one |
+| 2 Real bands | in (`VCS_CROWD_BANDS=1`, off): near fills, the middle band 2-5 of 20 from out of view; game thread -1.6-1.9 ms |
 | 3 Walkers from 200 m | - |
 | 4 Handover | - |
 | 5 Default | - |
