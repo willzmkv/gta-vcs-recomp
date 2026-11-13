@@ -21,6 +21,7 @@
 #include "debug/watchdog.h"
 #include "disc/iso_image.h"
 #include "disc/vcs_disc_id.h"
+#include "game/vcs_aim.h"
 #include "game/vcs_display.h"
 #include "game/vcs_driveby.h"
 #include "game/vcs_framerate.h"
@@ -779,6 +780,7 @@ namespace
         vcs::prompts::registerSettings(); // the Enhancements page: button prompts by device (game/vcs_prompts.h)
         vcs::world::registerSettings();   // Enhancements > World: density, draw distance (game/vcs_world_detail.h)
         vcs::driveby::registerSettings(); // Enhancements > Combat: drive-by fire rate (game/vcs_driveby.h)
+        vcs::aim::registerSettings();     // Enhancements > Combat: the free-aim reticle (game/vcs_aim.h)
 
         s = {};
         s.key = "graphics.perf_overlay";

@@ -68,6 +68,10 @@ game-internals.md 12c):
   third of its throw takes the aim **free from there** (the lock lets go for two frames, then the circle starts where
   the lock-on camera looked) - GTA V's assisted aim. With no one to lock on to after six frames it is free aim at
   once. Off: free aim only (the player's report, 2026-11-12: free aim on the DualSense had lost the lock-on).
+- **Free aim reticle** (Enhancements > Combat; Circle by default): **Dot** shows a small white dot with a thin dark
+  rim instead of the game's circle with a dot (made narrower in the texture by the picture's widening, so it stays
+  round in widescreen - the game stretches the sprite sideways) - the game's own texture (`sitem16`, game-internals.md 12c) rewritten
+  in memory while it is on, put back when it goes back to Circle. `VCS_RETICLE=0|1`.
 - It is the game's own free aim (R1 then L3 on the PS2: the left stick moves an aiming point while Vic stands still),
   driven so that Vic can move and the mouse aims; `VCS_FREEAIM=0` leaves it out entirely.
 - **Shooting from a car** (Jive Drive: Vic in the passenger seat while Lance drives - the game's own free aim, which the
@@ -136,7 +140,8 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
   **Swap sticks**, **Invert camera** left / right and up / down, **Drive with the triggers** / **Shoot with the
   triggers** (below), **Free aim** (above).
 - **Drive with the triggers** (off by default): while you drive, **R2 accelerates and L2 brakes / reverses** (instead
-  of Cross / Square: the pad's Cross / Square then do neither; the keyboard keeps its keys), and look left / right (R2 / L2 on the PS2) move to the **D-pad**. On foot the buttons are
+  of Cross / Square: the pad's Cross / Square then do neither; the keyboard keeps its keys), and look left / right (R2 /
+  L2 on the PS2) move to the **D-pad**, its **down** looking behind (L2 + R2). On foot the buttons are
   unchanged. Works on any pad with triggers; it is what makes the DualSense's adaptive triggers (below) act as a live
   throttle and brake.
 - **Shoot with the triggers** (off by default): on foot, **R2 fires and L2 aims** (instead of Circle / R1), and change
@@ -162,9 +167,15 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
     red + blue cycle of 470 ms at one star down to 250 ms at six; it was 1030 - 680 ms, too slow to read as a police
     light), back to its colour when you lose them.
   - **Adaptive triggers**: for shooting. On foot, with **Shoot with the triggers** on (so R2 is the trigger you pull),
-    the fire trigger feels the gun - a single-shot gun gives a firm wall that breaks at the shot and then kicks (a
-    heavy, low buzz while it fires), an automatic rests on a light wall and buzzes while it fires. Driving leaves the
-    triggers loose (the player's ask, 2026-11-12).
+    the fire trigger feels the gun, each kind its own (the player's ask, 2026-11-12): a wall that breaks at the shot,
+    then a kick for **every round fired** (seen as the clip counting down). Every wall starts a fifth of the way into
+    the pull and the shot goes as it gives way: a **pistol** a short wall (gives at ~45%) and a short, sharp kick; a
+    **shotgun** and a **sniper rifle** a full-strength wall to ~65% and a heavier kick; the **rocket launcher** the
+    longest wall (~75%) and the heaviest kick per rocket. **SMGs, rifles, the M249, minigun and flame-thrower** a
+    lighter wall to ~55%, then a buzz while they fire. (Until 2026-11-12 the walls began near the end of the pull and
+    every gun fired at 82%: the player found them late and weak.) **Reloading or out of ammo** the trigger goes slack
+    - no wall, no kick - like a gun that does not fire. Driving leaves the triggers loose, and so does getting in or
+    out of a vehicle: the triggers held then are nothing (no shot, no weapon change; it fired the gun's feel before).
   - **Triggers while driving** (off by default): R2 / L2 push back by the vehicle's weight - a moped barely, a sports
     car more, a truck or a tank a lot - and judder on a crash. With **Drive with the triggers** on (above) the throttle
     (R2) firms up the harder you accelerate and **buzzes when you lose grip** (wheelspin or a slide), and the brake

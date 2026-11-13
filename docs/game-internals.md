@@ -3001,7 +3001,9 @@ timing at 60 fps; independent timing at 60 / 144 fps got through, by luck (below
   entries), 0x487A90 (5200), 0x487A9C (6858), 0x487AA8 (20), 0x487AAC (3407), 0x487AB0 (192) - not identified.
 - **Ped fields for the trainer** (found 2026-10-26 by setting each value with a script command and searching the ped
   for it): +0x4E4 health (float), +0x4E8 armour (float), +0x480 the vehicle it is in (0 on foot; +0x450 / +0x484 hold
-  it too), **+0x8C4 state** (1 on foot, 0x37 driving; +0x8A4 read 0 in these runs), +0x578 weapon slots: 10 x 0x1C
+  it too), **+0x8C4 state** (1 on foot, 0x37 driving, 0x10 attacking, 0x3F going to a car's door and 0x3D getting in -
+  the vehicle at +0x480 already set in both, cleared again if the entry fails; read per frame while Triangle took Vic
+  into a car, 2026-11-12; +0x8A4 read 0 in these runs), +0x578 weapon slots: 10 x 0x1C
   bytes {type, state, ammo in clip, ammo total (the clip included), ...}, slot 0 unarmed, 1 melee, 2 thrown, 3
   pistols, 4 shotguns, 5 SMGs, 6 rifles, 7 heavy, 8 snipers, 9 special (camera...). Entities: +0x56 model index.
 - **Vehicle** (pool entry 0x8C0 bytes): +0x30 position, +0x20 up vector (z < 0 upside down), +0x278 health (float,
@@ -3278,7 +3280,13 @@ hidden run (rig `peek` / `poke`, snapshots diffed).
   player's **+0x820 (the lock-on target)** becomes an entry of the object pool (`*(0x487AA4)`, model 671, `+0x48 & 0xE`
   = 8: an object; a ped is 6), first placed 30 m ahead of Vic, and **+0xC90** holds the same point. The left stick moves
   the dummy (Vic stands still), the right stick and the mouse do nothing, and the camera is the lock-on camera (mode 11,
-  FUN_0029c280) centred on it. **The white circle with a dot** drawn on the dummy is the game's free-aim reticle.
+  FUN_0029c280) centred on it. **The white circle with a dot** drawn on the dummy is the game's free-aim reticle:
+  the HUD dictionary's texture **`sitem16`** (VC's M16 sight name), 64 x 64, 4-bit linear indices (the low nibble the
+  left pixel) followed by its 16-colour CLUT (white, alpha 0x00-0x80). **0x6EDD94** holds its texture record (+0 the
+  raster, whose +8 points at the pixels; +0x10 the name). Found 2026-11-12 from a RAM dump in free aim: the texture
+  dump's 16 colours searched as a CLUT (0x11D9B60), the pixels right before it decoded against the dump (0
+  mismatches low nibble first), the word pointing at the record. Rewriting the pixels and CLUT changes the reticle at
+  once (the game uploads it each time it draws; vcs_aim.cpp's Dot).
 - **Free-aim flag: bit 51 of the player's 64-bit flags at +0xCC8** (bit 19 of the word at +0xCCC; found by diffing the
   ped locked on a ped against in free aim: the only flag that differs). Bit 48 (+0xCCC bit 16) is set by any lock-on.
   Who reads bit 51: the lock-on camera (with it set there is no pitch limit and no crosshair offset: the target is

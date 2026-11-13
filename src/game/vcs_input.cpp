@@ -153,6 +153,7 @@ namespace vcs::input
         struct GameState
         {
             bool driving = false;
+            bool onFoot = false;     // no vehicle at all (getting in or out - states 0x3F / 0x3D - has one already)
             bool footCamera = false; // the on-foot follow camera, turned by the player (no script camera, controls on)
             bool paused = false;     // the pause menu or the game's own pause
         };
@@ -164,6 +165,7 @@ namespace vcs::input
                 return s;
             const uint32_t ped = rd32(kPlayerPed);
             s.driving = ped && rd32(ped + kPedVehicle) && rd32(ped + kPedState) == 0x37;
+            s.onFoot = ped && !rd32(ped + kPedVehicle);
             int16_t disabled;
             std::memcpy(&disabled, g_rdram + kPad0 + 0x96, 2);
             const bool paused = g_rdram[kUserPause] || g_rdram[kCodePause];
@@ -417,7 +419,7 @@ namespace vcs::input
             const bool blocked = ps2control::gameInputBlocked() || freeCamera;
             // "Shoot with the triggers": L2 is the aim button on foot, so free aim must key off it too (it reaches the
             // report as R1 in the trigger-shoot block below). Set before the aim update reads padR1.
-            if (m.triggerShoot && !game.driving && !blocked && padAxis(AXIS_LEFT_TRIGGER) > m.trigger)
+            if (m.triggerShoot && game.onFoot && !blocked && padAxis(AXIS_LEFT_TRIGGER) > m.trigger)
                 padR1 = true;
             const bool alt = !blocked && (ps2control::keyDown(KEY_LEFT_ALT) || ps2control::keyDown(KEY_RIGHT_ALT));
             auto drivingKey = [&](int key) {
@@ -773,23 +775,35 @@ namespace vcs::input
                     buttons |= kR2; // look right
                 if (padButton(GAMEPAD_DPAD_LEFT) && !m.vLayout)
                     buttons |= kL2; // look left
+                // the D-pad's down looks behind (L2 + R2), with its left / right (the player's ask, 2026-11-12; GTA V's
+                // buttons: the sub-mission there, below)
+                if (padButton(GAMEPAD_DPAD_DOWN) && !m.vLayout)
+                    buttons = static_cast<uint16_t>((buttons & ~kDown) | kL2 | kR2);
             }
+
+            // Getting in or out of a vehicle (neither on foot nor driving) with a trigger scheme on: the triggers held
+            // (for the throttle to come, or still from a shot) are nothing - not a shot, not a weapon change (the
+            // player's report, 2026-11-12: holding them while getting in fired the gun's trigger feel)
+            if ((m.triggerShoot || m.triggerDrive) && !game.onFoot && !game.driving)
+                buttons &= static_cast<uint16_t>(~(padBits & ~keyBits & (kL2 | kR2)));
 
             // "Shoot with the triggers" (pad.trigger_shoot): on foot R2 fires (Circle), L2 aims (R1), and weapon
             // next / previous (R2 / L2 on the PS2) move to the D-pad - the modern GTA IV / V layout. On a vehicle it
             // does nothing (driving has its own trigger scheme).
-            if (m.triggerShoot && !game.driving && !blocked)
+            if (m.triggerShoot && game.onFoot && !blocked)
             {
                 buttons &= static_cast<uint16_t>(~(kL2 | kR2 | kLeft | kRight)); // triggers were weapon prev/next; D-pad L/R repurposed
-                // A gun fires only once the trigger is pushed PAST the adaptive wall (it resists up to ~zone 7,
-                // game/vcs_dualsense.cpp triggerWeapon), so the shot breaks on a firm press, not on first touch of
-                // the resistance. Fists / melee have no wall, so they keep the light threshold.
+                // A gun fires as the trigger pushes through its adaptive wall (dualsense::firePoint: where it gives way,
+                // 45-75% of the pull by the gun; it was 82%, past walls near the end: the player found them too late),
+                // so the shot breaks on a firm press, not on first touch of the resistance. Fists / melee have no wall,
+                // so they keep the light threshold.
                 // GTA V's buttons: the pad's Circle is melee only - with a gun in hand R2 alone fires (both fired)
-                if (m.vLayout && aim::gunInHand())
+                if (m.vLayout && aim::firearmInHand())
                     buttons &= static_cast<uint16_t>(~(padBits & ~keyBits & kCircle));
-                const float fireAt = aim::gunInHand() ? 0.82f : m.trigger;
+                const float firePoint = aim::firearmInHand() ? dualsense::firePoint() : 0.0f;
+                const float fireAt = firePoint > 0.0f ? firePoint : m.trigger;
                 // (GTA V's buttons: R2 fires guns only - fists and melee weapons on Circle, below)
-                if (padAxis(AXIS_RIGHT_TRIGGER) > fireAt && (!m.vLayout || aim::gunInHand()))
+                if (padAxis(AXIS_RIGHT_TRIGGER) > fireAt && (!m.vLayout || aim::firearmInHand()))
                     buttons |= kCircle; // fire / attack
                 if (padAxis(AXIS_LEFT_TRIGGER) > m.trigger)
                     buttons |= kR1; // aim / target
@@ -833,7 +847,7 @@ namespace vcs::input
             }
 
             // the DualSense's trigger recoil on foot (game/vcs_dualsense.cpp): a gun in hand and the attack button down
-            dualsense::onShooting(!game.driving && (buttons & kCircle) != 0 && aim::gunInHand());
+            dualsense::onShooting(game.onFoot && (buttons & kCircle) != 0 && aim::firearmInHand());
 
             // the menu's keys and mouse buttons count too (Enter, Escape, clicks)
             if (!blocked)

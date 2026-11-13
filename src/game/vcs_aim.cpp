@@ -4,6 +4,8 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_control.h"
+#include "game/vcs_display.h"
+#include "settings/settings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -52,6 +54,20 @@ namespace vcs::aim
         // Guest memory for the shot's start point: the EE kernel's area below the game (0x00000-0x7FFFF), unused by the
         // recompiled runtime and the game (all zero in play, 2026-10-31).
         constexpr uint32_t kScratch = 0x00060000u;
+
+        // The free-aim circle is the HUD dictionary's texture "sitem16" (VC's M16 sight name; game-internals.md 12c):
+        // 64 x 64, 4-bit linear indices (the low nibble the left pixel), its 16-colour CLUT (RGBA, alpha 0x80 opaque)
+        // right after the pixels. 0x6EDD94 holds its texture record: +0 the raster (+8 the pixels), +0x10 the name.
+        // Found 2026-11-12 from a free-aim RAM dump: the dumped texture's 16 colours as a CLUT, the pixels before it.
+        constexpr uint32_t kReticleTexture = 0x006EDD94u;
+        constexpr uint32_t kReticlePixels = 64 * 64 / 2, kReticleBytes = kReticlePixels + 16 * 4;
+        enum Reticle { ReticleCircle = 0, ReticleDot = 1 };
+        std::atomic<int> g_reticle{ReticleCircle};
+        uint32_t g_reticleAt = 0;            // the pixels the original below was read from (0: none)
+        uint8_t g_reticleOriginal[kReticleBytes];
+        uint8_t g_reticleDot[kReticleBytes];     // a small white dot with a soft dark rim, for the aspect below
+        uint8_t g_reticleWritten[kReticleBytes]; // what was last written there
+        float g_reticleWidening = 0.0f;          // the aspect widening the dot was made for (0: not made)
 
         constexpr float kDummyDistance = 12.0f; // metres from Vic: the lock drops past ~30 (the weapons' lock-on range)
         constexpr float kPivotHeight = 0.6f;    // the dummy turns about Vic's shoulders
@@ -211,8 +227,84 @@ namespace vcs::aim
         // CGame::Process: the world runs with the free-aim bit cleared - to the game a lock-on to an object, so Vic
         // walks / strafes / stands as he does locked on with this weapon, and the left stick moves him (in the game's
         // free aim it moves the dummy, and Vic stands still).
+        // The dot: white inside 2.25 texels of the centre, a dark rim out to 3.25 (seen on a bright sky), 4 x 4 samples a
+        // texel; each texel the nearest of 16 colours (clear, eight whites, seven dark greys by alpha), premultiplied.
+        // The game draws the sprite for 4:3, so a wider picture stretches it sideways (`widening`, vcs_display.h: 4/3 at
+        // 16:9 - the player saw an oval): the dot is made that much narrower in the texture, round on the screen.
+        void makeDot(float widening)
+        {
+            g_reticleWidening = widening;
+            uint8_t clut[16][4] = {};
+            for (int k = 1; k <= 8; ++k)
+                clut[k][0] = clut[k][1] = clut[k][2] = 0xFF, clut[k][3] = static_cast<uint8_t>(k * 16);
+            for (int k = 9; k < 16; ++k)
+                clut[k][0] = clut[k][1] = clut[k][2] = 0x20, clut[k][3] = static_cast<uint8_t>((k - 8) * 16);
+            std::memset(g_reticleDot, 0, kReticlePixels);
+            for (int y = 0; y < 64; ++y)
+                for (int x = 0; x < 64; ++x)
+                {
+                    float white = 0.0f, dark = 0.0f;
+                    for (int s = 0; s < 16; ++s)
+                    {
+                        const float dx = (x + (s % 4 + 0.5f) / 4.0f - 32.0f) * widening, dy = y + (s / 4 + 0.5f) / 4.0f - 32.0f;
+                        const float r = std::sqrt(dx * dx + dy * dy);
+                        if (r < 2.25f)
+                            white += 1.0f / 16.0f;
+                        else if (r < 3.25f)
+                            dark += 1.0f / 16.0f;
+                    }
+                    const float alpha = white + dark * 0.75f, grey = white * 255.0f + dark * 0.75f * 32.0f;
+                    int best = 0;
+                    float bestErr = 1e30f;
+                    for (int k = 0; k < 16; ++k)
+                    {
+                        const float a = clut[k][3] / 128.0f, ea = (a - alpha) * 255.0f, eg = clut[k][0] * a - grey;
+                        if (ea * ea + eg * eg < bestErr)
+                            bestErr = ea * ea + eg * eg, best = k;
+                    }
+                    g_reticleDot[(y * 64 + x) / 2] |= static_cast<uint8_t>(x & 1 ? best << 4 : best);
+                }
+            std::memcpy(g_reticleDot + kReticlePixels, clut, sizeof(clut));
+        }
+
+        // Game thread, each frame: the circle's texels and CLUT as the setting wants them. The original is kept from the
+        // first look (the texture's address checked by its record's name) and put back when the setting goes back.
+        void updateReticle()
+        {
+            const uint32_t rec = rd32(kReticleTexture);
+            if (rec < 0x100000u || rec >= 0x2000000u || std::memcmp(g_rdram + rec + 0x10u, "sitem16", 8) != 0)
+                return;
+            const uint32_t pixels = rd32(rd32(rec) + 8u);
+            if (pixels < 0x100000u || pixels + kReticleBytes > 0x2000000u)
+                return;
+            uint8_t *at = g_rdram + pixels;
+            // ours: what is there is what was written (else the game's: the original, or reloaded)
+            const bool ours = g_reticleAt == pixels && std::memcmp(at, g_reticleWritten, kReticleBytes) == 0;
+            if (g_reticle.load(std::memory_order_relaxed) == ReticleDot)
+            {
+                const float widening = std::clamp(vcs::aspectWidening(), 0.5f, 4.0f);
+                if (widening != g_reticleWidening)
+                    makeDot(widening);
+                if (ours && std::memcmp(g_reticleWritten, g_reticleDot, kReticleBytes) == 0)
+                    return;
+                if (!ours)
+                {
+                    std::memcpy(g_reticleOriginal, at, kReticleBytes);
+                    g_reticleAt = pixels;
+                }
+                std::memcpy(at, g_reticleDot, kReticleBytes);
+                std::memcpy(g_reticleWritten, g_reticleDot, kReticleBytes);
+            }
+            else if (ours)
+            {
+                std::memcpy(at, g_reticleOriginal, kReticleBytes);
+                g_reticleAt = 0;
+            }
+        }
+
         PS2_GUEST_CC void gameProcess(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
+            updateReticle();
             if (g_state == State::Active)
                 if (const uint32_t ped = rd32(kPlayerPed))
                     setFreeAimBit(ped, false);
@@ -320,6 +412,23 @@ namespace vcs::aim
         });
     }
 
+    void registerSettings()
+    {
+        settings::Spec s;
+        s.key = "enhance.reticle";
+        s.page = "Enhancements";
+        s.section = "Combat";
+        s.label = "Free aim reticle";
+        s.help = "What free aim (Keyboard / Gamepad > Free aim) puts where the shots go. Circle: the game's white circle "
+                 "with a dot. Dot: a small white dot alone, with a thin dark rim so it shows on a bright sky.";
+        s.type = settings::Type::Choice;
+        s.choices = {{"Circle", ReticleCircle}, {"Dot", ReticleDot}};
+        s.defaultValue = ReticleCircle;
+        s.env = "VCS_RETICLE";
+        s.onChange = [](int v) { g_reticle.store(v, std::memory_order_relaxed); };
+        settings::add(s);
+    }
+
     bool gunInHand()
     {
         const uint32_t ped = g_rdram ? rd32(kPlayerPed) : 0;
@@ -327,6 +436,16 @@ namespace vcs::aim
             return false;
         const int8_t slot = static_cast<int8_t>(g_rdram[(ped + kPedSlot) & kRamMask]);
         return slot >= 0 && slot < 10 && isGun(rd32(ped + kPedWeapons + slot * 0x1Cu));
+    }
+
+    bool firearmInHand()
+    {
+        const uint32_t ped = g_rdram ? rd32(kPlayerPed) : 0;
+        if (!ped)
+            return false;
+        const int8_t slot = static_cast<int8_t>(g_rdram[(ped + kPedSlot) & kRamMask]);
+        const uint32_t type = slot >= 0 && slot < 10 ? rd32(ped + kPedWeapons + slot * 0x1Cu) : 0;
+        return isGun(type) || (type >= 30 && type <= 32);
     }
 
     bool aiming() { return g_active.load(std::memory_order_relaxed); }

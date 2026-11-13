@@ -38,6 +38,9 @@ namespace vcs::dualsense
     // Game thread, at each pad read (game/vcs_input.cpp): the player is firing a gun on foot (a gun in hand, attack
     // held), for the fire trigger's recoil buzz - the game does not rumble small-arms fire, so this drives it.
     void onShooting(bool firing);
+    // Game thread: how far R2 is pulled (0..1) when the gun in hand fires with "Shoot with the triggers" - where its
+    // trigger wall gives way (each gun class its own); 0: no firearm in hand.
+    float firePoint();
 
     // Clears the light bar and releases the triggers now (shutdown, the game paused in the background).
     void reset();

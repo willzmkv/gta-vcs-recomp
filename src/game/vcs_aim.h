@@ -24,6 +24,8 @@ namespace vcs::aim
 {
     // Before runtime.run(): the hooks (applyVcs).
     void install(PS2Runtime &runtime);
+    // Enhancements > Combat: the free-aim reticle, the game's circle or a dot (main.cpp, with the other settings).
+    void registerSettings();
 
     // What the pad read hands over, once per game frame (game thread).
     struct Input
@@ -49,6 +51,8 @@ namespace vcs::aim
 
     // The player's current weapon is one free aim works with (the guns: not melee, thrown, scopes, the camera).
     bool gunInHand();
+    // ... or a scoped one: the sniper rifles and the rocket launcher too (the triggers' fire point, the DualSense's feel).
+    bool firearmInHand();
     // Free aim is on (the game's free-aim lock is held, or a script's free aim is ours), as of the last pad read.
     bool aiming();
 

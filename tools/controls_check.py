@@ -124,6 +124,11 @@ class Check:
                     "cross %04x square %04x r2 %04x" % (trig + (rt,)))
             sides = (press("lb"), press("rb"))
             self.ok("GTA V buttons: L1 / R1 look left / right", sides == (L2, R2), "l1 %04x r1 %04x" % sides)
+            # Drive with the triggers alone: the D-pad looks left / right and, down, behind
+            self.setting("pad.v_layout", 0)
+            look = (press("left"), press("right"), press("down"))
+            self.ok("Drive with the triggers: the D-pad looks left / right / behind", look == (L2, R2, L2 | R2),
+                    "left %04x right %04x down %04x" % look)
             # the DualSense's triggers stay loose while driving (pad.ds_drive_feel off): shooting only
             ds = g.cmd("dualsense")
             self.ok("DualSense: no trigger resistance while driving", "driving=1" in ds and "trig=off" in ds, ds)
@@ -131,6 +136,66 @@ class Check:
             self.setting("pad.trigger_drive", 0)
             self.setting("pad.v_layout", 0)
             g.cmd("gamepad off")
+
+    def weapon_triggers(self):
+        """Shoot with the triggers: each gun class its own fire-trigger wall (the `dualsense` command's r2= - the Weapon
+        effect 0x25, its zones and strength), each round fired counted (shots=); Enhancements > Free aim reticle: Dot
+        rewrites the circle texture (sitem16: its CLUT's first colour) and Circle puts it back."""
+        g = self.g
+
+        def ds():
+            return dict(re.findall(r"(\w+)=(\S+)", g.cmd("dualsense")))
+
+        self.setting("pad.trigger_shoot", 1)
+        walls = {}
+        for weapon, want in ((19, "25140006"), (21, "25440007"), (27, "25240004"), (30, "25440007"), (32, "25840007")):
+            self.give(weapon)
+            g.wait_frames(5)
+            walls[weapon] = ds().get("r2")
+            if walls[weapon] != want:
+                walls[weapon] += "!=" + want
+        self.ok("trigger walls by gun: pistol, shotgun, SMG, sniper, rocket launcher", all("!" not in w for w in walls.values()),
+                str(walls))
+        self.give(19)
+        before = int(ds().get("shots", 0))
+        g.cmd("gamepad on")
+        for _ in range(3):
+            g.cmd("gamepad rt 1")
+            time.sleep(0.25)
+            g.cmd("gamepad rt 0")
+            time.sleep(0.4)
+        g.cmd("gamepad off")
+        fired = int(ds().get("shots", 0)) - before
+        self.ok("a round fired is seen (the trigger's kick)", fired >= 2, "%d of 3 pulls" % fired)
+        # out of ammo: the trigger slack (the effect Off, 0x05). The gun in hand left with one round (a second
+        # GIVE_WEAPON adds its rounds to the slot's, and may leave the weapon in hand as it was)
+        ped = g.player()[0]
+        at = ped + 0x578 + g.peek(ped + 0x789, 1)[0] * 0x1C
+        g.cmd("poke 0x%x 0100000001000000" % (at + 8))  # clip 1, ammo 1
+        g.wait_frames(3)
+        g.cmd("gamepad on")
+        g.cmd("gamepad rt 1")
+        time.sleep(1.5)
+        g.cmd("gamepad rt 0")
+        g.cmd("gamepad off")
+        g.wait_frames(5)
+        d = ds()
+        self.setting("pad.trigger_shoot", 0)
+        self.ok("out of ammo: the fire trigger goes slack", d.get("r2", "").startswith("05"), "r2 %s weapon %s" % (d.get("r2"), d.get("weapon")))
+
+        def clut0():
+            rec = g.u32(0x6EDD94)
+            return g.peek(g.u32(g.u32(rec) + 8) + 0x800, 4).hex()
+
+        circle = clut0()
+        self.setting("enhance.reticle", 1)
+        g.wait_frames(5)
+        dot = clut0()
+        self.setting("enhance.reticle", 0)
+        g.wait_frames(5)
+        back = clut0()
+        self.ok("free aim reticle: the dot, then the circle back", circle == "ffffff80" and dot == "00000000" and back == circle,
+                "circle %s dot %s back %s" % (circle, dot, back))
 
     def held(self, *keys):
         for k in keys:
@@ -1152,6 +1217,7 @@ class Check:
 
             self.mouse_and_driving()
             self.free_aim()
+            self.weapon_triggers()
             self.car_free_aim()
             self.forced_free_aim()
             self.mounted_gun()

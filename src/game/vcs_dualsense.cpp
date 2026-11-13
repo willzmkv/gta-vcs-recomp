@@ -78,6 +78,9 @@ namespace vcs::dualsense
             float mass = 0.0f;   // the vehicle's mass (moped ~350, car ~1500, truck ~10000, tank ~25000)
             float slip = 0.0f;   // 0 going straight .. 1 sliding fully sideways (traction loss)
             int weapon = 0;      // on foot: the gun type in hand (0 = none / not a gun)
+            int slot = -1;       // ... its slot, the rounds in its clip and in all (a shot counts one of them down)
+            uint32_t clip = 0, ammo = 0;
+            bool dry = false;    // ... reloading (its state 2) or out of ammo: the trigger goes slack
         };
 
         constexpr uint32_t kVehicleVel = 0x140u;  // the vehicle's velocity vector (3 floats), units per 1/50 s
@@ -87,11 +90,40 @@ namespace vcs::dualsense
         constexpr uint32_t kPedSlot = 0x789u;     // the active weapon slot (s8), game-internals.md 12c
         constexpr uint32_t kPedWeapons = 0x578u;  // slot n's weapon at +kPedWeapons + n*0x1C (type first)
 
-        // The gun types (game/vcs_aim.cpp isGun): 19..29 pistols / shotguns / SMGs / rifles, 33..35 flame-thrower /
-        // M249 / minigun. Automatics fire while held (SMGs, rifles, the Spaz, M249, minigun, flame-thrower); the rest
-        // (pistols, pump shotguns) are one shot a pull.
-        bool isGun(int t) { return (t >= 19 && t <= 29) || (t >= 33 && t <= 35); }
-        bool isAutomatic(int t) { return t == 22 || (t >= 24 && t <= 29) || (t >= 33 && t <= 35); }
+        // The firearms (game/vcs_aim.cpp firearmInHand): 19 / 20 pistols, 21..23 shotguns, 24..29 SMGs / rifles, 30 / 31
+        // sniper rifles, 32 rocket launcher, 33..35 flame-thrower / M249 / minigun. Each class feels its own way on the
+        // fire trigger (chooseTriggers).
+        bool isGun(int t) { return (t >= 19 && t <= 35); }
+        enum GunClass { GunPistol, GunShotgun, GunAutomatic, GunSniper, GunRocket };
+        GunClass gunClass(int t)
+        {
+            return t >= 21 && t <= 23 ? GunShotgun : t == 30 || t == 31 ? GunSniper : t == 32 ? GunRocket
+                 : t >= 24 ? GunAutomatic : GunPistol;
+        }
+        // The fire trigger per class: a wall from zone `start` that gives way at `end` (zones 0..9 of the pull; the
+        // shot goes as it gives way: firePoint), its strength 1..8, then each round's kick (amplitude, Hz, how long).
+        // Walls from the first fifth of the pull and strong (the player's ask, 2026-11-12: they began near the end).
+        struct GunFeel
+        {
+            int start, end, strength, kickAmp, kickHz;
+            int64_t kickNs;
+        };
+        GunFeel gunFeel(int t)
+        {
+            switch (gunClass(t))
+            {
+            case GunPistol:
+                return {2, 4, 7, 8, 12, 80000000};
+            case GunShotgun:
+            case GunSniper:
+                return {2, 6, 8, 8, 8, 160000000};
+            case GunRocket:
+                return {2, 7, 8, 8, 5, 260000000};
+            case GunAutomatic:
+                break;
+            }
+            return {2, 5, 5, 7, 16, 0}; // an automatic: a lighter wall, then a buzz while it fires
+        }
 
         GameState gameState()
         {
@@ -121,14 +153,22 @@ namespace vcs::dualsense
                     s.slip = std::min(1.0f, lateral / speedH);
                 }
             }
-            else // on foot: the gun in hand, for the fire trigger's weapon effect
+            else if (!vehicle) // on foot: the gun in hand, for the fire trigger's weapon effect (getting in or out of a
+                               // vehicle - states 0x3F / 0x3D, its pointer already set - is not: the player's report)
             {
                 const int slot = static_cast<int8_t>(rd8(ped + kPedSlot));
                 if (slot >= 0 && slot < 10)
                 {
-                    const int wt = static_cast<int>(rd32(ped + kPedWeapons + static_cast<uint32_t>(slot) * 0x1Cu));
+                    const uint32_t at = ped + kPedWeapons + static_cast<uint32_t>(slot) * 0x1Cu;
+                    const int wt = static_cast<int>(rd32(at));
                     if (isGun(wt))
+                    {
                         s.weapon = wt;
+                        s.slot = slot;
+                        s.clip = rd32(at + 8);  // (the slot's +0xC / +0x10 from its start, game-internals.md 12c)
+                        s.ammo = rd32(at + 12);
+                        s.dry = rd32(at + 4) == 2 || s.ammo == 0; // state: 0 ready, 1 firing, 2 reloading
+                    }
                 }
             }
             s.health = rdf(ped + kPedHealth);
@@ -173,6 +213,10 @@ namespace vcs::dualsense
         constexpr int64_t kActHoldNs = 110000000; // 110 ms
         std::atomic<int64_t> g_fireNs{0};    // when the player last fired a gun on foot (onShooting)
         constexpr int64_t kFireHoldNs = 90000000; // 90 ms: a buzz lingers past a single shot
+        // a round fired (the clip or the ammo counted down, the same gun in the same slot; main thread, noteShot)
+        std::atomic<int64_t> g_shotNs{0};
+        int g_shotWeapon = 0, g_shotSlot = -1;
+        uint32_t g_shotClip = 0, g_shotAmmo = 0;
         float g_prevSpeed = 0.0f;            // last frame's vehicle speed, for acceleration (main thread)
         int64_t g_prevSpeedNs = 0;
 
@@ -358,6 +402,23 @@ namespace vcs::dualsense
             return 1;
         }
 
+        // Main thread, each host frame: a round fired is the gun's clip or ammo counted down (the same gun in the same
+        // slot; a reload or a pickup counts up). Its kick on the fire trigger starts then (chooseTriggers).
+        std::atomic<uint32_t> g_shotsSeen{0}; // (the `dualsense` command)
+        void noteShot(const GameState &game)
+        {
+            if (game.weapon && game.weapon == g_shotWeapon && game.slot == g_shotSlot &&
+                (game.clip < g_shotClip || game.ammo < g_shotAmmo))
+            {
+                g_shotNs.store(nowNs(), std::memory_order_relaxed);
+                g_shotsSeen.fetch_add(1, std::memory_order_relaxed);
+            }
+            g_shotWeapon = game.weapon;
+            g_shotSlot = game.slot;
+            g_shotClip = game.clip;
+            g_shotAmmo = game.ammo;
+        }
+
         void chooseTriggers(const GameState &game, Trigger &right, Trigger &left)
         {
             right = triggerOff();
@@ -435,15 +496,18 @@ namespace vcs::dualsense
                 g_prevSpeedNs = 0;
                 // On foot, the fire trigger (R2) feels the gun - but only with "Shoot with the triggers" on, where R2
                 // is the trigger you actually pull. (Firing with Circle leaves R2 alone, so it does not buzz for a
-                // trigger you are not using.) A single-shot gun gives a firm wall that breaks at the shot, then kicks (a
-                // heavy, low buzz while it fires - the player found the wall alone gave no feel of the shot, 2026-11-12);
-                // an automatic rests on a light wall and buzzes while it fires.
-                if (g_cfg.triggerShoot && isGun(game.weapon))
+                // trigger you are not using.) Each class its own (gunFeel; the player's ask, 2026-11-12): a wall that
+                // breaks at the shot, then a kick for each round fired (noteShot) - a pistol's short and sharp, a
+                // shotgun's or a sniper rifle's behind a longer wall and heavier, the rocket launcher's the longest and
+                // heaviest; an automatic rests on a lighter wall and buzzes while it fires.
+                // Reloading or out of ammo the trigger goes slack - no wall, no kick: a gun that does not fire (the
+                // player's ask, 2026-11-12).
+                if (g_cfg.triggerShoot && isGun(game.weapon) && !game.dry)
                 {
-                    if (isAutomatic(game.weapon))
-                        right = firing ? triggerVibration(0, 7, 16) : triggerWeapon(3, 6, 4);
-                    else
-                        right = firing ? triggerVibration(0, 8, 10) : triggerWeapon(4, 7, 7);
+                    const GunFeel f = gunFeel(game.weapon);
+                    const int64_t shot = now - g_shotNs.load(std::memory_order_relaxed);
+                    const bool kick = gunClass(game.weapon) == GunAutomatic ? firing : shot >= 0 && shot < f.kickNs;
+                    right = kick ? triggerVibration(0, f.kickAmp, f.kickHz) : triggerWeapon(f.start, f.end, f.strength);
                 }
             }
         }
@@ -568,7 +632,8 @@ namespace vcs::dualsense
         rebuild();
 
         // dualsense -> ok family=<generic|ps4|ps5> led=<0|1> triggers=<0|1> wanted=<n>@ped+<hex> health=<h>
-        // driving=<0|1> ingame=<0|1>: the pad's features and the game reads that drive them (tools/).
+        // driving=<0|1> ingame=<0|1> ... trig=<on|off> r2=<the fire trigger's effect, first 4 bytes> shots=<rounds seen
+        // fired>: the pad's features and the game reads that drive them (tools/controls_check.py).
         ps2control::addCommand("dualsense", [](const std::string &, ps2control::Reply reply) {
             const GameState g = gameState();
             const char *fam = dsPadFamily() == GAMEPAD_FAMILY_PS5   ? "ps5"
@@ -581,10 +646,11 @@ namespace vcs::dualsense
             char text[288];
             std::snprintf(text, sizeof(text),
                           "ok family=%s led=%d triggers=%d wanted=%d@ped+0x%X health=%.0f driving=%d ingame=%d "
-                          "speed=%.2f vehtype=%d mass=%.0f slip=%.2f weapon=%d trig=%s",
+                          "speed=%.2f vehtype=%d mass=%.0f slip=%.2f weapon=%d trig=%s r2=%02x%02x%02x%02x shots=%u",
                           fam, gamepadHasLED() ? 1 : 0, gamepadHasTriggerEffects() ? 1 : 0, g.wanted, g_wantedOffset,
                           g.health, g.driving ? 1 : 0, g.inGame ? 1 : 0, g.speed, g.vehType, g.mass, g.slip, g.weapon,
-                          trigOn ? "on" : "off");
+                          trigOn ? "on" : "off", right[0], right[1], right[2], right[3],
+                          g_shotsSeen.load(std::memory_order_relaxed));
             reply(text);
         });
         std::fprintf(stderr, "[dualsense] ready\n");
@@ -604,6 +670,13 @@ namespace vcs::dualsense
             g_fireNs.store(nowNs(), std::memory_order_relaxed);
     }
 
+    float firePoint()
+    {
+        const GameState game = gameState();
+        // the wall's last zone and half the next: the shot as it gives way, on any pad (the DualSense or not)
+        return game.weapon ? (gunFeel(game.weapon).end + 0.5f) / 10.0f : 0.0f;
+    }
+
     void onHostFrame(bool menuOpen)
     {
         const DsPadFamily family = dsPadFamily();
@@ -613,6 +686,9 @@ namespace vcs::dualsense
             g_lastFamily = family;
             applySpeaker();
         }
+
+        const GameState game = gameState();
+        noteShot(game); // (also in hidden runs: the `dualsense` command counts the shots)
 
         const bool canLED = gamepadHasLED();
         const bool canTriggers = gamepadHasTriggerEffects();
@@ -624,8 +700,6 @@ namespace vcs::dualsense
             releaseNow();
             return;
         }
-
-        const GameState game = gameState();
 
         if (canLED && !menuOpen) // a host menu leaves the light bar at its last colour
         {
