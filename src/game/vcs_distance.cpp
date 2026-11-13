@@ -184,8 +184,8 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         // (trimBands); walkers coming in become real peds (the handover). Graphics > Distance and population > Crowd bands
         // (world.crowd_bands, VCS_CROWD_BANDS; off).
         std::atomic<bool> g_bands{false};
-        const int g_bandNear = static_cast<int>(envFloat("VCS_CROWD_NEAR", 20.0f));
-        const int g_bandMid = static_cast<int>(envFloat("VCS_CROWD_MID", 20.0f));
+        const int g_bandNear = static_cast<int>(envFloat("VCS_CROWD_NEAR", 25.0f));
+        const int g_bandMid = static_cast<int>(envFloat("VCS_CROWD_MID", 25.0f));
         constexpr float kBandNear = 100.0f, kBandEdge = 200.0f, kBandOut = 210.0f, kBandMidSpawn = 155.0f;
         constexpr float kBandAdoptMax = 450.0f; // past it a ped in view is a few pixels: faded, not made a walker
         std::atomic<uint32_t> g_births{0}; // popview's births= (the ped count's rises, once a game frame)
