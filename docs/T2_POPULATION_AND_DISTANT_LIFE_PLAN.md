@@ -4,6 +4,9 @@
 >
 > This document defines the mandatory behavior, distance bands, invariants, root causes of historical regressions, and implementation plan for real population vs. decorative distant life (`Distant traffic`, `Distant crowds`, and `Distant lights`/coronas).
 > **Every future agent touching population, draw distance, or distant proxies MUST follow these rules without exception.**
+>
+> **2026-11-13:** for peds, while the crowd bands are on (`VCS_CROWD_BANDS`), rules 1-2 give way to
+> [CROWD_BANDS_PLAN.md](CROWD_BANDS_PLAN.md) (walkers from 200 m, handed over to real peds). Cars keep them.
 
 ---
 

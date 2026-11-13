@@ -1779,3 +1779,14 @@ turned stick (the pull-in toward the player), through the game's own switch for 
 - **No hand ports where the game's code can be copied.** The node loop's 52 functions are the recompiled code itself,
   rewritten only where it calls the runtime (tools/anim_worker_gen.py): no port to get wrong, and the generator refuses
   anything that is not plain code.
+
+## 2026-11-13 - Crowd bands: few real peds near, walkers far, handed over at 200 m (the user's plan)
+
+- **Fewer real peds, not faster ones.** The raised population costs ~6 ms of the game thread (its AI and its own
+  render per ped) and the per-ped work stays on one thread (the entry above). The player's plan: ~15-20 real peds within
+  100 m, ~20 at 100-200 m, decorative walkers from 200 m out, a walker becoming a real ped (same model, place, heading)
+  as it comes nearer and back as it goes. docs/CROWD_BANDS_PLAN.md has the steps.
+- **The T2 rules give way for peds while the bands are on.** Walkers strictly past the real band at >= 310-350 m and a
+  real band never shrunk (T2_POPULATION_AND_DISTANT_LIFE_PLAN.md rules 1-2) were made because walkers met real peds
+  with no handover. With the handover the meeting is the design. Cars keep the T2 rules. Off by default
+  (`VCS_CROWD_BANDS`) until the handover is checked in pictures.
