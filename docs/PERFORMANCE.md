@@ -1307,6 +1307,20 @@ peds, drivers included, and those in view within 200 m):
   "farthest in view" for both rings (game-internals.md "The ped spot finder"), so closing the in-view ring as (1e6, 0)
   closed the out-of-view one too. Closed now as nearest = farthest at the out-of-view reach.
 
+**Steps 3-4 in (walkers from 200 m, the handover both ways; Graphics > Distance and population > Crowd bands)**, the
+same benchmark, two alternating rounds, the machine still busy:
+
+| | peds (in view < 200 m) | frame | game thread | p99 | frames > 25 ms |
+|---|---|---|---|---|---|
+| bands off | 113 (43) | 14.15 ms | 12.16 ms | 25.8 ms | 92 |
+| bands on | 70 (25) | 13.40 ms | 10.82 ms | 30.2 ms | 182 |
+
+~350 walkers became real peds on each drive (none the other way: driving on, the peds left behind leave out of view
+and fade). Draws a frame the same either way (~3.7k, native ~2.7k): the 160 walkers add none to speak of. The slow
+frames are again waits for the pipeline with the game's own work normal (`worst`: game 8-17 ms, wait 27-87 ms) - both
+modes have them, the bands twice as many. Not resolved on this machine; to measure on a quiet one before the bands
+become the default (CROWD_BANDS_PLAN.md step 5).
+
 At a fixed spot (Little Havana, the free camera 12 m up looking north, 4K) the frame stays ~18-22 ms whatever the crowd:
 there the GPU at 4K is the limit (the game's own population: 18 ms; the full one at 1080p: 17 ms).
 
