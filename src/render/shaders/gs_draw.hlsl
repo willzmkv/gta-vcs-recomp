@@ -141,19 +141,45 @@ struct LitIn
     float3 nrm : NORMAL;     // skinned normal
 };
 
-// VCS lit / skinned models (VU1 0x0030 with stages 0x5a5 / 0x0da / 0x4ff / 0x2b6): see docs/game-internals.md
-VSOut vs_lit(LitIn i)
+// VCS lit / skinned models (VU1 0x0030 with stages 0x5a5 / 0x0da / 0x4ff / 0x2b6): see docs/game-internals.md.
+// m: the GS window matrix rows, c: the clip-test matrix rows, l: the light direction rows (nat 0-3, 8-11, 12-14)
+VSOut litVertex(LitIn i, float4 m[4], float4 c4[4], float4 l[3])
 {
     VSOut o = (VSOut)0;
-    const float4 S = nat[0] * i.pos.x + nat[1] * i.pos.y + nat[2] * i.pos.z + nat[3];
-    const float4 C = nat[8] * i.pos.x + nat[9] * i.pos.y + nat[10] * i.pos.z + nat[11];
+    const float4 S = m[0] * i.pos.x + m[1] * i.pos.y + m[2] * i.pos.z + m[3];
+    const float4 C = c4[0] * i.pos.x + c4[1] * i.pos.y + c4[2] * i.pos.z + c4[3];
     nativePosition(S, C, nat[4].xyz * i.uv.x + nat[5].xyz * i.uv.y + nat[6].xyz * i.uv.z, o);
-    const float4 d = max(nat[12] * i.nrm.x + nat[13] * i.nrm.y + nat[14] * i.nrm.z, 0.0);
+    const float4 d = max(l[0] * i.nrm.x + l[1] * i.nrm.y + l[2] * i.nrm.z, 0.0);
     const float4 c = trunc(min(nat[20], nat[15] * d.x + nat[16] * d.y + nat[17] * d.z + nat[18] * d.w + nat[19]));
     o.col = float4(c.rgb, nat[21].x) / 255.0;
     o.colFlat = o.col;
     o.fog = nativeFog(nat[7], S.w);
     return o;
+}
+
+VSOut vs_lit(LitIn i)
+{
+    float4 m[4] = {nat[0], nat[1], nat[2], nat[3]};
+    float4 c[4] = {nat[8], nat[9], nat[10], nat[11]};
+    float4 l[3] = {nat[12], nat[13], nat[14]};
+    return litVertex(i, m, c, l);
+}
+
+// Instanced (the distant proxies, DISTANT_LIFE.md): one draw of a template's part for many proxies. Per instance the 11
+// rows that differ - window matrix, clip-test matrix, light directions - in that order; the rest from nat.
+#define VCS_LIT_INSTANCES 64
+cbuffer NativeInstances : register(b2)
+{
+    float4 inst[VCS_LIT_INSTANCES * 11];
+};
+
+VSOut vs_lit_inst(LitIn i, uint id : SV_InstanceID)
+{
+    const uint b = id * 11;
+    float4 m[4] = {inst[b], inst[b + 1], inst[b + 2], inst[b + 3]};
+    float4 c[4] = {inst[b + 4], inst[b + 5], inst[b + 6], inst[b + 7]};
+    float4 l[3] = {inst[b + 8], inst[b + 9], inst[b + 10]};
+    return litVertex(i, m, c, l);
 }
 
 Texture2D<float4> tex : register(t0);

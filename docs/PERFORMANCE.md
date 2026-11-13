@@ -1187,6 +1187,33 @@ when it came into the game's own draw - and past 110 / 180 m peds moved 15 / 10 
 No real ped proxy was ever shown as another model (the `proxies` command's `realorphans=`: 0 at both spots). The cost
 of the farther tiers is to be measured again.
 
+### 47. The distant proxies instanced (2026-11-13)
+
+Every proxy - a distant walker, a far car, a real ped past 150 m - was one native draw per part of its template: the
+template's vertices copied into the frame again (a skinned ped's are transient), the GS stage's state work, a constant
+buffer update and a driver call each, on the AMD D3D11 driver the most expensive part (user-hardware). Now a template's
+part is drawn once for all its proxies: `GSNativeDraw::instances` carries per proxy the 11 rows that differ (the GS
+window matrix, the clip matrix, the light directions; 44 floats), up to 64 a draw; `vs_lit_inst` reads them from
+cbuffer b2 by SV_InstanceID; one `drawInstanced` (D3D11, D3D12, Vulkan). Culling stays per proxy on the worker.
+`VCS_PROXY_INSTANCING=0` draws them one by one (PS2RECOMP_PATCHES.md).
+
+Checked: proxies lit red (`VCS_DISTANT_TINT=1`) along the avenue by day, 3 pictures each: 605-675 red pixels instanced,
+593-607 one by one; the same scene otherwise.
+
+**Test runs had no population.** Hidden runs play at 30 fps; with the player's `world.fps_target=60` the population
+governor took its budget to 0 and every probe had the original ~7 peds (cap 25). Runs about the population now take
+`VCS_POPULATION_FPS=0 VCS_FPS=60`, the player's card copy, `PS2X_HIDDEN_WINDOW=3840x2160` (their 4K, `display.scale=0`)
+and ~100 s at the spot for the pool to fill (`distancestate`: peds 127/127). So, at the player's Little Havana spot,
+one round, the frame held (`pause on`):
+
+| | draws | main (render) | worker | GS stage | host fps |
+|---|---|---|---|---|---|
+| instanced | 3973 | 1.0 ms | 11.0 ms | 13.0 ms | 54 |
+| one by one | 7080 | 14.8 ms | 33.5 ms | 33.7 ms | 20 |
+
+One round only (the machine was then busy with other work): to be measured again with alternating rounds. The
+sections above measured with the population governor at work may have measured less population than they say.
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker

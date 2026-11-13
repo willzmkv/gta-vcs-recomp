@@ -1334,6 +1334,15 @@ namespace rhi
                 }
             }
 
+            void drawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex) override
+            {
+                if (vertexCount && instanceCount && prepareDraw(false))
+                {
+                    m_cmd->DrawInstanced(vertexCount, instanceCount, firstVertex, 0);
+                    ++g_stats.draws;
+                }
+            }
+
             void drawIndexed(uint32_t indexCount, uint32_t firstIndex, int32_t baseVertex) override
             {
                 if (indexCount && prepareDraw(true))

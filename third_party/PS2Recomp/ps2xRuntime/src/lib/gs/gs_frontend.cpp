@@ -199,9 +199,12 @@ namespace
             break;
         case kGsNative:
         {
+            // [gta-recomp] a: bit 0 the vertices follow the draw, bit 1 the instances follow them (GS::submitNative)
             GSNativeDraw draw;
             std::memcpy(&draw, payload, sizeof(draw));
-            draw.vertices = c.a ? payload + sizeof(GSNativeDraw) : nullptr;
+            const uint32_t vertexBytes = (c.a & 1u) ? draw.vertexCount * draw.vertexStride : 0u;
+            draw.vertices = (c.a & 1u) ? payload + sizeof(GSNativeDraw) : nullptr;
+            draw.instances = (c.a & 2u) ? reinterpret_cast<const float *>(payload + sizeof(GSNativeDraw) + vertexBytes) : nullptr;
             gs.submitNative(c.b, draw);
             break;
         }
@@ -2193,7 +2196,20 @@ bool GS::submitNative(uint64_t prim, const GSNativeDraw &draw)
             return false;
         }
         const uint32_t vertexBytes = draw.vertices ? draw.vertexCount * draw.vertexStride : 0u;
-        if (toGsStage(kGsNative, &draw, sizeof(GSNativeDraw), draw.vertices ? 1u : 0u, prim, draw.vertices, vertexBytes))
+        if (draw.instanceCount && draw.instances)
+        {
+            // [gta-recomp] an instanced draw: its instances after its vertices, in one payload
+            const uint32_t instanceBytes = draw.instanceCount * GSNativeDraw::kInstanceFloats * 4u;
+            static thread_local std::vector<uint8_t> data;
+            data.resize(size_t(vertexBytes) + instanceBytes);
+            if (vertexBytes)
+                std::memcpy(data.data(), draw.vertices, vertexBytes);
+            std::memcpy(data.data() + vertexBytes, draw.instances, instanceBytes);
+            if (toGsStage(kGsNative, &draw, sizeof(GSNativeDraw), (draw.vertices ? 1u : 0u) | 2u, prim, data.data(),
+                          vertexBytes + instanceBytes))
+                return true;
+        }
+        else if (toGsStage(kGsNative, &draw, sizeof(GSNativeDraw), draw.vertices ? 1u : 0u, prim, draw.vertices, vertexBytes))
             return true;
     }
     std::lock_guard<ps2x::RecursiveMutex> lock(m_stateMutex);

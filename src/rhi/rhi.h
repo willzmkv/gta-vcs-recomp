@@ -340,6 +340,8 @@ namespace rhi
         virtual void setTexture(uint32_t slot, Texture *texture, Sampler *sampler) = 0; // pixel shader
         virtual void setConstants(uint32_t slot, Buffer &buffer) = 0;                    // vertex + pixel shader
         virtual void draw(uint32_t vertexCount, uint32_t firstVertex = 0) = 0;
+        // the vertices `instanceCount` times; the vertex shader tells them apart by SV_InstanceID (0..instanceCount-1)
+        virtual void drawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex = 0) = 0;
         virtual void drawIndexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t baseVertex = 0) = 0;
 
         virtual void pushMarker(const char *name) = 0; // debugger / profiler annotations

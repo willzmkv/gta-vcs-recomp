@@ -1113,6 +1113,14 @@ namespace rhi
                 }
             }
 
+            void drawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex) override
+            {
+                if (!vertexCount || !instanceCount || !prepareDraw(false))
+                    return;
+                vkCmdDraw(m_cmd, vertexCount, instanceCount, firstVertex, 0);
+                ++m_stats.draws;
+            }
+
             void drawIndexed(uint32_t indexCount, uint32_t firstIndex, int32_t baseVertex) override
             {
                 if (!indexCount || !prepareDraw(true))

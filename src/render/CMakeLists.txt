@@ -69,6 +69,7 @@ vcs_shader(shaders/present.hlsl ps_main ps_5_0 kPresentPS present_ps.h)
 vcs_shader(shaders/gs_draw.hlsl vs_main vs_5_0 kGsDrawVS gs_draw_vs.h)
 vcs_shader(shaders/gs_draw.hlsl vs_world vs_5_0 kGsWorldVS gs_world_vs.h)
 vcs_shader(shaders/gs_draw.hlsl vs_lit vs_5_0 kGsLitVS gs_lit_vs.h)
+vcs_shader(shaders/gs_draw.hlsl vs_lit_inst vs_5_0 kGsLitInstVS gs_lit_inst_vs.h)
 # the GS pixel shader per texture read (SAMPLE_MODE 0..6, gs_draw.hlsl) and with / without the dual-source output
 foreach(mode RANGE 0 6)
     vcs_shader(shaders/gs_draw.hlsl ps_main ps_5_0 kGsDrawPS${mode} gs_draw_ps${mode}.h DUAL_SOURCE=0 SAMPLE_MODE=${mode})

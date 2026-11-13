@@ -25,6 +25,7 @@ namespace render
         rhi::ShaderCode uiPS;
         // drawPS without the depth output (SHADER_DEPTH=0): the rasterised depth, early depth rejection on
         rhi::ShaderCode drawPSNoDepth[kSampleModes][2];
+        rhi::ShaderCode litInstVS;    // litVS instanced: per-instance matrices and lights (the distant proxies)
     };
 
     // The backend's shaders (empty for the null backend, which never runs them).

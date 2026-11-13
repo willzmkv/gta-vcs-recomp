@@ -457,6 +457,7 @@ namespace
         bool transient = false;
         uint32_t transientOffset = 0; // bytes into the frame's nativeBytes
         float constants[128] = {};    // the kind's 124 + (XYOFFSET x, y in pixels, Z scale, 0)
+        uint32_t instanceFirst = 0, instanceCount = 0; // [gta-recomp] instanced (vs_lit_inst): floats into nativeInstances
     };
 
     struct Frame
@@ -474,6 +475,7 @@ namespace
         std::vector<uint64_t> meshDeletes;
         std::vector<NativeDrawCmd> nativeDraws;
         std::vector<uint8_t> nativeBytes; // transient native vertices
+        std::vector<float> nativeInstances; // [gta-recomp] instanced native draws' per-instance rows
         uint64_t nativeVertices = 0;
         bool had3d = false; // [gta-recomp] any depth-tested or native draw (widescreen presentation)
         int64_t inputNs = 0; // [gta-recomp] the input snapshot the game read for this frame (gsHwShownInputNs)
@@ -881,6 +883,8 @@ namespace
             m_drawCb = m_dev.createBuffer({sizeof(DrawConstants), rhi::BufferUsage::Constant, true, "gs draw constants"});
             m_quadCb = m_dev.createBuffer({sizeof(QuadConstants), rhi::BufferUsage::Constant, true, "gs quad constants"});
             m_worldCb = m_dev.createBuffer({128u * sizeof(float), rhi::BufferUsage::Constant, true, "gs native draw constants"});
+            m_instanceCb = m_dev.createBuffer({GSNativeDraw::kMaxInstances * GSNativeDraw::kInstanceFloats * sizeof(float),
+                                               rhi::BufferUsage::Constant, true, "gs native instances"});
             m_point = m_dev.createSampler({rhi::Filter::Nearest, rhi::Wrap::Clamp, rhi::Wrap::Clamp});
             m_linear = m_dev.createSampler({rhi::Filter::Linear, rhi::Wrap::Clamp, rhi::Wrap::Clamp});
             for (int u = 0; u < 2; ++u) // [gta-recomp] the GS bilinear's texels by Gather, per wrap mode (U, V: repeat / clamp)
@@ -1140,6 +1144,12 @@ namespace
                         std::snprintf(name, sizeof(name), "native kind %u fbp %u%s%s%s", n.kind, n.s.fbp, n.s.tme ? " tex" : "",
                                       n.s.abe ? " blend" : "", n.s.zte ? "" : " noz");
                         m_dev.pushMarker(name);
+                    }
+                    if (n.instanceCount && m_instanceCb) // [gta-recomp] its instances' rows, for vs_lit_inst
+                    {
+                        m_dev.updateBuffer(*m_instanceCb, f.nativeInstances.data() + n.instanceFirst,
+                                           size_t(n.instanceCount) * GSNativeDraw::kInstanceFloats * sizeof(float));
+                        m_dev.setConstants(2, *m_instanceCb);
                     }
                     draw(n.s, 0, n.drawCount, &n);
                     if (timed)
@@ -1665,10 +1675,11 @@ namespace
                 // [gta-recomp] the pixel shader built for the draw's texture read (drawSampleMode)
                 // [gta-recomp] ... and without the depth output where the rasterised depth does (shaderDepth)
                 d.pixel = (shaderDepth() ? sh.drawPS : sh.drawPSNoDepth)[sample < render::GsShaders::kSampleModes ? sample : 0][dual ? 1 : 0];
-                if (mode == 4)
+                if (mode == 4 || mode == 5)
                 {
-                    // [gta-recomp] native VCS lit model (GSNativeDraw::VcsLit): skinned on the CPU, lit / transformed here
-                    d.vertex = sh.litVS;
+                    // [gta-recomp] native VCS lit model (GSNativeDraw::VcsLit): skinned on the CPU, lit / transformed here;
+                    // mode 5 instanced (the distant proxies: per-instance matrices and lights, gs_draw.hlsl vs_lit_inst)
+                    d.vertex = mode == 5 ? sh.litInstVS : sh.litVS;
                     d.attributes = {
                         {"POSITION", 0, rhi::VertexFormat::Float3, 0},
                         {"TEXCOORD", 0, rhi::VertexFormat::Float3, 12},
@@ -2540,7 +2551,10 @@ namespace
                 if (native)
                     m_dev.setConstants(1, *m_worldCb);
                 m_dev.setTexture(0, tex, hwSampler);
-                m_dev.draw(count, first);
+                if (native && native->instanceCount) // [gta-recomp] one draw for all its instances (vs_lit_inst)
+                    m_dev.drawInstanced(count, native->instanceCount, first);
+                else
+                    m_dev.draw(count, first);
             };
             if (s.ate && s.atst != 1u && s.afail != 0u)
             {
@@ -2574,6 +2588,7 @@ namespace
         uint32_t m_scale;
         bool m_ready = false;
         std::unique_ptr<rhi::Buffer> m_vb, m_drawCb, m_quadCb, m_worldCb;
+        std::unique_ptr<rhi::Buffer> m_instanceCb; // [gta-recomp] an instanced native draw's rows (gs_draw.hlsl b2)
         std::vector<uint8_t> m_drawCbLast, m_worldCbLast; // [gta-recomp] updateConstants: what the two buffers hold
         std::unordered_map<uint64_t, std::unique_ptr<rhi::Buffer>> m_meshes; // native draws' vertex data
         std::unique_ptr<rhi::Buffer> m_nativeVb; // transient native vertices of the frame
@@ -4393,6 +4408,7 @@ namespace
             f.meshDeletes.clear();
             f.nativeDraws.clear();
             f.nativeBytes.clear();
+            f.nativeInstances.clear();
             f.nativeVertices = 0;
             f.had3d = false;
             f.wide3d = -1;
@@ -4410,7 +4426,8 @@ namespace
         bool AcceptsNative(const GSNativeDraw &draw) const override
         {
             return (draw.kind == GSNativeDraw::VcsWorld || draw.kind == GSNativeDraw::VcsLit) && draw.drawCount && draw.vertexCount &&
-                   draw.constantCount <= 124u;
+                   draw.constantCount <= 124u &&
+                   (!draw.instanceCount || (draw.kind == GSNativeDraw::VcsLit && draw.instanceCount <= GSNativeDraw::kMaxInstances));
         }
 
         bool SubmitNative(const GSDrawState &state, const GSNativeDraw &draw) override
@@ -4422,7 +4439,7 @@ namespace
             HwState s{};
             if (!buildState(batch, s))
                 return true; // ZTST NEVER: nothing drawn
-            s.mode = draw.kind == GSNativeDraw::VcsLit ? 4 : 3; // native strip kinds (pipeline / merge key only)
+            s.mode = draw.kind == GSNativeDraw::VcsLit ? (draw.instanceCount ? 5 : 4) : 3; // native strip kinds (pipeline / merge key only)
             if (s.zte && s.ztst != 1u && s.zbp != s.fbp)
             {
                 DepthInfo &di = m_depthBufs[s.zbp];
@@ -4441,6 +4458,13 @@ namespace
             nd.drawCount = draw.drawCount;
             nd.transient = draw.transient;
             std::memcpy(nd.constants, draw.constants, sizeof(float) * draw.constantCount);
+            if (draw.instanceCount && draw.instances) // [gta-recomp] the instances' rows, for the draw's execution
+            {
+                nd.instanceFirst = static_cast<uint32_t>(f.nativeInstances.size());
+                nd.instanceCount = draw.instanceCount;
+                f.nativeInstances.insert(f.nativeInstances.end(), draw.instances,
+                                         draw.instances + size_t(draw.instanceCount) * GSNativeDraw::kInstanceFloats);
+            }
             const float zs = (s.zpsm == GS_PSM_Z32) ? (1.0f / 4294967296.0f)
                            : (s.zpsm == GS_PSM_Z16 || s.zpsm == GS_PSM_Z16S) ? (1.0f / 65536.0f)
                                                                              : (1.0f / 16777216.0f);
@@ -4535,10 +4559,10 @@ namespace
         {
             NativeGroup &g = m_group;
             if (!nativeMerge() || g.frame != &f || g.cmd + 1u != f.cmds.size() || f.cmds.back().type != CmdType::NativeDraw ||
-                g.stride != draw.vertexStride || !draw.drawCount || draw.vertexStride > 64u)
+                g.stride != draw.vertexStride || !draw.drawCount || draw.vertexStride > 64u || draw.instanceCount)
                 return false;
             NativeDrawCmd &p = f.nativeDraws[f.cmds.back().index];
-            if (p.kind != nd.kind || p.transient != nd.transient || std::memcmp(&p.s, &nd.s, sizeof(HwState)) != 0 ||
+            if (p.kind != nd.kind || p.transient != nd.transient || p.instanceCount || std::memcmp(&p.s, &nd.s, sizeof(HwState)) != 0 ||
                 std::memcmp(p.constants, nd.constants, sizeof(nd.constants)) != 0 || !p.drawCount)
                 return false;
             const size_t stride = g.stride;

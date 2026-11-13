@@ -24,6 +24,11 @@ struct GSNativeDraw
     uint32_t drawCount = 0;         // vertices drawn (a strip)
     float constants[124] = {};      // the vertex program's parameters (layout per kind, gs_draw.hlsl cbuffer Native)
     uint32_t constantCount = 0;
+    // VcsLit drawn once per instance (vs_lit_inst; the distant proxies): per instance kInstanceFloats - the window
+    // matrix, the clip-test matrix and the light direction rows (constants 0-15, 32-47, 48-59) - the rest shared
+    static constexpr uint32_t kInstanceFloats = 44, kMaxInstances = 64; // (gs_draw.hlsl VCS_LIT_INSTANCES)
+    const float *instances = nullptr;
+    uint32_t instanceCount = 0;     // 0: a plain draw
 };
 
 class GSRasterBackend

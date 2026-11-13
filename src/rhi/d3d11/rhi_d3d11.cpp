@@ -853,6 +853,11 @@ namespace rhi
 
             void draw(uint32_t vertexCount, uint32_t firstVertex) override { m_context->Draw(vertexCount, firstVertex); }
 
+            void drawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex) override
+            {
+                m_context->DrawInstanced(vertexCount, instanceCount, firstVertex, 0);
+            }
+
             void drawIndexed(uint32_t indexCount, uint32_t firstIndex, int32_t baseVertex) override
             {
                 m_context->DrawIndexed(indexCount, firstIndex, baseVertex);

@@ -2153,6 +2153,55 @@ namespace
     // by its key), GS state and colours. Culled by the mesh's box. Not the VU's numbers (nothing compares them).
     uint64_t g_proxyDraws = 0, g_proxyCulled = 0, g_proxyNotOnCar = 0;
 
+    // PERFORMANCE.md 47: a template's part for all its proxies in one instanced draw (gs_draw.hlsl vs_lit_inst), up to
+    // GSNativeDraw::kMaxInstances at a time - each proxy was a native draw of its own (the GS stage's and the driver's
+    // work per draw, the template's vertices copied each time). Per instance the rows that differ: the GS window matrix
+    // (constants 0-15), the clip matrix (32-47), the light directions (48-59). VCS_PROXY_INSTANCING=0: a draw each.
+    bool proxyInstancing()
+    {
+        static const bool on = !(std::getenv("VCS_PROXY_INSTANCING") && std::getenv("VCS_PROXY_INSTANCING")[0] == '0');
+        return on;
+    }
+    struct ProxyBatch
+    {
+        uint64_t prim = 0;
+        GSNativeDraw *e = nullptr;
+        std::vector<float> rows;
+
+        // this proxy's rows (from the draw's constants as set up for it); false: the batch could not be drawn
+        bool add()
+        {
+            const float *k = e->constants;
+            rows.insert(rows.end(), k, k + 16);
+            rows.insert(rows.end(), k + 32, k + 60);
+            return rows.size() / GSNativeDraw::kInstanceFloats < GSNativeDraw::kMaxInstances || flush();
+        }
+        bool flush()
+        {
+            const uint32_t n = static_cast<uint32_t>(rows.size() / GSNativeDraw::kInstanceFloats);
+            if (!n)
+                return true;
+            e->instances = rows.data();
+            e->instanceCount = n;
+            bool ok = ps2hle::gs()->submitNative(prim, *e);
+            e->instances = nullptr;
+            e->instanceCount = 0;
+            if (!ok) // refused (no instanced shader): one draw each, the rows put back into the constants
+            {
+                ok = true;
+                for (uint32_t i = 0; ok && i < n; ++i)
+                {
+                    const float *r = rows.data() + size_t(i) * GSNativeDraw::kInstanceFloats;
+                    std::memcpy(e->constants, r, 16 * sizeof(float));
+                    std::memcpy(e->constants + 32, r + 16, 28 * sizeof(float));
+                    ok = ps2hle::gs()->submitNative(prim, *e);
+                }
+            }
+            rows.clear();
+            return ok;
+        }
+    };
+
     void drawProxies(const uint8_t *vu, uint64_t prim, const GSNativeDraw &d, uint32_t posBase, uint32_t count,
                      const vcs::distant::Proxies &px)
     {
@@ -2213,6 +2262,10 @@ namespace
         std::memcpy(tmp, vu, sizeof(tmp));
         GSNativeDraw e = d;
         float *k = e.constants;
+        static thread_local ProxyBatch batch;
+        batch.prim = prim;
+        batch.e = &e;
+        batch.rows.clear();
         for (uint32_t n = 0; n < px.count; ++n)
         {
             const float *P = px.matrices + size_t(n) * 16u;
@@ -2290,11 +2343,12 @@ namespace
                 k[76] = 1.0f;
                 k[77] = k[78] = 0.0f;
             }
-            if (!ps2hle::gs()->submitNative(prim, e))
+            if (proxyInstancing() ? !batch.add() : !ps2hle::gs()->submitNative(prim, e))
                 return;
             ++g_proxyDraws;
             vcs::distant::noteProxy(0);
         }
+        batch.flush();
     }
 
     // proxiesOnly: the draw is culled or drawn by another path (the env pipeline's clipper) - only its proxies
@@ -2482,6 +2536,10 @@ namespace
         std::memcpy(tmp, vu, sizeof(tmp));
         GSNativeDraw e = d;
         float *k = e.constants;
+        static thread_local ProxyBatch batch;
+        batch.prim = prim;
+        batch.e = &e;
+        batch.rows.clear();
         for (uint32_t n = 0; n < px.count; ++n)
         {
             const float *P = px.matrices + size_t(n) * 16u;
@@ -2570,10 +2628,11 @@ namespace
                 k[76] = 1.0f;
                 k[77] = k[78] = 0.0f;
             }
-            if (!ps2hle::gs()->submitNative(prim, e))
+            if (proxyInstancing() ? !batch.add() : !ps2hle::gs()->submitNative(prim, e))
                 return;
             vcs::distant::noteProxy(0);
         }
+        batch.flush();
     }
 
     bool drawNativeLit(const ps2hle::MscalContext &c)
