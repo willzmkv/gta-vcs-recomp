@@ -184,9 +184,9 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         // (trimBands); walkers coming in become real peds (the handover). Graphics > Distance and population > Crowd bands
         // (world.crowd_bands, VCS_CROWD_BANDS; off).
         std::atomic<bool> g_bands{false};
-        const int g_bandNear = static_cast<int>(envFloat("VCS_CROWD_NEAR", 25.0f));
-        const int g_bandMid = static_cast<int>(envFloat("VCS_CROWD_MID", 25.0f));
-        constexpr float kBandNear = 100.0f, kBandEdge = 200.0f, kBandOut = 210.0f, kBandMidSpawn = 155.0f;
+        const int g_bandNearBase = static_cast<int>(envFloat("VCS_CROWD_NEAR", 25.0f));
+        const int g_bandMidBase = static_cast<int>(envFloat("VCS_CROWD_MID", 25.0f));
+        constexpr float kBandNear = 100.0f, kBandEdge = 200.0f, kBandOut = 210.0f, kBandMidSpawn = 155.0f, kBandMidFade = 120.0f;
         constexpr float kBandAdoptMax = 450.0f; // past it a ped in view is a few pixels: faded, not made a walker
         std::atomic<uint32_t> g_births{0}; // popview's births= (the ped count's rises, once a game frame)
         uint32_t g_carRing = 0;
@@ -308,6 +308,16 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         }
         float trafficDensity() { return governed(percent(g_traffic), carDistance()); }
         float pedestrianDensity() { return governed(percent(g_pedestrians), pedDensityDistance()); }
+        // the crowd bands' numbers: Pedestrian density's - VCS_CROWD_NEAR / _MID (25) at its 50 (2.5 x the game's),
+        // 0.4 of them at 0, 1.6 at 100 - and towards the 0's with the frame-rate target's budget (2026-11-13: fixed at 25,
+        // neither slider did anything to the peds with the bands on)
+        int bandTarget(int base)
+        {
+            const float least = base * 0.4f, want = base * percent(g_pedestrians) / 2.5f;
+            return static_cast<int>(std::lround(least + (want - least) * g_budget));
+        }
+        int bandNear() { return bandTarget(g_bandNearBase); }
+        int bandMid() { return bandTarget(g_bandMidBase); }
 
         // GenerateOneRandomCar gives up on a found spot unless rand() & 15 <= the road's density class value (the lower
         // of the link's two nodes): 1, 5, 8 and 16 chances in 16. More cars over a larger area need more spots taken -
@@ -427,8 +437,12 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             if (g_bandsLog)
                 watchHandovers();
             const Bands bands = bandCounts();
-            const bool over = bands.nearCount + bands.midCount > g_bandNear + g_bandMid;
-            if (!over && bands.outCount == 0)
+            const bool over = bands.nearCount + bands.midCount > bandNear() + bandMid();
+            // the middle band over its own number holds the near band's room (peds made near walk out into it in view,
+            // and in view none faded: near 7-15 of 25 at a standing camera, the middle 35-58): its farthest go - out of
+            // view, or in view past kBandMidFade, where they are a few pixels of a template's mesh (2026-11-13)
+            const bool midOver = bands.midCount > bandMid();
+            if (!over && !midOver && bands.outCount == 0)
                 return;
             const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
             if (!pool)
@@ -467,7 +481,9 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                     }
                     continue; // in view: never faded
                 }
-                const bool spare = over && d > kRecycleOutOfView && along <= 0.2f * d * fl;
+                const bool outOfView = along <= 0.2f * d * fl;
+                const bool spare = (over && d > kRecycleOutOfView && outOfView) ||
+                                   (midOver && d >= kBandNear && (outOfView || d > kBandMidFade));
                 if (!past && !spare)
                     continue;
                 const float key = past ? d + 1e4f : d; // past the edge first
@@ -1101,7 +1117,10 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         void bandRings(R5900Context *ctx)
         {
             const Bands bands = bandCounts();
-            const bool nearShort = bands.nearCount < g_bandNear, midShort = bands.midCount < g_bandMid;
+            // the total too: peds made in view near walk out into the middle band, where a ped in view never fades - at a
+            // standing camera the middle band grew to 70+ of 25 (2026-11-13)
+            const bool room = bands.nearCount + bands.midCount < bandNear() + bandMid();
+            const bool nearShort = room && bands.nearCount < bandNear(), midShort = room && bands.midCount < bandMid();
             // Both rings span their band (2026-11-13: out of view 10-60 m alone, the in-view ring closed, put the whole
             // crowd in a knot around the player and none down the street). In view no nearer than before the bands (a ped
             // made there is seen standing up; farther the faster the camera); the middle band to 155 m, the node list's
@@ -1712,7 +1731,8 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 {
                     g_bandFill = ra >= kFill && ra < kFillEnd;
                     bandRings(ctx);
-                    if (!g_bandFill && bandCounts().midCount < g_bandMid && vcs::distant::pendingHandover(g_handIn.h) &&
+                    if (!g_bandFill && bandCounts().midCount < bandMid() &&
+                        bandCounts().nearCount + bandCounts().midCount < bandNear() + bandMid() && vcs::distant::pendingHandover(g_handIn.h) &&
                         modelInfo(g_handIn.h.model) && pedsOfModel(g_handIn.h.model) > 0)
                         g_handIn.active = true;
                     return g_addToPopulation(rdram, ctx, runtime);
@@ -1949,7 +1969,8 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             s.page = "Graphics";
             s.section = "Distance and population (experimental)";
             s.label = "Crowd bands";
-            s.help = "With the population distance raised: about 20 real people within 100 m and 20 more out to 200 m, "
+            s.help = "With the population distance raised: about 25 real people within 100 m and 25 more out to 200 m (at "
+                     "Pedestrian density 50; 10 at 0, 40 at 100), "
                      "and past that the distant crowd (Distant crowds) - a person walking in from it becomes a real one in "
                      "its place, and back. Fewer real people to simulate for the same busy streets.";
             s.type = settings::Type::Toggle;
@@ -2117,7 +2138,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             char text[256];
             std::snprintf(text, sizeof(text), "ok peds=%d %d %d %d cars=%d %d %d %d bands=%d near=%d/%d mid=%d/%d out=%d fading=%d births=%u handin=%u handout=%u",
                           peds[0], peds[1], peds[2], peds[3], cars[0], cars[1], cars[2], cars[3], bandsOn() ? 1 : 0,
-                          bands.nearCount, g_bandNear, bands.midCount, g_bandMid, bands.outCount, bands.fading,
+                          bands.nearCount, bandNear(), bands.midCount, bandMid(), bands.outCount, bands.fading,
                           g_births.load(std::memory_order_relaxed), g_handIns.load(std::memory_order_relaxed),
                           g_handOuts.load(std::memory_order_relaxed));
             reply(text);
