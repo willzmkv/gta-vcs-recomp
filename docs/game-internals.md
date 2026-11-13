@@ -3636,6 +3636,27 @@ model keys: CRC32 of the upper-case name, xor 0xFFFFFFFF) and the disc's sectors
   `ig_vance_arms`' (or the whole arms), skinned to plr's bones (the thumb on `l_hand`, the fingers on `l_finger`: the
   game's grip animations bend that one), its textures added to plr.xtx - as a mod-loader file (`modloader/<mod>/plr.mdl`,
   docs/MODS.md). Needs a reader / writer for skinned ped `ldm` models (tools/mdlinfo.py reads vehicles only).
+- **Every cutscene character has its model there** (2026-11-13): after each `cs<name>.xtx` in GTA3PS2.IMG a gap holds
+  an `ldm` model of about twice its gameplay model's sectors (csplr2, cslansm, csphil, csjerry, cslou, csmarty, ...).
+  Unlike a gameplay ped's (its data at 0x20: {collision model, clump}, a global table of one render callback, function
+  0x12, at the element's +0x24), a cutscene model's data starts with its element group and has no global table: put in
+  a gameplay entry as it is it loads but draws nothing.
+- **The skinned ped model** (read 2026-11-13): element +0x14 the geometry, +0x2C the animation hierarchy {+0 0x3000, +4
+  the bone count, +0x30 the bones: 8 bytes each, {id (0xFF none), index, flags (2 push, 1 pop: the tree), ?}}; geometry
+  +0x0C the materials, +0x18 the skin {+0 bone count, +0xC the inverse bind matrices, 64 bytes each}. A vertex's 4
+  weights (V4-32) carry the bone index * 4 in their low 10 bits. Bone ids are the game's (24 / 34 the hands, 25 / 35
+  the finger(s), 26 / 36 the cutscene's second finger joint, 44-60 the cutscene face). The gameplay plr's hands weight
+  **no vertex to the finger bones**: its fingers are one half-open mitten, and every weapon is held by that fixed shape.
+- **Cutscene animations: PS2/MOCAPPS2.DIR / .IMG** (2026-11-13): the directory 32 bytes an entry {sector, sectors,
+  name[24]}; per cutscene a `.CAM`, a `.CUT` (text: info / offset, `model` - the characters and props, `text` - the
+  subtitles' times) and a `.ANIM`, an `anim` resource (ident 0x6D696E61, relocatable like the models). At 0x20 a
+  pointer per character to its animation {+0 the sequences, +4 name[20] (csplr, csLou...), +0x1C the sequence count,
+  +0x20 the duration (float seconds)}; a sequence 12 bytes {u16 flags (1 rotation, 2 translation, 8 ?), s16 key count,
+  the keys, u16 the bone id}; a key 10 bytes - an IEEE half quaternion (x y z w, the bone's rotation in its parent) and
+  a half duration - or 16 with 3 halves of translation (flags & 2). The finger bones turn about their own z only (a
+  hinge). Vic holds the Beretta through all of UMBB1 with both his finger joints at 43 degrees (his rest pose in the
+  model: 0 / 20); relaxed hands spend most of the cutscenes at 20-25. Read by `build/analysis/hdped/work/mocap.py`
+  (analysis; the game's data stays out of git).
 
 ## 13. Open questions / next research targets
 
