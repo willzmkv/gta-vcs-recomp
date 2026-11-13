@@ -32,6 +32,8 @@ namespace vcs::aim
         bool on = false;          // free aim is on for either device (the game's own free aim a script starts is taken over)
         float turn = 0, tilt = 0; // radians this frame: left +, up + (the mouse)
         float turnRate = 0, tiltRate = 0; // -1..1: left +, up + (the right stick)
+        bool assist = false;      // aim assist (the gamepad's, pad.aim_assist): lock on first, free aim once the right
+                                  // stick moves or no one is there to lock on to - GTA V's assisted aim
     };
     // What the pad report gets.
     struct Output

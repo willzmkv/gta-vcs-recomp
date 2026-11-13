@@ -184,6 +184,7 @@ namespace vcs::input
             float carLook = 0.0025f;   // ... the camera behind a vehicle (Car camera sensitivity on top)
             bool mouseInvertY = false;
             bool freeAimMouse = false, freeAimPad = false; // free aim (game/vcs_aim.h) on the keyboard / mouse, the gamepad
+            bool aimAssist = true;     // the gamepad's free aim locks on first (pad.aim_assist)
             bool mouseWheel = true;                        // the wheel changes weapons on foot and zooms scopes
             bool swapSticks = false, invertX = false, invertY = false;
             float deadzoneLeft = 0.12f, deadzoneRight = 0.12f, cameraScale = 1.0f, trigger = 0.3f;
@@ -224,6 +225,7 @@ namespace vcs::input
             m.mouseInvertY = settings::value("mouse.invert_y") != 0;
             m.freeAimMouse = settings::value("mouse.free_aim") != 0;
             m.freeAimPad = settings::value("pad.free_aim") != 0;
+            m.aimAssist = settings::value("pad.aim_assist") != 0;
             m.mouseWheel = settings::value("mouse.wheel") != 0;
             m.swapSticks = settings::value("pad.swap_sticks") != 0;
             m.invertX = settings::value("pad.invert_x") != 0;
@@ -514,6 +516,7 @@ namespace vcs::input
                     aim::Input in;
                     in.want = !blocked && (mouseWant || padWant);
                     in.on = m.freeAimMouse || m.freeAimPad;
+                    in.assist = m.aimAssist && padWant && !mouseWant;
                     if (!blocked)
                     {
                         // zoomed views turn slower for the same hand movement
@@ -812,13 +815,19 @@ namespace vcs::input
                         buttons |= kL2 | kR2; // look behind
                     if (padButton(GAMEPAD_DPAD_DOWN))
                         buttons |= kR3; // sub-mission
-                    // the right stick pushed well to a side looks / aims that way (L2 / R2 on the PS2: the drive-by's
-                    // side), instead of turning the camera
-                    const float side = padAxis(m.swapSticks ? AXIS_LEFT_X : AXIS_RIGHT_X);
-                    if (std::fabs(side) > 0.6f && !(buttons & (kL2 | kR2)))
+                    // L1 / R1 look / aim left / right (L2 / R2 on the PS2: the drive-by's side; the right stick only
+                    // turned the camera there - no free aim in a vehicle: the player's report, 2026-11-12). With the
+                    // triggers driving, the pad's Cross is free and becomes the handbrake (R1 on the PS2); the pad's L1
+                    // no longer steps the radio (the D-pad does). Not while the game's own free aim in a car has R1.
+                    if (m.triggerDrive && !g_mouse.aim.camera)
                     {
-                        buttons |= side < 0.0f ? kL2 : kR2;
-                        rx = 0.0f;
+                        buttons &= static_cast<uint16_t>(~(padBits & ~keyBits & (kL1 | kR1)));
+                        if (padButton(GAMEPAD_LEFT_SHOULDER))
+                            buttons |= kL2; // look left
+                        if (padButton(GAMEPAD_RIGHT_SHOULDER))
+                            buttons |= kR2; // look right
+                        if (padButton(GAMEPAD_SOUTH))
+                            buttons |= kR1; // handbrake
                     }
                 }
             }
@@ -1242,12 +1251,26 @@ namespace vcs::input
         s.page = kPad;
         s.section = "Sticks and triggers";
         s.label = "GTA V buttons";
-        s.help = "More of GTA V's layout on a PlayStation pad: the touchpad changes the camera; while driving the right "
-                 "stick pushed to a side looks / aims that way, R3 looks behind, the D-pad's left / right change the radio "
-                 "station (previous / next) and its down starts a sub-mission (taxi, vigilante...); with Shoot with the "
-                 "triggers, R2 fires guns and Circle is melee only. Off: the game's own buttons.";
+        s.help = "More of GTA V's layout on a PlayStation pad: the touchpad changes the camera; while driving R3 looks "
+                 "behind, the D-pad's left / right change the radio station (previous / next) and its down starts a "
+                 "sub-mission (taxi, vigilante...); with Drive with the triggers, L1 / R1 look / aim left / right and "
+                 "Cross is the handbrake; with Shoot with the triggers, R2 fires guns and Circle is melee only. Off: the "
+                 "game's own buttons.";
         s.type = Type::Toggle;
         s.defaultValue = 0;
+        s.onChange = onChange;
+        settings::add(s);
+
+        s = {};
+        s.key = "pad.aim_assist";
+        s.page = kPad;
+        s.section = "Sticks and triggers";
+        s.label = "Aim assist";
+        s.help = "With Free aim on (below), the aim button first locks on to the nearest target, as the game's own aim "
+                 "does; move the right stick and the aim goes free from there (GTA V's assisted aim). With no one to "
+                 "lock on to it is free aim at once. Off: free aim only.";
+        s.type = Type::Toggle;
+        s.defaultValue = 1;
         s.onChange = onChange;
         settings::add(s);
 
@@ -1257,7 +1280,8 @@ namespace vcs::input
         s.section = "Sticks and triggers";
         s.label = "Free aim";
         s.help = "With a gun, R1's button (RB unless changed above; give R1 the LT to aim with the trigger) aims where "
-                 "the right stick points, with the game's aiming circle, instead of locking on. No aim assist.";
+                 "the right stick points, with the game's aiming circle, instead of locking on (Aim assist above locks on "
+                 "first).";
         s.type = Type::Toggle;
         s.defaultValue = 0;
         s.onChange = onChange;

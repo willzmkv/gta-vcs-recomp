@@ -106,24 +106,27 @@ class Check:
             g.wait_frames(45)
             s2 = station()
             self.ok("GTA V buttons: the D-pad steps the radio both ways", s1 == (s0 + 1) % 10 and s2 == s0, "%d -> %d -> %d" % (s0, s1, s2))
-            # the right stick well to a side looks that way (L2 / R2), the camera left alone
-            sides = []
-            for value, want in (("-1", L2), ("1", R2)):
-                g.cmd("gamepad rx %s" % value)
-                p = self.pad()
-                g.cmd("gamepad rx 0")
-                g.wait_frames(3)
-                sides.append((p["buttons"], p["rx"]))
-            self.ok("GTA V buttons: the right stick looks to the sides", sides == [(L2, 128), (R2, 128)], str(sides))
-            # Drive with the triggers: R2 / L2 instead of the pad's Cross / Square, not as well
+            # the right stick turns the camera again (no free aim in a vehicle: it only moved the camera)
+            g.cmd("gamepad rx 1")
+            p = self.pad()
+            g.cmd("gamepad rx 0")
+            g.wait_frames(3)
+            self.ok("GTA V buttons: the right stick is the camera", p["buttons"] == 0 and p["rx"] != 128, str(p))
+            # Drive with the triggers: R2 / L2 instead of the pad's Cross / Square, not as well; with GTA V's buttons
+            # L1 / R1 look to the sides and the pad's Cross is the handbrake
             self.setting("pad.trigger_drive", 1)
             trig = (press("a"), press("x"))
             g.cmd("gamepad rt 1")
             rt = self.pad()["buttons"]
             g.cmd("gamepad rt 0")
             g.wait_frames(3)
-            self.ok("Drive with the triggers: the pad's Cross / Square do not drive, R2 does", trig == (0, 0) and rt == CROSS,
+            self.ok("Drive with the triggers: the pad's Cross / Square do not drive, R2 does", trig == (R1, 0) and rt == CROSS,
                     "cross %04x square %04x r2 %04x" % (trig + (rt,)))
+            sides = (press("lb"), press("rb"))
+            self.ok("GTA V buttons: L1 / R1 look left / right", sides == (L2, R2), "l1 %04x r1 %04x" % sides)
+            # the DualSense's triggers stay loose while driving (pad.ds_drive_feel off): shooting only
+            ds = g.cmd("dualsense")
+            self.ok("DualSense: no trigger resistance while driving", "driving=1" in ds and "trig=off" in ds, ds)
         finally:
             self.setting("pad.trigger_drive", 0)
             self.setting("pad.v_layout", 0)
@@ -618,6 +621,7 @@ class Check:
         # the gamepad: Gamepad > Free aim, RB (R1) aims, the right stick turns it (2 radians a second at full tilt), the
         # left stick still moves Vic
         self.setting("pad.free_aim", 1)
+        self.setting("pad.aim_assist", 0)
         g.cmd("gamepad on")
         g.cmd("gamepad rb 1")
         time.sleep(1.0)
@@ -635,10 +639,30 @@ class Check:
         after = g.player()[1]
         g.cmd("gamepad rb 0")
         time.sleep(1.0)
-        g.cmd("gamepad off")
-        self.setting("pad.free_aim", 0)
         far = math.hypot(after[0] - before[0], after[1] - before[1])
         self.ok("gamepad free aim", on_pad == 1 and -1.4 < turn < -0.6 and far > 1.0, "aim %+.3f, moved %.2f m" % (turn, far))
+
+        # aim assist (pad.aim_assist, on by default): RB locks on to the man ahead as the game's own aim, the right
+        # stick then takes the aim free from there
+        self.setting("pad.aim_assist", 1)
+        self.ped_ahead(2.5)
+        time.sleep(1.5)
+        g.cmd("gamepad rb 1")
+        time.sleep(1.0)
+        target = g.u32(g.player()[0] + self.PED_TARGET)
+        locked = (self.cam()[0], g.u32(target + 0x48) & 0xE if target else 0, self.aim()[0])
+        g.cmd("gamepad rx 1")
+        time.sleep(0.6)
+        g.cmd("gamepad rx 0")
+        time.sleep(0.4)
+        target = g.u32(g.player()[0] + self.PED_TARGET)
+        freed = (self.cam()[0], g.u32(target + 0x48) & 0xE if target else 0, self.aim()[0])
+        g.cmd("gamepad rb 0")
+        time.sleep(1.0)
+        g.cmd("gamepad off")
+        self.setting("pad.free_aim", 0)
+        self.ok("aim assist: locks on, the right stick frees it", locked == (11, 6, 0) and freed == (11, 8, 1),
+                "locked (mode, kind, free) %s, then %s" % (locked, freed))
 
         # the sniper rifle's scope: the mouse turns it directly (no stick speed), the wheel zooms
         self.give(30, 20)

@@ -62,7 +62,12 @@ game-internals.md 12c):
 - When the gun runs dry while aiming the game puts the fists in Vic's hand: with the button still held nothing
   locks on until it is let go, and choosing another gun (the wheel) aims again at once.
 - Fists, melee weapons, thrown weapons and the scoped guns (sniper rifles, rocket launcher, camera, binoculars) keep
-  R1 as on the PS2. There is no aim assist on the gamepad.
+  R1 as on the PS2.
+- **Aim assist** (Gamepad, on by default; the gamepad's free aim only): the target button first **locks on** to the
+  nearest person, as the game's own aim does (its lock-on camera and marker); pushing the right stick past about a
+  third of its throw takes the aim **free from there** (the lock lets go for two frames, then the circle starts where
+  the lock-on camera looked) - GTA V's assisted aim. With no one to lock on to after six frames it is free aim at
+  once. Off: free aim only (the player's report, 2026-11-12: free aim on the DualSense had lost the lock-on).
 - It is the game's own free aim (R1 then L3 on the PS2: the left stick moves an aiming point while Vic stands still),
   driven so that Vic can move and the mouse aims; `VCS_FREEAIM=0` leaves it out entirely.
 - **Shooting from a car** (Jive Drive: Vic in the passenger seat while Lance drives - the game's own free aim, which the
@@ -138,27 +143,32 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
   weapon moves to the **D-pad** - the modern GTA IV / V layout. In a vehicle the buttons are unchanged. Pairs with the
   DualSense's weapon trigger feel (below).
 - **GTA V buttons** (off by default; an option, nothing else changes with it off): more of GTA V's layout on a
-  PlayStation pad. The **touchpad** changes the camera (Select on the PS2); while driving the **right stick pushed
-  well to a side looks / aims that way** (L2 / R2 on the PS2: the drive-by's side), **R3 looks behind** (L2 + R2), the
-  **D-pad's left / right** change the radio station (previous / next) and its **down** starts a sub-mission (taxi,
-  vigilante... - R3 on the PS2); with **Shoot with the triggers** on, **R2 fires guns** and **Circle is melee only**
-  (with a gun in hand the pad's Circle does nothing, so the two never fire together). L3 (horn) and R1 (handbrake) are GTA V's already. VCS has no reload button
-  (it reloads by itself). Checked by `tools/controls_check.py`.
+  PlayStation pad. The **touchpad** changes the camera (Select on the PS2); while driving **R3 looks behind** (L2 +
+  R2), the **D-pad's left / right** change the radio station (previous / next; the pad's L1 no longer does) and its
+  **down** starts a sub-mission (taxi, vigilante... - R3 on the PS2). With **Drive with the triggers** on too, **L1 /
+  R1 look / aim left / right** (L2 / R2 on the PS2: the drive-by's side) and the pad's **Cross is the handbrake** (R1
+  on the PS2; Cross is free once R2 accelerates). The right stick stays the camera (a vehicle has no free aim: pushed
+  to a side it only turned the camera - the player's report, 2026-11-12). With **Shoot with the triggers** on, **R2
+  fires guns** and **Circle is melee only** (with a gun in hand the pad's Circle does nothing, so the two never fire
+  together). L3 is the horn, as in GTA V. VCS has no reload button (it reloads by itself). Checked by
+  `tools/controls_check.py`.
 - **Vibration**: the DualShock 2's motors on the gamepad's rumble, 0-200% (100% as on the PS2, 0% off). The game
   drives them itself (crashes, explosions, gunfire; game-internals.md 12a).
 - **DualSense** (src/game/vcs_dualsense.cpp): extras a PS5 pad has, driven from the game's state, each off a no-op on
   other pads (the light bar alone works on a DualShock 4). Like GTA V's DualSense support:
   - **Light bar**: its colour during play - **Health** (green full, red hurt), **Vice theme** (a steady neon pink) or
     **Off**. **Light bar brightness** scales it.
-  - **Police flash**: the light bar flashes red / blue while you have a wanted level, faster the more stars, back to
-    its colour when you lose them.
-  - **Adaptive triggers**: while you drive, R2 / L2 push back by the vehicle's weight - a moped barely, a sports car
-    more, a truck or a tank a lot - and judder on a crash or rough ground. With **Drive with the triggers** on (above)
-    they come alive like GT7 / GTA V: the throttle (R2) firms up the harder you accelerate and **buzzes when you lose
-    grip** (wheelspin or a slide), and the brake (L2) **pulses like ABS** under hard braking. On foot, with **Shoot
-    with the triggers** on (so R2 is the trigger you pull), the fire trigger feels the gun - a single-shot gun gives a
-    firm wall that breaks at the shot and then kicks (a heavy, low buzz while it fires), an automatic rests on a light
-    wall and buzzes while it fires.
+  - **Police flash**: the light bar flashes red / blue while you have a wanted level, faster the more stars (a full
+    red + blue cycle of 470 ms at one star down to 250 ms at six; it was 1030 - 680 ms, too slow to read as a police
+    light), back to its colour when you lose them.
+  - **Adaptive triggers**: for shooting. On foot, with **Shoot with the triggers** on (so R2 is the trigger you pull),
+    the fire trigger feels the gun - a single-shot gun gives a firm wall that breaks at the shot and then kicks (a
+    heavy, low buzz while it fires), an automatic rests on a light wall and buzzes while it fires. Driving leaves the
+    triggers loose (the player's ask, 2026-11-12).
+  - **Triggers while driving** (off by default): R2 / L2 push back by the vehicle's weight - a moped barely, a sports
+    car more, a truck or a tank a lot - and judder on a crash. With **Drive with the triggers** on (above) the throttle
+    (R2) firms up the harder you accelerate and **buzzes when you lose grip** (wheelspin or a slide), and the brake
+    (L2) firms up the harder you press.
   - **Sound through the controller**: play the game's sound - the radio, the police scanner, everything - through the
     DualSense's own speaker instead of your speakers or headphones. It is a small speaker, so it sounds thinner; turns
     itself off when the pad is unplugged. (The game mixes all its sound together, so this cannot be the radio alone.)

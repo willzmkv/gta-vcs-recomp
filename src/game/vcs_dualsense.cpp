@@ -146,6 +146,7 @@ namespace vcs::dualsense
             bool triggers = true;
             bool triggerDrive = false; // R2 / L2 are the throttle / brake (pad.trigger_drive): live resistance
             bool triggerShoot = false; // R2 fires on foot (pad.trigger_shoot): the gun's trigger feel
+            bool driveFeel = false;    // the triggers resist while driving too (pad.ds_drive_feel; off: shooting only)
             bool speaker = false;      // route the game's sound to the DualSense's speaker
             float brightness = 1.0f;   // 0..1
         };
@@ -159,6 +160,7 @@ namespace vcs::dualsense
             g_cfg.triggers = settings::value("pad.ds_triggers") != 0;
             g_cfg.triggerDrive = settings::value("pad.trigger_drive") != 0;
             g_cfg.triggerShoot = settings::value("pad.trigger_shoot") != 0;
+            g_cfg.driveFeel = settings::value("pad.ds_drive_feel") != 0;
             g_cfg.speaker = settings::value("pad.ds_speaker") != 0;
             g_cfg.brightness = std::clamp(settings::value("pad.ds_brightness") / 100.0f, 0.1f, 1.0f);
             applySpeaker();
@@ -301,9 +303,10 @@ namespace vcs::dualsense
             // The police flash wins over the base colour, like GTA V: red / blue, faster with more stars.
             if (g_cfg.police && game.inGame && game.wanted > 0)
             {
-                // Alternate red / blue like a police light bar: a calm pace (GTA V's), a little quicker with more
-                // stars. periodMs is one full red+blue cycle, so each colour shows half of it.
-                const int periodMs = std::max(640, 1100 - game.wanted * 70);
+                // Alternate red / blue like a police light bar, quicker with more stars (1 star 470 ms, 6 stars 250 ms;
+                // was 1030 - 680 ms, too slow: the player's report). periodMs is one full red+blue cycle, so each colour
+                // shows half of it.
+                const int periodMs = std::max(250, 514 - game.wanted * 44);
                 const bool blue = (nowNs() / (static_cast<int64_t>(periodMs) * 1000000 / 2)) & 1;
                 if (blue)
                     b = 255;
@@ -371,7 +374,12 @@ namespace vcs::dualsense
             const int64_t fireAge = now - g_fireNs.load(std::memory_order_relaxed);
             const bool firing = fireAge >= 0 && fireAge < kFireHoldNs;
 
-            if (game.driving)
+            if (game.driving && !g_cfg.driveFeel)
+            {
+                // the triggers are for shooting only (the player's ask, 2026-11-12): driving leaves them loose
+                g_prevSpeedNs = 0;
+            }
+            else if (game.driving)
             {
                 // Weight sets the base (mass at vehicle +0xD0, game-internals.md 12e): strength 3..8 and how early in the
                 // pull it resists. A crash / heavy bump (the game's big-motor rumble) judders both.
@@ -510,13 +518,24 @@ namespace vcs::dualsense
         s.page = "Gamepad";
         s.section = "DualSense";
         s.label = "Adaptive triggers";
-        s.help = "On a DualSense, R2 / L2 push back while you drive - heavier vehicles (a truck, a tank) resist far more "
-                 "than a moped, and both judder on a crash or rough ground. With \"Drive with the triggers\" on (Sticks "
-                 "and triggers) the throttle also firms up as you accelerate and flutters on a slide, and the brake "
-                 "pulses like ABS. With \"Shoot with the triggers\" on, the fire trigger feels each gun. No effect on "
-                 "other pads.";
+        s.help = "On a DualSense, with \"Shoot with the triggers\" on (Sticks and triggers), the fire trigger feels each "
+                 "gun: resistance, a break and a buzz at each shot. Driving leaves the triggers loose unless \"Triggers "
+                 "while driving\" is on (below). No effect on other pads.";
         s.type = Type::Toggle;
         s.defaultValue = 1;
+        s.onChange = onChange;
+        settings::add(s);
+
+        s = {};
+        s.key = "pad.ds_drive_feel";
+        s.page = "Gamepad";
+        s.section = "DualSense";
+        s.label = "Triggers while driving";
+        s.help = "R2 / L2 push back while you drive too - heavier vehicles (a truck, a tank) resist far more than a "
+                 "moped, and both judder on a crash. With \"Drive with the triggers\" on the throttle firms up as you "
+                 "accelerate and buzzes on a slide, and the brake firms up the harder you press. Off: shooting only.";
+        s.type = Type::Toggle;
+        s.defaultValue = 0;
         s.onChange = onChange;
         settings::add(s);
 
@@ -555,12 +574,17 @@ namespace vcs::dualsense
             const char *fam = dsPadFamily() == GAMEPAD_FAMILY_PS5   ? "ps5"
                               : dsPadFamily() == GAMEPAD_FAMILY_PS4 ? "ps4"
                                                                       : "generic";
-            char text[256];
+            // trig=<on|off>: the effect the triggers would get now (whether or not a DualSense is there)
+            Trigger right, left;
+            chooseTriggers(g, right, left);
+            const bool trigOn = right != triggerOff() || left != triggerOff();
+            char text[288];
             std::snprintf(text, sizeof(text),
                           "ok family=%s led=%d triggers=%d wanted=%d@ped+0x%X health=%.0f driving=%d ingame=%d "
-                          "speed=%.2f vehtype=%d mass=%.0f slip=%.2f weapon=%d",
+                          "speed=%.2f vehtype=%d mass=%.0f slip=%.2f weapon=%d trig=%s",
                           fam, gamepadHasLED() ? 1 : 0, gamepadHasTriggerEffects() ? 1 : 0, g.wanted, g_wantedOffset,
-                          g.health, g.driving ? 1 : 0, g.inGame ? 1 : 0, g.speed, g.vehType, g.mass, g.slip, g.weapon);
+                          g.health, g.driving ? 1 : 0, g.inGame ? 1 : 0, g.speed, g.vehType, g.mass, g.slip, g.weapon,
+                          trigOn ? "on" : "off");
             reply(text);
         });
         std::fprintf(stderr, "[dualsense] ready\n");

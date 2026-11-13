@@ -83,11 +83,16 @@ namespace vcs::aim
             Script,   // the game's own free aim a script started (a car's drive-by mode, the forced free aim on foot): the
                       // dummy is ours, no buttons
             Mounted,  // a gun on a vehicle a script attached him to (Farewell To Arms' helicopter door): its camera is ours
+            Assist,   // aim assist: plain R1, the game's lock-on, until the right stick moves (then free aim from where
+                      // the lock-on camera looks) or nothing was locked on to after a few reports
         };
         // game thread
         State g_state = State::Idle;
         int g_wait = 0;               // Entering: frames waited; Released: frames left with R1 up
         constexpr int kRetryFrames = 8;
+        constexpr int kAssistFrames = 6;    // Assist: reports to wait for the game's lock-on before free aim
+        constexpr float kAssistStick = 0.1f; // Assist: the right stick (rate, squared curve: ~0.3 of the throw) leaves it
+        bool g_assistDone = false;           // this hold of the button went on from the lock-on to free aim
         uint32_t g_dummy = 0;
         float g_yaw = 0, g_pitch = 0; // the aim from Vic's shoulders: yaw from +x toward +y, pitch up
         int g_quickBlend = 0;         // frames left to shorten the camera's blend into / out of free aim
@@ -448,6 +453,7 @@ namespace vcs::aim
         if (!ped || !in.want || !onFoot(ped))
         {
             stop(!in.want ? "released" : "not on foot");
+            g_assistDone = false;
             return out;
         }
         if (!gunInHand())
@@ -464,12 +470,40 @@ namespace vcs::aim
         }
         out.own = true;
         const uint32_t cam = activeCam();
+        if (g_state == State::Idle && in.assist && !g_assistDone)
+        {
+            // aim assist: the game's own lock-on first (plain R1; its camera)
+            g_state = State::Assist;
+            g_wait = 0;
+            out.r1 = true;
+            return out;
+        }
         switch (g_state)
         {
         case State::Released:
             if (--g_wait <= 0)
                 g_state = State::Idle; // R1 up until now; the next report enters again
             return out;
+        case State::Assist:
+        {
+            const uint32_t target = rd32(ped + kPedTarget);
+            const bool stick = std::fabs(in.turnRate) > kAssistStick || std::fabs(in.tiltRate) > kAssistStick;
+            if (in.assist && !stick && (target ? !isObject(target) : ++g_wait < kAssistFrames))
+            {
+                out.r1 = true; // locked on (or still looking for someone): the game's
+                return out;
+            }
+            // on to free aim, from where the camera looks: from a lock, R1 up a moment first (the game keeps a ped's
+            // lock through R1 + L3); with no one locked on to, R1 + L3 at once
+            g_assistDone = true;
+            if (target)
+            {
+                g_state = State::Released;
+                g_wait = 2;
+                return out;
+            }
+            [[fallthrough]];
+        }
         case State::Held: // a gun in hand again, the button still held: free aim again
         case State::Idle:
         {
