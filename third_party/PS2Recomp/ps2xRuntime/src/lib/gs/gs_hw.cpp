@@ -480,6 +480,7 @@ namespace
         bool had3d = false; // [gta-recomp] any depth-tested or native draw (widescreen presentation)
         int64_t inputNs = 0; // [gta-recomp] the input snapshot the game read for this frame (gsHwShownInputNs)
         int64_t queuedNs = 0, takenNs = 0; // [gta-recomp] put in / taken from the queue (PS2X_RHI_STATS: input delay by stage)
+        int64_t builtNs = 0; // [gta-recomp] the game finished recording it (before any queue wait): the motion blur's clock
         int8_t wide3d = -1; // [gta-recomp] recorded for a wide picture (frameWide): draws squeezed into the buffer; -1: not asked
         int8_t shown = -1;  // [gta-recomp] its shape, decided when executed (decideShape): 1 wide, 0 4:3
         bool menu = false;  // [gta-recomp] has primitives the classifier names as the game's menu (GSHwAnchorMenu)
@@ -1757,6 +1758,7 @@ namespace
             float squeezePivot = 0.0f, squeeze = 1.0f; // a HUD layer draw's widescreen squeeze (DrawCmd::hudSqueeze)
             bool opaque = true;                 // alpha not written (the shown picture)
             rhi::Texture *texture = nullptr;    // read instead of the draw's texture, as a plain texture
+            rhi::Texture *rtTexture = nullptr;  // read instead of render target s.rtFbp, as it (same scale): blurHistoryPick
             rhi::Buffer *vertices = nullptr;    // null: the HUD layer's
         };
 
@@ -2051,6 +2053,115 @@ namespace
             return (on & 4u) ? nativeFrameCopy(f, ci, log) : 0u;
         }
 
+        // [gta-recomp] The motion blur ("light trails", game-internals.md 6g) blends the previous shown picture into the
+        // new one at FIX 16, once per frame: on the PS2 a ghost one frame - 33 ms - behind. Above 30 fps the same blend
+        // per frame put the ghost a few ms behind, inside the object's own edge, and the trails were gone (144 fps: ~5x
+        // shorter). The history keeps the finished pictures (each a copy of the frame target taken where the game copies
+        // it into the shown buffer) with the time their frame was built; the blend reads the one nearest to a PS2 frame
+        // before its own frame instead of the last one. Each kept picture holds its own blend, so the trail is the PS2's
+        // at any frame rate: 12.5% at 33 ms, 1.6% at 66 ms. At 30 fps the nearest is the last picture: the shown buffer
+        // is read as before. PS2X_HW_BLUR_HISTORY=0: the last picture at any frame rate (before 2026-11-13).
+        static bool blurHistoryOn()
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("PS2X_HW_BLUR_HISTORY");
+                return !(e && e[0] == '0');
+            }();
+            return on;
+        }
+        static constexpr int64_t kPs2FrameNs = 33366667; // NTSC: two fields of 59.94 Hz
+
+        struct BlurPicture
+        {
+            std::unique_ptr<rhi::Texture> tex;
+            int64_t ns = 0; // when the frame that finished this picture was built; 0: free
+            Scale scale;
+        };
+
+        // the frame target's finished picture (frame `src`, built at m_blurLastNs) kept, at the copy into the shown buffer
+        void blurHistoryKeep(const Frame &f, Rt &src, uint32_t srcFbp, uint32_t shownFbp)
+        {
+            if (!blurHistoryOn() || f.builtNs <= 0)
+                return;
+            const int64_t pictureNs = m_blurLastNs;
+            if (srcFbp != m_blurSrcFbp || shownFbp != m_blurShownFbp)
+                for (BlurPicture &p : m_blurHistory) // another pair of buffers: start over
+                    p.ns = 0;
+            m_blurSrcFbp = srcFbp, m_blurShownFbp = shownFbp, m_blurLastNs = f.builtNs, m_blurShownNs = pictureNs;
+            if (pictureNs <= 0)
+                return;
+            // the slot to fill: a free one, else the oldest. A picture more than a PS2 frame and a quarter older than this
+            // one is never the nearest again (the next blends want a PS2 frame before frames newer than this): free
+            BlurPicture *slot = nullptr;
+            for (BlurPicture &p : m_blurHistory)
+            {
+                if (p.ns && pictureNs - p.ns > kPs2FrameNs + kPs2FrameNs / 4)
+                    p.ns = 0;
+                if (!slot || (slot->ns && (!p.ns || p.ns < slot->ns)))
+                    slot = &p;
+            }
+            if (!slot || (slot->ns && m_blurHistory.size() < 24u)) // grows with the frame rate (144 fps: 6-7 in use)
+                slot = &m_blurHistory.emplace_back();
+            rhi::Texture &from = readable(src);
+            const rhi::TextureDesc &d = from.desc();
+            if (!slot->tex || slot->tex->desc().width != d.width || slot->tex->desc().height != d.height)
+            {
+                endPass();
+                slot->tex = m_dev.createTexture({d.width, d.height, rhi::Format::RGBA8, rhi::UsageSampled, "gs blur history"});
+                if (!slot->tex)
+                {
+                    slot->ns = 0;
+                    return;
+                }
+            }
+            endPass();
+            m_dev.copyTexture(*slot->tex, 0, 0, from, 0, 0, d.width, d.height);
+            slot->ns = pictureNs;
+            slot->scale = src.scale;
+        }
+
+        // the kept picture for the blend of frame f reading the shown buffer: the one finished nearest to a PS2 frame
+        // before f; null when that is the newest (the shown buffer holds it) or none fits
+        rhi::Texture *blurHistoryPick(const Frame &f, const HwState &s, const Rt &shown)
+        {
+            if (!blurHistoryOn() || f.builtNs <= 0 || s.rtFbp != m_blurShownFbp || s.fbp != m_blurSrcFbp)
+                return nullptr;
+            const int64_t want = f.builtNs - kPs2FrameNs;
+            const BlurPicture *best = nullptr;
+            for (const BlurPicture &p : m_blurHistory)
+                if (p.ns && p.tex && p.scale == shown.scale && p.ns < m_blurShownNs &&
+                    (!best || std::llabs(p.ns - want) < std::llabs(best->ns - want)))
+                    best = &p;
+            // the shown buffer holds the picture finished at m_blurShownNs: read it (as before) unless an older one is nearer
+            // At 30 fps and a little above (the shown picture 3/4 of a PS2 frame old or more) it is read as before; at a
+            // 30 fps cap only a frame that comes early after a hitch (~1%) reads an older picture
+            m_blurAgeNs = m_blurShownNs > 0 ? f.builtNs - m_blurShownNs : 0;
+            if (!best || m_blurShownNs <= 0 || m_blurAgeNs >= kPs2FrameNs * 3 / 4 ||
+                std::llabs(m_blurShownNs - want) <= std::llabs(best->ns - want))
+                return nullptr;
+            m_blurAgeNs = f.builtNs - best->ns;
+            return best->tex.get();
+        }
+
+        // every 10 s: the blends, how many read the history, the ghost's mean age (the PS2: 33 ms)
+        void blurHistoryStats(bool fromHistory)
+        {
+            ++m_blurBlends;
+            m_blurFromHistory += fromHistory ? 1u : 0u;
+            m_blurAgeSumMs += m_blurAgeNs / 1e6;
+            const int64_t now = steadyNs();
+            if (!m_blurStatsNs)
+                m_blurStatsNs = now;
+            if (now - m_blurStatsNs < 10'000'000'000ll)
+                return;
+            std::fprintf(stderr, "[gs-hw] motion blur: %llu blends, %llu from the history (%zu pictures kept), ghost %.1f ms behind\n",
+                         (unsigned long long)m_blurBlends, (unsigned long long)m_blurFromHistory, m_blurHistory.size(),
+                         m_blurAgeSumMs / static_cast<double>(m_blurBlends));
+            m_blurBlends = m_blurFromHistory = 0;
+            m_blurAgeSumMs = 0.0;
+            m_blurStatsNs = now;
+        }
+
         // Frame copy / motion blur: a full-screen 1:1 read of another 640-wide target, u = x + 0.5 (on the GS an exact
         // copy), which the game draws as 40 strips. A plain copy (the shown buffer) becomes a texture copy; a blended
         // one (motion blur: the previous picture at FIX 16, colour 127/128) one full-screen quad with the draw's state.
@@ -2082,6 +2193,8 @@ namespace
             const bool plain = !s.abe && !s.ate && !s.fge && decal && (!s.zte || (s.ztst == 1u && s.zmsk));
             Rt &dst = rtFor(s.fbp, s.fbw, s.scy1 + 1u);
             hudOnDraw(s);
+            if (plain)
+                blurHistoryKeep(f, src->second, s.rtFbp, s.fbp); // [gta-recomp] the finished picture, for the motion blur
             if (plain && dst.scale == src->second.scale && dst.samples == 1u) // a multisampled copy is drawn (below)
             {
                 rhi::Texture &from = readable(src->second);
@@ -2115,9 +2228,14 @@ namespace
             LayerTarget t;
             t.opaque = false;
             t.vertices = m_postVb.get();
+            if (s.abe)
+                t.rtTexture = blurHistoryPick(f, s, src->second); // [gta-recomp] a PS2 frame back, not one frame
             draw(s, 0u, 6u, nullptr, &t);
             if (log)
-                std::fprintf(stderr, "[draw] native frame %s %u -> %u\n", s.abe ? "blend" : "copy (quad)", s.rtFbp, s.fbp);
+                std::fprintf(stderr, "[draw] native frame %s %u -> %u%s\n", s.abe ? "blend" : "copy (quad)", s.rtFbp, s.fbp,
+                             t.rtTexture ? " (from the blur history)" : "");
+            if (s.abe)
+                blurHistoryStats(t.rtTexture != nullptr);
             return 1;
         }
 
@@ -2382,10 +2500,15 @@ namespace
                     auto it = m_rts.find(s.rtFbp);
                     if (it != m_rts.end())
                     {
-                        tex = &readable(it->second); // multisampled: a resolved copy, not the bound target
                         rtScale = it->second.scale;
-                        if (s.rtFbp == s.fbp && it->second.samples <= 1u)
-                            tex = feedbackCopy(*tex);
+                        if (layer && layer->rtTexture)
+                            tex = layer->rtTexture; // [gta-recomp] an older copy of that target (blurHistoryPick)
+                        else
+                        {
+                            tex = &readable(it->second); // multisampled: a resolved copy, not the bound target
+                            if (s.rtFbp == s.fbp && it->second.samples <= 1u)
+                                tex = feedbackCopy(*tex);
+                        }
                     }
                 }
                 else
@@ -2630,6 +2753,12 @@ namespace
         std::vector<HwVertex> m_hudShifted;
         Scale m_frameScale{0.0f, 0.0f}; // [gta-recomp] the native frame's scale (x 0: off; setFrameSize)
         std::unique_ptr<rhi::Texture> m_postBloom[2], m_postTrails; // [gta-recomp] native post-effect buffers
+        // [gta-recomp] the motion blur's frame history (blurHistoryKeep / blurHistoryPick)
+        std::vector<BlurPicture> m_blurHistory;
+        uint32_t m_blurSrcFbp = ~0u, m_blurShownFbp = ~0u;
+        int64_t m_blurLastNs = 0, m_blurShownNs = 0, m_blurAgeNs = 0, m_blurStatsNs = 0;
+        uint64_t m_blurBlends = 0, m_blurFromHistory = 0;
+        double m_blurAgeSumMs = 0.0;
         std::unique_ptr<rhi::Buffer> m_postVb;
         size_t m_postVbCapacity = 0;
         std::vector<HwVertex> m_postVerts;
@@ -4367,7 +4496,8 @@ namespace
             ++m_frameIndex;
             shrinkTargets(); // [gta-recomp]
             {
-                noteFrameBuild(m_frame->inputNs, steadyNs()); // [gta-recomp] input -> ready (gsHwFrameBuildNs), before any queue wait
+                m_frame->builtNs = steadyNs(); // [gta-recomp] the motion blur's frame history (blurHistoryPick)
+                noteFrameBuild(m_frame->inputNs, m_frame->builtNs); // [gta-recomp] input -> ready (gsHwFrameBuildNs), before any queue wait
                 std::unique_lock<std::mutex> lock(m_queueMutex);
                 // Don't let the game run more than a few frames ahead of the main thread.
                 const size_t depth = frameQueueDepth(); // [gta-recomp] gsHwSetShowEveryFrame

@@ -432,6 +432,19 @@ then makes it hold at higher resolutions:
   texture copy, a blended one (motion blur, colour 127/128 at FIX 16) one full-screen quad with the draw's own state.
   Same picture as the strips (static regions within run-to-run noise). The self-copy over the sky stays a GS draw
   (depth-tested; 1:1, so read at full resolution).
+- **Motion blur by time, not by frame** (2026-11-13; `blurHistoryKeep` / `blurHistoryPick`, `PS2X_HW_BLUR_HISTORY=0` =
+  before). The motion blur is VCS's light trails at night (game-internals.md 6g): each frame blends the last shown
+  picture in at FIX 16, so on the PS2 the ghost is one frame, 33 ms, behind. Done once a frame at 144 fps it was 7 ms
+  behind and the trails vanished. Now each finished picture is copied, at the game's copy into the shown buffer, into
+  a small history with the time its frame was built (`Frame::builtNs`, on the game thread before any queue wait), and
+  the blend reads the one nearest to a PS2 frame before its own frame (`LayerTarget::rtTexture`: read in place of the
+  render target, same scale, so the 1:1 full-resolution read is unchanged). Each kept picture holds its own blend, so
+  the trail is the PS2's at any frame rate: 12.5% at 33 ms, 1.6% at 66 ms, with the motion as smooth as the frame
+  rate. Pictures more than 1.25 PS2 frames older than the newest are reused: 4 kept at 60 fps, 7 at 144 (each the
+  size of the frame: ~100 MB at 1440p 144 fps); at 30 fps (the shown picture 3/4 of a PS2 frame old or more) the shown
+  buffer is read as before. Resolution plays no part: the ghost is a sharp 1:1 copy at any size, as on the GS. The
+  game's flag that gates the blend (`0x48653C`, presumably the Display page's Trails) is untouched. `[gs-hw] motion blur` every 10 s:
+  blends, how many read the history, the ghost's mean age.
 
 ### Native frame (milestone 3 step 4, started 2026-10-23)
 

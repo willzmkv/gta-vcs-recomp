@@ -379,6 +379,13 @@ dropped on uploads (lazy render-target patching).
         the glow / warp no longer a third wider than at 4:3. `PS2X_HW_POSTFX=0` = as recorded.
   - [x] Frame copy and motion blur as native passes (texture copy / one full-screen quad); the self-copy over the
         sky stays a GS draw (depth-tested, read at full resolution).
+  - [x] **Light trails above 30 fps** (2026-11-13, a user report: the trails behind lights at night an emulator shows
+        were missing at 144 fps). The motion blur is a once-a-frame blend of the last picture (12.5%), so its ghost was
+        one frame behind: 7 ms at 144 fps, inside the object's edge. It now reads the picture finished one PS2 frame
+        (33 ms) earlier, from a history of the finished pictures (NATIVE_RENDERER.md "Post effects"). Measured on a
+        night flight downtown (the `[gs-hw] motion blur` line): ghost 33.3-34.9 ms behind at 30, 60 and 144 fps; 4 / 7
+        pictures kept at 60 / 144 fps; at a 30 fps cap ~1% of blends (frames early after a hitch) read the history.
+        `PS2X_HW_BLUR_HISTORY=0` = before.
 - [ ] **Step 4: native frame** (started 2026-10-23; NATIVE_RENDERER.md "Native frame").
   - [x] Per-target scales; "Internal resolution: Match window" draws the picture's targets at the window's size
         (1920x1080 at 16:9 1080p), the effect buffers at 1x. Default stays 1x (the original).
@@ -1260,6 +1267,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `PS2X_HW_PIXEL_CENTRE=0` | draws without the GS pixel-centre offset (softer copies, as before 2026-10-23) |
 | `PS2X_HW_RT_FULL=0` | render targets read once per PS2 texel everywhere (higher internal resolutions lost in the copies) |
 | `PS2X_HW_POSTFX=0` or letters `btc` | effects drawn as recorded / only these native: b bloom, t trails, c frame copy + motion blur |
+| `PS2X_HW_BLUR_HISTORY=0` | the motion blur reads the last picture at any frame rate (before 2026-11-13: no light trails above 30 fps), not the one a PS2 frame (33 ms) back |
 | `PS2X_HW_SCALE=0` | native frame: the picture's targets at the window's size (menu: Internal resolution > Match window) |
 | `python tools/rig.py burst DIR N` | the next N presented frames as DIR/burst_NNNN.png + DIR/burst.txt (shape, the renderer's batch) |
 | `PS2X_HW_MENU_SWITCH=0` | widescreen: the pause menu goes 4:3 only after 32 frames without 3D (as before 2026-10-27) |

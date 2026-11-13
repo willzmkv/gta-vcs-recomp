@@ -911,6 +911,21 @@ the next (30 fps). In order:
 UV mapping per primitive fitted from the vertices, u = du/dx * x + offset in texels, x the GS position):
 - Copy 140 -> 0 (frame start) and motion blur 0 -> 140 (`(Cs-Cd)*16/128 + Cd`): bilinear, **u = x + 0.5,
   v = y + 0.5** - on the GS (which samples pixel X at X) exactly texel X's centre: a plain copy.
+- **The motion blur is the "light trails" at night, and it is per frame** (2026-11-13; a user report: an emulator
+  shows trails behind lights at night while the camera moves, the port at 144 fps does not. `tools/eedecomp.py` of the
+  frame, then a night draw log, `PS2X_HW_POSTFX=0`, 23:00 downtown). The per-frame function `FUN_0021E950` calls
+  `FUN_0037BF10(&TheCamera)` (VC's `CCamera::RenderMotionBlur`) -> `FUN_001ACE40(TheCamera + 0xBD8, RwCamera
+  TheCamera + 0x7F4)` -> `FUN_001ABB10` (VC's `CMBlur::OverlayRender`: the colour from `FUN_001AD618`, a switch on
+  the blur type with VC's security-cam / intro colours; drunkness x 175 at +0x10; then `FUN_001AC1F8`, VC's
+  `OverlayRenderFx`). Its blend draws run only while the byte **`0x48653C`** is 1 (VC's `CMBlur::BlurOn`; 1 on the
+  Fort Baxter card - presumably the Display page's Trails, not checked). At 23:00 the blend is the same as at noon:
+  the shown picture (FBP 0, last frame's result) into 140 at **FIX 16, colour 0x7f, every frame**; the 384 chain
+  before it is the current frame (an opaque downsample, back at FIX 7, tint add 0x10 0x0f 0x00). So the trail is
+  feedback: frame n = 0.875 x scene n + 0.125 x frame n-1 - on the PS2 one ghost 33 ms behind at 12.5% (and 1.6% at
+  66 ms), visible where bright lights move over dark. Nothing in it depends on the resolution (a 1:1 copy, read at
+  full resolution). It depends on the frame rate: at 144 fps the ghost is 7 ms behind and the trail ~4.8x shorter on
+  screen, so it is lost in the object's own edge - why the port showed none at the user's 144 fps cap. Fixed the same
+  day: the blend reads the picture finished a PS2 frame earlier (NATIVE_RENDERER.md "Motion blur by time").
 - Self-copy 140 -> 140 after the 3D: point sampling, REGION_CLAMP, colour 0x7f, alpha 0, ZTST GEQUAL at z = 0 (only
   where nothing was drawn: the sky); strips with u = x + 0.94..1.88, v = 1.004 y + 0.94 - the sky shifted by about
   a pixel.
