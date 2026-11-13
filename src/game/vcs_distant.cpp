@@ -74,7 +74,9 @@ namespace vcs::distant
         constexpr uint32_t kRandomPedVtable = 0x00490840u;
         constexpr float kPedHeight = 1.0f;          // a ped's origin above its node
         constexpr float kCrowdNear = 310.0f;        // strictly beyond the real pedestrian band (~300 m)
-        constexpr uint32_t kMaxWalkers = 60;
+        // 60 walkers past the real crowd; 160 with the crowd bands (CROWD_BANDS_PLAN.md step 3: the real crowd ends at
+        // 200 m and the walkers are all the city shows past it)
+        constexpr uint32_t kMaxWalkers = 160, kWalkers = 60;
         constexpr float kPedTemplateRange = 360.0f; // cover the extended real pedestrian band (~325 m)
         constexpr uint32_t kRegisterCorona = 0x0027DD80u;
         constexpr uint32_t kCoronaTable = 0x00512560u, kCoronaSlots = 56u, kCoronaStride = 0x30u;
@@ -243,6 +245,11 @@ namespace vcs::distant
                 const float d = std::hypot(n.x - cx, n.y - cy);
                 if (!usable(n) || d < lo || d > hi || (n.x - cx) * fx + (n.y - cy) * fy < 0.5f * d)
                     continue;
+                // with the crowd bands, walkers as the game spreads its own: a node's density class (flags >> 12 & 3) takes the chance the
+                // spot finders give it (rand & 15 <= {0, 4, 7, 15}: game-internals.md 12d) - busy pavements fill most
+                static constexpr uint32_t kClassChance[4] = {0, 4, 7, 15};
+                if (walker && vcs::distance::crowdBands() && (g_rng() & 15u) > kClassChance[(n.flags >> 12) & 3u])
+                    continue;
                 const uint16_t to = nextNode(nodes, count, links, i, 0xFFFFu, first);
                 if (to == 0xFFFFu || to == i)
                     continue;
@@ -372,7 +379,8 @@ namespace vcs::distant
                 {
                     float pedLo, pedHi;
                     crowdBand(pedLo, pedHi);
-                    const uint32_t wantedWalkers = std::min<uint32_t>(kMaxWalkers, static_cast<uint32_t>(crowds) * 60u / 100u);
+                    const uint32_t most = vcs::distance::crowdBands() ? kMaxWalkers : kWalkers;
+                    const uint32_t wantedWalkers = std::min<uint32_t>(most, static_cast<uint32_t>(crowds) * most / 100u);
                     move(g_walkers, kMaxWalkers, wantedWalkers, true, nodes, count,
                          count + peds, links, pedLo, pedHi, kPedHeight, walkers);
                 }

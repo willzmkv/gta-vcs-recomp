@@ -1784,6 +1784,11 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         return 65.0f * base * pedDistance();
     }
 
+    bool crowdBands()
+    {
+        return bandsOn();
+    }
+
     bool populationRaised()
     {
         return g_population.load(std::memory_order_relaxed) > 100 || g_traffic.load(std::memory_order_relaxed) > 100 ||
