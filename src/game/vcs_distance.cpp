@@ -186,7 +186,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         std::atomic<bool> g_bands{false};
         const int g_bandNear = static_cast<int>(envFloat("VCS_CROWD_NEAR", 20.0f));
         const int g_bandMid = static_cast<int>(envFloat("VCS_CROWD_MID", 20.0f));
-        constexpr float kBandNear = 100.0f, kBandEdge = 200.0f, kBandOut = 210.0f;
+        constexpr float kBandNear = 100.0f, kBandEdge = 200.0f, kBandOut = 210.0f, kBandMidSpawn = 155.0f;
         constexpr float kBandAdoptMax = 450.0f; // past it a ped in view is a few pixels: faded, not made a walker
         std::atomic<uint32_t> g_births{0}; // popview's births= (the ped count's rises, once a game frame)
         uint32_t g_carRing = 0;
@@ -1092,7 +1092,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         }
 
         // The crowd bands' rings (g_bands), as AddToPopulation's four floats ($f12..$f15): a ring only where a band is short
-        // - in view for the camera-cut fill alone (the picture is new), out of view the near band first; a closed ring
+        // - the near band first, in view and out of view (in view from 10 m for the camera-cut fill: the picture is new); a closed ring
         // (nearest = farthest) finds no spot. Set at AddToPopulation's entry and again at its spot finder's call (0x2B1E34): on one
         // path it makes its in-view ring again from its own 35 / 60 m (0x2B1A00, with the cars below their cap), and on
         // retries it adds 30-60 m to that ring - closed it stays closed.
@@ -1102,13 +1102,19 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         {
             const Bands bands = bandCounts();
             const bool nearShort = bands.nearCount < g_bandNear, midShort = bands.midCount < g_bandMid;
-            auto ring = [&](int lo, int hi, float nearHi, bool open) {
-                const bool n = open && nearShort, m = open && !nearShort && midShort;
-                ctx->f[lo] = n ? 10.0f : m ? kBandNear : 0.0f;
-                ctx->f[hi] = n ? nearHi : m ? kBandEdge - 10.0f : 0.0f;
+            // Both rings span their band (2026-11-13: out of view 10-60 m alone, the in-view ring closed, put the whole
+            // crowd in a knot around the player and none down the street). In view no nearer than before the bands (a ped
+            // made there is seen standing up; farther the faster the camera); the middle band to 155 m, the node list's
+            // reach (160 m).
+            const float inMin = g_bandFill ? 10.0f : std::max(55.0f, 40.0f + 1.5f * g_cameraSpeed.load(std::memory_order_relaxed));
+            auto ring = [&](int lo, int hi, float nearLo) {
+                const float a = nearShort ? nearLo : midShort ? std::max(nearLo, kBandNear) : 0.0f;
+                const float b = nearShort ? kBandNear : midShort ? kBandMidSpawn : 0.0f;
+                ctx->f[lo] = a < b ? a : 0.0f;
+                ctx->f[hi] = a < b ? b : 0.0f;
             };
-            ring(14, 15, 60.0f, true);
-            ring(12, 13, kBandNear, g_bandFill);
+            ring(14, 15, 25.0f);
+            ring(12, 13, inMin);
             // the farthest in view is also the radius the finder takes links within, out of view too (FUN_00267E98):
             // a closed in-view ring is empty (nearest = farthest) at the out-of-view ring's reach, never 0
             if (ctx->f[13] <= ctx->f[12])

@@ -61,9 +61,11 @@ Done when: PERFORMANCE.md 49 has the table.
 
 In vcs_distance.cpp, only while the population is raised:
 - **Cap** the random peds at near + middle (`VCS_CROWD_NEAR` 20, `VCS_CROWD_MID` 20); the game's cap word gets it.
-- **Rings**: no ring in view (a ped made there is seen standing up) except the camera-cut fill; out of view the ring
-  goes where a band is short - near (10-60 m) while the near band is below its number, else 100-200 m (side streets,
-  behind). The middle band in view is fed by walkers handed over (step 4) and by peds walking into view.
+- **Rings**: both rings where a band is short - near (out of view 25-100 m, in view from max(55, 40 + 1.5 x the camera's
+  speed) m to 100 m, from 10 m for the camera-cut fill) while the near band is below its number, else 100-155 m (155: the
+  ped node list's reach). The middle band is fed by these, by walkers handed over (step 4) and by peds walking into view.
+  (First version, 2026-11-13: no ring in view but the fill's and out of view 10-60 m - in play the whole crowd stood in
+  a knot around the player and the streets ahead were empty.)
 - **Edge**: a random ped past 210 m (10 m of hysteresis) goes: out of view faded as now (`trimCrowd`), in view handed
   to a walker (step 4; until then faded, a few pixels tall).
 - `realPedOuterRadius()` answers 200 m, so `crowdBand` starts the walkers at 205 m without other changes.
@@ -102,6 +104,10 @@ the walkers' draws stay instanced (draw count), no flicker.
   immediate removal path to find (CPopulation's remove of a ped / the pool's delete through the world).
 - Mismatches: a walker whose model the game cannot make now (not loaded, the zone's group) keeps walking until it can
   or turns back; never vanishes in view.
+- A walker waits only in the 20 m inside its band's edge (`kHandDepth`, 185-205 m), turns back once after a second
+  untaken, and goes when the camera pushes it deeper or its way back keeps it there for 6 s. (First version: it waited
+  at any distance ahead of the camera, so the player drove up to it - in play walkers stood a few metres away, a posed
+  template mesh with its legs missing or sitting in the air. Its template's pose and parts only hold at 200 m.)
 
 Done when: pictures of a handover at 200 m from the free camera 30 m behind (both ways) show the same model at the
 same place; no ped appears or vanishes in view within 250 m over 5 minutes (a counter of births / removals in view by
@@ -132,6 +138,7 @@ thread's packet building and the worker's replay copies.
 | 2 Real bands | in (`VCS_CROWD_BANDS=1`, off): near fills, the middle band 2-5 of 20 from out of view; game thread -1.6-1.9 ms |
 | 3 Walkers from 200 m | in (with the bands): up to 160 walkers at 205-505 m, placed by the nodes' density class; ~158 placed at Little Havana, the GS stage's share small (its time moved with the busy machine, with and without walkers) |
 | 4 Handover | in (with the bands; Graphics > Distance and population > **Crowd bands**, off): both ways, checked by log (`VCS_CROWD_BANDS_LOG`): the new ped at the walker's place (0.00 m), its model, its heading within ~0.1 rad, walking (state 5) a second later; the middle band fills (18-22 of 20) |
-| 5 Default | waiting: the player's look in play, and the benchmark on a quiet machine (the slow frames doubled on a busy one, PERFORMANCE.md 49) |
+| 4b Fixes from play (2026-11-13) | the player's first look: walkers a few metres away (legs missing, sitting in the air) and the crowd in a knot near the player. Walkers held to 185 m+ (nearest seen on a drive: 185 m, before: a few metres); rings spread over the bands, in view too: on the avenue drive near 14-41 (about 24 of 20) and middle 5-24 (about 15 of 20), spread like the game's own (bands off: near 15-49, middle 3-48, past 200 m up to 29) |
+| 5 Default | waiting: the player's look in play again, and the benchmark on a quiet machine (the slow frames doubled on a busy one, PERFORMANCE.md 49) |
 | 6 GPU skinning | - |
 | 7 RSL submission | - |

@@ -77,6 +77,7 @@ namespace vcs::distant
         // 60 walkers past the real crowd; 160 with the crowd bands (CROWD_BANDS_PLAN.md step 3: the real crowd ends at
         // 200 m and the walkers are all the city shows past it)
         constexpr uint32_t kMaxWalkers = 160, kWalkers = 60;
+        constexpr float kHandDepth = 20.0f; // how far inside the walkers' band a walker waits for its handover (m)
         constexpr float kPedTemplateRange = 360.0f; // cover the extended real pedestrian band (~325 m)
         constexpr uint32_t kRegisterCorona = 0x0027DD80u;
         constexpr uint32_t kCoronaTable = 0x00512560u, kCoronaSlots = 56u, kCoronaStride = 0x30u;
@@ -97,8 +98,8 @@ namespace vcs::distant
             uint32_t model = 0;
             float side = 0.0f; // to the right of the link (walkers: a pavement's width)
             bool alive = false;
-            // the crowd bands' handover (walkers): 1 waiting to become a real ped, 2 taken (gone at the next tick); where
-            // it stood when last moved
+            // the crowd bands' handover (walkers): 1 waiting to become a real ped, 2 taken (gone at the next tick), 3 turned
+            // back untaken (walks on, never waits again until back in the band); where it stood when last moved
             uint8_t hand = 0;
             uint16_t handFrames = 0;
             float at[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // x, y, z, heading
@@ -358,10 +359,11 @@ namespace vcs::distant
                 const float z = a.z + (b.z - a.z) * c.t + height;
                 const float d = std::hypot(x - cx, y - cy);
                 const float ahead = (x - cx) * vx + (y - cy) * vy;
-                if (walker && d < lo && ahead > 0.0f && vcs::distance::crowdBands())
+                if (walker && d < lo && d >= lo - kHandDepth && ahead > 0.0f && vcs::distance::crowdBands())
                 {
                     // come in past the band in view: it waits to become a real ped (vcs_distance.cpp takes it), walking
-                    // on; not taken within ~a second (the bands full) it turns back - never gone in plain sight
+                    // on; not taken within ~a second (the bands full) it turns back once - never gone in plain sight. The
+                    // camera coming at it pushes it deeper: past kHandDepth it goes (below)
                     if (c.hand == 0)
                     {
                         c.hand = 1;
@@ -372,15 +374,24 @@ namespace vcs::distant
                         std::swap(c.from, c.to);
                         c.t = 1.0f - c.t;
                         c.side = -c.side;
+                        c.hand = 3;
+                    }
+                    else if (c.hand == 3 && ++c.handFrames > 360) // its way back held it inside (a link along the band)
+                    {
+                        c.alive = false;
                         c.hand = 0;
+                        continue;
                     }
                 }
                 else if (d < lo || d > hi * 1.05f || ahead < -20.0f)
                 {
+                    // (2026-11-13: a waiting walker was kept at any distance in view, so the player drove up to it - a
+                    // posed template mesh a few metres away, legs missing, sitting in the air)
                     c.alive = false;
+                    c.hand = 0;
                     continue;
                 }
-                else if (c.hand == 1)
+                else
                     c.hand = 0;
                 c.at[0] = x;
                 c.at[1] = y;
