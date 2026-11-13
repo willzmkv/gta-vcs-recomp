@@ -1191,7 +1191,9 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_PROFILE_INCLUSIVE=1` | with `VCS_PROFILE`: every guest function on the sampled stack counts once per sample (a subsystem's whole cost) |
 | `VCS_VIEW_DISTANCE`, `VCS_DETAIL_DISTANCE`, `VCS_POPULATION_DISTANCE`, `VCS_VEHICLE_DENSITY`, `VCS_PEDESTRIAN_DENSITY` | Graphics > Distance and population for one run (0..100) |
 | `VCS_CAR_RINGS=n`, `VCS_PED_INVIEW_K=k`, `VCS_PED_OUT_K=k`, `VCS_PED_INVIEW_MIN=m` | the spawn rings (1, 0, 1, 55 m; `VCS_PED_OUT_K=0`: out of view at the population distance's, as before 2026-11-12; rings / k > 1 bring spawns in view near: they appear) |
-| `VCS_PED_PROXY=<m>` | real random peds past it drawn as proxies (default 110 m with the population raised; 0 off; PERFORMANCE.md 43) |
+| `VCS_PED_PROXY=<m>` | real random peds past it drawn as proxies (default 150 m with the population raised; 0 off; PERFORMANCE.md 43, 46) |
+| `VCS_CROWD_LOD_TIERS=a,b` | far random peds processed every a-th frame past 150 m, every b-th past 220 m (default 4,6; 3,3 as the game's LOD before; PERFORMANCE.md 44, 46) |
+| `VCS_RETICLE=0\|1` | the free-aim reticle: the game's circle, or a dot (`enhance.reticle`; CONTROLS.md) |
 | `VCS_PED_DRAW_MAX=<m>` | probe: peds drawn no farther (what drawing the far crowd costs) |
 | `VCS_PROXY_DEBUG=1` | a sample of the proxy culls with their reason (behind / small / outside / clipped) |
 | `VCS_POP_CAPS=cars,peds` | fixed population caps (default 0,0: the pools' room; 64,104 before 2026-11-12) |

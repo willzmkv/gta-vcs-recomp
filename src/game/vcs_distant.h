@@ -21,6 +21,7 @@ namespace vcs::distant
         float distance;
         uint32_t id;    // its slot (a stable choice of model when its own is not drawn)
         uint32_t model; // the model it wears (0: any)
+        bool still;     // a real ped standing (a still template's pose); walkers and cars false
     };
     // The latest frame's proxies (any thread): copies them out, returns the frame number they belong to (0: none).
     uint32_t snapshot(std::vector<Proxy> &out);

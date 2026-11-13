@@ -153,7 +153,7 @@ namespace vcs::distant
         {
             static const float d = [] {
                 const char *e = std::getenv("VCS_PED_PROXY");
-                return e && *e ? static_cast<float>(std::atof(e)) : 110.0f;
+                return e && *e ? static_cast<float>(std::atof(e)) : 150.0f; // (110 until 2026-11-12: the switch was seen)
             }();
             return d;
         }
@@ -161,6 +161,7 @@ namespace vcs::distant
         std::vector<Proxy> g_realPedProxies;        // this frame's (game thread), handed over at frameKicked
         std::vector<uint32_t> g_realPedModels;      // the models drawn by the game this frame (their templates)
         std::atomic<uint64_t> g_statRealProxied{0}, g_statRealDrawn{0};
+        std::atomic<uint64_t> g_statRealOrphan{0}; // real ped proxies with no template of their model (another's used)
         thread_local std::shared_ptr<const FrameGroups> t_frame;
         thread_local const FrameGroups::Group *t_group = nullptr;
 
@@ -479,14 +480,17 @@ namespace vcs::distant
             }
             uint16_t model;
             std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
-            const bool known = std::find(g_realPedModels.begin(), g_realPedModels.end(), model) != g_realPedModels.end();
+            // a template per model and per walking / standing: a proxy wears a pose like its own (a standing ped shown
+            // walking on the spot, then stopping as it came into the game's own draw, read as fake: the player's report)
+            const uint32_t key = model | (pedMoving(entity) ? 0x10000u : 0u);
+            const bool known = std::find(g_realPedModels.begin(), g_realPedModels.end(), key) != g_realPedModels.end();
             const float dx = rdf(entity + 0x30u) - rdf(kCameraPos), dy = rdf(entity + 0x34u) - rdf(kCameraPos + 4u);
             const float dz = rdf(entity + 0x38u) - rdf(kCameraPos + 8u);
             if (dx * dx + dy * dy + dz * dz <= pedProxyDistance() * pedProxyDistance() || !known)
             {
                 if (!known)
                 {
-                    g_realPedModels.push_back(model); // drawn by the game: this model's template this frame
+                    g_realPedModels.push_back(key); // drawn by the game: this model's (and pose's) template this frame
                     g_statRealDrawn.fetch_add(1, std::memory_order_relaxed);
                 }
                 return false;
@@ -532,6 +536,7 @@ namespace vcs::distant
                     uint16_t model;
                     std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
                     p.model = model;
+                    p.still = !pedMoving(entity);
                     g_realPedProxies.push_back(p);
                     g_statRealProxied.fetch_add(1, std::memory_order_relaxed);
                     ctx->pc = GPR_U32(ctx, 31);
@@ -830,7 +835,10 @@ namespace vcs::distant
             const Rendered &r = g_rendered[i];
             if (r.ped != peds)
                 continue;
-            auto at = std::find_if(templates.begin(), templates.end(), [&](uint32_t t) { return g_rendered[t].model == r.model; });
+            // (peds: one walking and one standing per model, when both are drawn - a proxy wears a pose like its own)
+            auto at = std::find_if(templates.begin(), templates.end(), [&](uint32_t t) {
+                return g_rendered[t].model == r.model && (!peds || g_rendered[t].moving == r.moving);
+            });
             if (at == templates.end())
                 templates.push_back(i);
             else
@@ -846,7 +854,8 @@ namespace vcs::distant
             std::vector<uint32_t> &models = peds ? g_pedModels : g_models;
             models.clear();
             for (uint32_t t : templates)
-                models.push_back(g_rendered[t].model);
+                if (models.empty() || models.back() != g_rendered[t].model) // (sorted: a model's two templates together)
+                    models.push_back(g_rendered[t].model);
             const std::vector<Proxy> &proxies = peds ? pedProxies : carProxies;
             // each proxy to the template of its model, else to one chosen by its slot; those behind the camera dropped
             const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u), cz = rdf(kCameraPos + 8u);
@@ -856,11 +865,25 @@ namespace vcs::distant
             {
                 if ((p.m[12] - cx) * fx + (p.m[13] - cy) * fy + (p.m[14] - cz) * fz < -20.0f)
                     continue;
-                size_t k = 0;
-                while (k < templates.size() && g_rendered[templates[k]].model != p.model)
-                    ++k;
+                // its model's template in its own pose (walking / standing), else its model's other one
+                size_t k = 0, other = templates.size();
+                for (; k < templates.size(); ++k)
+                {
+                    const Rendered &t = g_rendered[templates[k]];
+                    if (t.model != p.model)
+                        continue;
+                    if (t.moving == !p.still)
+                        break;
+                    other = k;
+                }
                 if (k == templates.size())
+                    k = other;
+                if (k == templates.size())
+                {
                     k = ((p.id * 2654435761u) >> 8) % templates.size();
+                    if (peds && &p >= pedProxies.data() + (pedProxies.size() - realPeds.size()))
+                        g_statRealOrphan.fetch_add(1, std::memory_order_relaxed); // a real ped shown as another model
+                }
                 by[k].push_back(&p);
             }
             for (size_t k = 0; k < templates.size(); ++k)
@@ -1010,7 +1033,8 @@ namespace vcs::distant
                                std::to_string(g_statProxy[1].load()) + "/" + std::to_string(g_statProxy[2].load()) +
                                " stale=" + std::to_string(g_statStale.load()) +
                                " realproxied=" + std::to_string(g_statRealProxied.load()) +
-                               " realtemplates=" + std::to_string(g_statRealDrawn.load());
+                               " realtemplates=" + std::to_string(g_statRealDrawn.load()) +
+                               " realorphans=" + std::to_string(g_statRealOrphan.load());
             for (size_t i = 0; i < p.size() && i < 8; ++i)
             {
                 char b[96];

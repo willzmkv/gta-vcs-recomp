@@ -1173,6 +1173,20 @@ station, sliders 50, distant traffic / crowds off, three alternating rounds (`VC
 Modest: a proxy is still a native draw per part. The single-spot measurement varies ±1-2 ms with the random
 population (one round each in Little Havana showed nothing either way); three rounds or more per side.
 
+### 46. The far crowd seen as fake: proxies and LOD tiers moved out (2026-11-12)
+
+The player saw "fake" people close by turn into NPCs as they came nearer. Two of the changes above showed: a real ped
+past 110 m wore its model's template's pose - a walking one first, so a standing ped walked on the spot and stopped
+when it came into the game's own draw - and past 110 / 180 m peds moved 15 / 10 times a second. Now:
+
+- templates per model **and** per walking / standing (a ped's speed, +0x140): a proxy wears a pose like its own; the
+  decorative walkers take the walking one;
+- `VCS_PED_PROXY` defaults to **150 m** (was 110);
+- the crowd LOD keeps every third frame to 150 m, every fourth past 150 m, every sixth past 220 m (were 110 / 180).
+
+No real ped proxy was ever shown as another model (the `proxies` command's `realorphans=`: 0 at both spots). The cost
+of the farther tiers is to be measured again.
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker
