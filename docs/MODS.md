@@ -93,7 +93,13 @@ each entry its sectors, and its model infos keep each name's key, so a file name
 - **How**: the mod loader hands the list to the stream layer (`vcs::setStreamFiles`); at the next read the stream
   thread resolves each name against the game's tables (the disc's file table for GTA3PS2.IMG's LSN, the model infos'
   keys, the streaming info's offset / size) and lays the mod's bytes over every disc read that covers the entry. An
-  entry already in memory changes when the game streams it again. `VCS_MOD_FILES=0`: none.
+  entry already in memory changes when the game streams it again (cars, peds, weapons: when they come back into the
+  scene). **Vic's model** the game never drops (the player's report, 2026-11-13: a mod switched off stayed on, even
+  after loading the save): an entry whose served bytes changed is "dirty", and where the game dresses the player (an
+  outfit change, a save's load) the request first has the game remove the dirty model - its dictionary goes with it
+  when nothing else holds it - so both are read anew; a switch of a mod holding his model or dictionary dresses him
+  again at once in his outfit (UNDRESS_CHAR, on foot; in a vehicle at the next dressing). Checked with HD Hands
+  switched off / on / off in play: the hands follow each switch. `VCS_MOD_FILES=0`: none.
 - **`tools/img.py`**: `table` (the directory from a hidden run into `build/img/streaming.json`), `list`, `extract`
   (from the player's disc image into `build/img/GTA3PS2`, named `admiral.mdl` / `#1234.bin`): an extracted folder is a
   mod as it is. The entries are the game's data - never in git.

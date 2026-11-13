@@ -9,6 +9,7 @@
 // Here they are replaced: reads are queued for a host thread that copies from the disc image into EE RAM; a poll
 // says busy until the copy is done. The game never touches a buffer before its poll says done, as with the IOP.
 #include "game/vcs_stream.h"
+#include "debug/rig.h"
 #include "mods/rwconv.h"
 
 #include "ps2_runtime.h"
@@ -29,6 +30,8 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <set>
+#include <unordered_map>
 #include <mutex>
 #include <thread>
 #include "runtime/ps2_host_std.h"
@@ -82,7 +85,30 @@ namespace vcs
         {
             uint32_t lsn, sectors;
             std::vector<uint8_t> data; // the mod's file (the rest of the entry's sectors read as zeros)
+            uint32_t index = 0xFFFFFFFFu; // its GTA3PS2.IMG entry (none: a loose disc file)
         };
+
+        // Mods switched while the game runs (the player's report, 2026-11-13: a mod switched off stayed in the game,
+        // even after loading the save): an entry already in memory keeps the bytes it was read with - Vic's model above
+        // all, which the game never drops. Each resolve compares what every entry is served (the mod's bytes, or the
+        // disc's) with the last one; an entry whose bytes changed is "dirty" until the game reads it again. Where the
+        // game dresses the player (FUN_00214900: an outfit change, a save's load, UNDRESS_CHAR) its request of the model
+        // first has the game remove the dirty model and its dirty, unused texture dictionary (CStreaming::RemoveModel,
+        // FUN_003C8618), so the request reads them anew; switching a mod that holds the player's model or dictionary
+        // dresses him again in his outfit at once (UNDRESS_CHAR, on foot only).
+        std::mutex g_resolveMutex;                          // resolveFiles: the stream thread, or the game thread's dressing
+        std::unordered_map<uint32_t, uint64_t> g_served;     // entry -> a hash of its mod bytes (absent: the disc's)
+        bool g_servedOnce = false; // the first resolve (before the game's first read) marks nothing dirty
+        std::mutex g_dirtyMutex;
+        std::set<uint32_t> g_dirty;
+
+        uint64_t fnv(const std::vector<uint8_t> &data)
+        {
+            uint64_t h = 0xCBF29CE484222325ull;
+            for (const uint8_t b : data)
+                h = (h ^ b) * 0x100000001B3ull;
+            return h ^ data.size();
+        }
         std::mutex g_filesMutex;
         std::vector<StreamFile> g_files;
         uint64_t g_filesGeneration = 0, g_resolvedGeneration = 0;
@@ -416,7 +442,7 @@ namespace vcs
                     patch(at + 0x14u, span);
                     imgMoved = true;
                 }
-                Overlay o{first, span, std::move(bytes)};
+                Overlay o{first, span, std::move(bytes), index};
                 taken.push_back(index);
                 std::fprintf(stderr, "[mods] %s: %s -> GTA3PS2.IMG entry %u (LSN %u, %u sectors%s)\n", f.mod.c_str(), f.path.c_str(),
                              index, o.lsn, o.sectors, o.sectors > sectors ? ", larger than the disc's: moved" : "");
@@ -432,9 +458,37 @@ namespace vcs
                     if (rd32(rdram, kOpenFiles + i * 0x14u + 4u) == imgLsn)
                         patch(kOpenFiles + i * 0x14u + 8u, bytes);
             }
+            {
+                std::unordered_map<uint32_t, uint64_t> served;
+                for (const Overlay &o : overlays)
+                    if (o.index != 0xFFFFFFFFu)
+                        served[o.index] = fnv(o.data);
+                std::lock_guard<std::mutex> lock(g_dirtyMutex);
+                for (const auto &[index, hash] : g_servedOnce ? served : decltype(served)())
+                    if (const auto old = g_served.find(index); old == g_served.end() || old->second != hash)
+                        g_dirty.insert(index);
+                for (const auto &[index, hash] : g_served)
+                    if (!served.count(index))
+                        g_dirty.insert(index);
+                g_served = std::move(served);
+                g_servedOnce = true;
+            }
             std::lock_guard<std::mutex> lock(g_filesMutex);
             g_overlays = std::move(overlays);
             return true;
+        }
+
+        // the list's changes taken in, on whichever thread gets there first
+        void resolveNow(uint8_t *rdram)
+        {
+            std::lock_guard<std::mutex> resolving(g_resolveMutex);
+            bool resolve;
+            {
+                std::lock_guard<std::mutex> lock(g_filesMutex);
+                resolve = g_resolvedGeneration != g_filesGeneration;
+            }
+            if (resolve)
+                resolveFiles(rdram);
         }
 
         // the mods' bytes over a disc read that covers their entries (whole or in part)
@@ -488,13 +542,7 @@ namespace vcs
                     std::memset(r.rdram + dest, 0, bytes);
                 else if (!disc || !disc->readBytes(static_cast<uint64_t>(request.lsn) * 2048u, bytes, r.rdram + dest))
                     std::fprintf(stderr, "[stream] read of %u bytes at LSN 0x%x failed\n", bytes, request.lsn);
-                bool resolve;
-                {
-                    std::lock_guard<std::mutex> lock(g_filesMutex);
-                    resolve = g_resolvedGeneration != g_filesGeneration;
-                }
-                if (resolve)
-                    resolveFiles(r.rdram);
+                resolveNow(r.rdram);
                 overlay(request.lsn, bytes, r.rdram + dest);
                 r.reads.fetch_add(1, std::memory_order_relaxed);
                 r.bytes.fetch_add(bytes, std::memory_order_relaxed);
@@ -569,13 +617,123 @@ namespace vcs
             SET_GPR_U64(ctx, 2, 0);
             ctx->pc = GPR_U32(ctx, 31);
         }
+
+        // FUN_003CB900(model, flags, ?) = CStreaming::RequestModel; its call in FUN_00214900 (dressing the player)
+        // returns to 0x2149A4. Before the original (DECISIONS.md, hooks): a dirty model / dictionary of the request,
+        // loaded, is removed first by a tail call of the game's RemoveModel (FUN_003C8618(streaming, entry)) that returns
+        // here (0x3CB900); the request's own arguments come back then, and the original runs.
+        constexpr uint32_t kRequestModel = 0x003CB900u, kDressRequestReturn = 0x002149A4u, kRemoveModel = 0x003C8618u;
+        constexpr uint32_t kModelTxd = 0x1Eu; // a model info's texture dictionary slot (s16; -1 none)
+        PS2Runtime::RecompiledFunction g_requestModel = nullptr;
+        struct Saved
+        {
+            bool on = false;
+            uint32_t a0, a1, a2, a3, ra, sp;
+        } g_saved;
+
+        PS2_GUEST_CC void requestModel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (g_saved.on && GPR_U32(ctx, 31) == kRequestModel && GPR_U32(ctx, 29) == g_saved.sp) // back from a removal of ours
+            {
+                SET_GPR_U32(ctx, 4, g_saved.a0);
+                SET_GPR_U32(ctx, 5, g_saved.a1);
+                SET_GPR_U32(ctx, 6, g_saved.a2);
+                SET_GPR_U32(ctx, 7, g_saved.a3);
+                SET_GPR_U32(ctx, 31, g_saved.ra);
+            }
+            g_saved.on = false; // (any other entry: a removal of ours that never came back is forgotten)
+            if (GPR_U32(ctx, 31) == kDressRequestReturn)
+            {
+                resolveNow(rdram);
+                const uint32_t streaming = rd32(rdram, kStreaming), model = GPR_U32(ctx, 4);
+                const uint32_t infos = rd32(rdram, kModelInfos), txdBase = streaming ? rd32(rdram, streaming + 8u) : 0u;
+                const uint32_t records = streaming ? rd32(rdram, streaming + 200u) : 0u;
+                auto loaded = [&](uint32_t entry) { return records && rdram[(records + entry * 0x18u + 0xCu) & PS2_RAM_MASK] == 1; };
+                uint32_t remove = 0xFFFFFFFFu;
+                {
+                    std::lock_guard<std::mutex> lock(g_dirtyMutex);
+                    if (model < kResources && g_dirty.count(model) && loaded(model))
+                        remove = model;
+                    else if (model < kResources && infos)
+                    {
+                        // its dictionary, once no loaded model holds it (refs, the TXD store's item +4)
+                        const uint32_t info = rd32(rdram, infos + model * 4u);
+                        int16_t slot = -1;
+                        if (info >= 0x100000u && info < PS2_RAM_SIZE)
+                            std::memcpy(&slot, rdram + ((info + kModelTxd) & PS2_RAM_MASK), 2);
+                        const uint32_t pool = rd32(rdram, kTxdPool), items = pool ? rd32(rdram, pool) : 0u;
+                        // (the model's removal drops a dictionary no other model holds: then it is read anew already)
+                        if (slot >= 0 && items && g_dirty.count(txdBase + uint32_t(slot)))
+                        {
+                            if (!loaded(txdBase + uint32_t(slot)))
+                                g_dirty.erase(txdBase + uint32_t(slot));
+                            else if (rd32(rdram, items + uint32_t(slot) * kTxdItem + 4u) == 0)
+                                remove = txdBase + uint32_t(slot);
+                        }
+                    }
+                    if (remove != 0xFFFFFFFFu)
+                        g_dirty.erase(remove);
+                    else
+                        g_dirty.erase(model); // (read anew by this request, or not loaded: clean either way)
+                }
+                if (remove != 0xFFFFFFFFu)
+                {
+                    std::fprintf(stderr, "[mods] entry %u changed by a mod: removed for the player's model to be read again\n", remove);
+                    g_saved = {true, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 7), GPR_U32(ctx, 31), GPR_U32(ctx, 29)};
+                    SET_GPR_U32(ctx, 4, streaming);
+                    SET_GPR_U32(ctx, 5, remove);
+                    SET_GPR_U32(ctx, 31, kRequestModel);
+                    ctx->pc = kRemoveModel;
+                    return;
+                }
+            }
+            g_requestModel(rdram, ctx, runtime);
+        }
+
+        // UNDRESS_CHAR (020F) the player into his outfit (0x487400, STORE_PLAYER_OUTFIT's): FUN_00214900 and the request
+        // above. On foot only (a mission's or a shop's own dressing works so); else at the next dressing / load.
+        constexpr uint32_t kPlayerPed = 0x004E4910u, kOutfit = 0x00487400u;
+        void redressPlayer()
+        {
+            rig::runOnGameThread([](uint8_t *rdram, R5900Context *, PS2Runtime *) {
+                resolveNow(rdram);
+                const uint32_t ped = rd32(rdram, kPlayerPed), infos = rd32(rdram, kModelInfos), streaming = rd32(rdram, kStreaming);
+                if (!ped || !infos || !streaming || rd32(rdram, ped + 0x480u) != 0)
+                    return;
+                uint16_t model;
+                std::memcpy(&model, rdram + ((ped + 0x56u) & PS2_RAM_MASK), 2);
+                const uint32_t info = model < kResources ? rd32(rdram, infos + model * 4u) : 0u;
+                int16_t slot = -1;
+                if (info >= 0x100000u && info < PS2_RAM_SIZE)
+                    std::memcpy(&slot, rdram + ((info + kModelTxd) & PS2_RAM_MASK), 2);
+                {
+                    std::lock_guard<std::mutex> lock(g_dirtyMutex);
+                    if (!g_dirty.count(model) && !(slot >= 0 && g_dirty.count(rd32(rdram, streaming + 8u) + uint32_t(slot))))
+                        return;
+                }
+                char outfit[9] = {};
+                std::memcpy(outfit, rdram + kOutfit, 8);
+                if (!outfit[0])
+                    return;
+                std::vector<uint8_t> code = {0x0F, 0x02, 0xCF, 0xA5, 0x0A}; // UNDRESS_CHAR $PLAYER "<outfit>"
+                code.insert(code.end(), outfit, outfit + std::strlen(outfit) + 1);
+                code.push_back(0x23); // TERMINATE_THIS_SCRIPT (0x0023)
+                code.push_back(0x00);
+                const uint32_t script = rig::startCodeScript(rdram, code.data(), code.size(), "mods");
+                std::fprintf(stderr, "[mods] the player's model or textures changed: dressed again in \"%s\"%s\n", outfit,
+                             script ? "" : " - no script slot free (at the next dressing)");
+            });
+        }
     }
 
     void setStreamFiles(std::vector<StreamFile> files)
     {
-        std::lock_guard<std::mutex> lock(g_filesMutex);
-        g_files = std::move(files);
-        ++g_filesGeneration; // resolved at the next read - also an empty list: the game's records put back
+        {
+            std::lock_guard<std::mutex> lock(g_filesMutex);
+            g_files = std::move(files);
+            ++g_filesGeneration; // resolved at the next read - also an empty list: the game's records put back
+        }
+        redressPlayer(); // (a mod with the player's model or textures: in the game at once)
     }
 
     bool installStreamHooks(PS2Runtime &runtime)
@@ -587,6 +745,8 @@ namespace vcs
             return false;
         }
         runtime.replaceFunction(kRead, &streamRead);
+        if ((g_requestModel = runtime.lookupFunction(kRequestModel)))
+            runtime.replaceFunction(kRequestModel, &requestModel);
         runtime.replaceFunction(kPoll, &streamPoll);
         runtime.replaceFunction(kFn5, &streamFn5);
         return true;
