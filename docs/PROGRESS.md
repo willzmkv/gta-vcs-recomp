@@ -585,6 +585,13 @@ dropped on uploads (lazy render-target patching).
       are created (frames other than the PS2's only). `tools/haze_check.py`: state 60 reached, both thugs at health
       100, the truck parked; the whole mission passes at original 60 and independent 144 fps; with the fixes off it
       sticks as before. Open: why the hit differs with the step (game-internals.md 13).
+- [x] **The radio skipped ahead when getting back into a car above 30 fps** (2026-11-14, GitHub issue 117; game-internals.md
+      9): the music manager counts, per station, the frames it has been off the air and resumes it 1/30 s per frame
+      further on, so at 60 fps time on foot counted double. Measured with the station counts in guest RAM: 30.0 counts a
+      second at 30 fps, 59.5 at 60; out of the car for 3.2 s between two 12 s drives, the station resumed 13.0 / 17.8 s
+      on at 30 fps against 19.3 / 24.2 at 60. The count function (FUN_0018B668) now adds the frame's step / (50/30)
+      (`src/game/vcs_music_timing.cpp`, `VCS_MUSIC_TIMESTEP=0` off): 30.0 counts a second at 30 (original timing, the
+      game's path), 60 and 120 fps; resumed 12.9 / 18.0 s on at 60 and 13.2 / 17.9 at 120.
 - [ ] Fixes for what changes at the shorter step (physics, animations, script waits, particles, camera), each behind
       the switch; frame pacing. Left from the script survey (game-internals.md 11f): per-frame object / camera /
       text animations in missions (looks only).
@@ -1173,6 +1180,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_SCRIPT_TIMESTEP=0` | mission meters that count per frame stay on the frame rate (game-internals.md 11f; the reference) |
 | `VCS_SCRIPT_FIXES=0` | the mission script fixes off: the wait for an audio line never ends when its slot is freed, Purple Haze's truck is not parked early (game-internals.md 11h; the reference: sticks on "Loading..." at 60 fps) |
 | `VCS_PHYSICS_TIMESTEP=0` | the push of a body under a wheel, the rolling resistance and a bike's brake wobble stay per frame (game-internals.md 4; the reference) |
+| `VCS_MUSIC_TIMESTEP=0` | radio stations off the air advance a frame's worth per frame, as on the PS2 (game-internals.md 9; the reference) |
 | `VCS_TURN_LOG=<model>` | every ApplyTurnForce on vehicles of that model (212 = PCJ-600): caller, its change to the yaw / pitch rate (sum by caller to find a per-frame push) |
 | `VCS_WHEEL_LOG=1` | each bike wheel's ProcessWheel inputs per frame: brake, grip, the contact's forward / sideways speed, wheel state |
 | `VCS_COLL_LOG=1` | each ApplyCollisionAlt (FUN_0034D670) of the player's vehicle: the other entity, contact point, normal, speeds |

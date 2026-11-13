@@ -1849,6 +1849,18 @@ below are module offsets (CDSTREAM loads at IOP 0x1D600 on the emulated IOP); "d
   completions (`sceSdSetTransCallback`) and the SPU2 IRQ (`sceSdSetIRQCallback`): 0x80200 open -> fill both disc
   buffers -> 0x1000 / 0x7000 / 0x2000 / 0x8000 send the four ring halves -> 0x3000 IRQ armed -> 0x4000 preloaded ->
   0x5000 playing (keys on, volume, IRQ enable) -> 0x6000 stop. A stop request takes effect at the next step.
+- **Where a station resumes** (2026-11-14, GitHub issue 117; Ghidra on the functions below, then the records read in the
+  running game with `rig.peek` and the opens logged by `VCS_MUSIC_LOG=1`): the EE's music manager (0x4E41E0) keeps a
+  12-byte record per stream from **+0x18**: the stream's length (+0x18), the position it stopped at (+0x1C, taken
+  from cSampleManager FUN_0010E6F0 when the manager stops the stream: getting out of a car, the level swap in
+  FUN_001891A0 mode 2) and a **count** (+0x20, zeroed at the same time). +0x575 is the station wanted and +0x576 the
+  one playing (0x71 none; 0x0A the on-foot stream, 0x21 the announcement). **FUN_0018B668** adds 1 to the count of all
+  0x35 streams; the manager's service (FUN_00189AD0) calls it on every path out, once per frame, and FUN_001896A0
+  calls it while a cutscene stream holds the music. Tuning in (**FUN_0018B6A8**) opens the stream at +0x1C + count x
+  1500 + 100 (no count for streams 0x15 - 0x1C; 0 for those above 8 outside that range), modulo the length unless the
+  stream is 0x17. A count is a 1/30 s frame (on the PS2 a station kept going in real time while it wasn't heard). At
+  60 fps the counts ran at 59.5 a second instead of 30, so the time out of a car counted double. The native port
+  scales that function by step / (50/30) (`src/game/vcs_music_timing.cpp`; PROGRESS.md has the numbers).
 - **Timing the game relies on**: after opening a radio station the EE sends the station's volume 3 samples later;
   on the IOP the preload's four 8 KB DMAs take ~22 samples, so the volume is in before key-on. A preload done
   instantly started the radio at the old volume (0) for one refill period (found by the replay comparison).

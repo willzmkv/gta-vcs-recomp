@@ -21,6 +21,7 @@
 #include "game/vcs_script_fixes.h"
 #include "game/vcs_script_timing.h"
 #include "game/vcs_physics_timing.h"
+#include "game/vcs_music_timing.h"
 #include "game/vcs_inflate.h"
 #include "game/vcs_sound.h"
 #include "game/vcs_stream.h"
@@ -1202,6 +1203,7 @@ namespace
         vcs::installFrameRateHooks(runtime); // 30 / 60 fps (game/vcs_framerate.h)
         vcs::installScriptTimingHooks(runtime); // per-frame mission meters on the time step (game/vcs_script_timing.h)
         vcs::installPhysicsTimingHooks(runtime); // per-frame vehicle pushes on the time step (game/vcs_physics_timing.h)
+        vcs::installMusicTimingHooks(runtime);   // the radio off the air on the time step (game/vcs_music_timing.h)
         vcs::installScriptFixHooks(runtime); // mission scripts stuck above 30 fps (game/vcs_script_fixes.h)
         vcs::installMovieHooks(runtime);     // STINGS / INTRO played natively (game/vcs_movie.h)
         const bool stream = vcs::installStreamHooks(runtime); // disc streaming without the IOP (game/vcs_stream.h)
