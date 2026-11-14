@@ -589,6 +589,11 @@ dropped on uploads (lazy render-target patching).
       1.20, 10.00 / 14.20 at 1/30 (before at 1/144: 5.76 without the 2026-10-27 fix, 4.58 / 6.48 s). `--sites --only
       59`: 5 of 5. Not checked here: hosing the brothel's own fires in the mission (the rig can't aim the turret), and
       issue 54's fire that isn't drawn (an AMD integrated GPU; a separate problem).
+- [x] The same timer sum a frame in two more missions (2026-11-14; game-internals.md 11f): Snitch Hitch (LAN_B5) and
+      Kill Phil (REN_C3) each give "You are getting too far away from the jet / limo" 2.6 s before failing the mission -
+      1.2 s at 144 fps - and time a dialogue line the same way (4.5 s, 2.0 at 144). The four sums are scaled
+      (`vcs_script_timing.cpp`); `--sites --only 64,80`: all found. Kill Phil's line after the limo's blip: 4.47 / 4.46 s
+      at 1/30 / 1/144, 2.03 before. The two fails weren't reached with the rig (late in their missions).
 - [x] **Purple Haze stuck on "Loading..." above 30 fps** (2026-11-10, GitHub issue 41; game-internals.md 11h): at 60
       fps the truck that rams the van in GON_C3's cutscene turns the van instead of pushing it, rolls on and runs over
       the first thug as he is created behind the faded-out screen; the audio monitor script frees his line's slot and the

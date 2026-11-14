@@ -3017,9 +3017,18 @@ which REN_C7, SRANGE, MAR_A5, LAN_C5 and DIA_C3 use for their meters. Some missi
     (+0x165F, the next help after 140,000: 3 s, 1.4 at 144). Both scaled like the meters (opcode 0x0029
     ADD_INT_VAR_TO_INT_VAR, handler 0x3B1248 as 0007; timers as operands: 0x0B / 0x0C). `tools/hose_check.py`: 1.20 a
     second, 10.00 / 14.15 s at 1/144 (5.76, 4.58 / 6.48 before). The same `+= TIMERA / TIMERB` a frame (found by grepping
-    the listings for 0029 / 0007 / 0008 / 002A with a timer) is in 64 LAN_B5 (`$G1524 += TIMERB` against 300,000 at
-    +0x1AF1, `3L` against 100,000 at +0x379E) and 80 REN_C3 (`$G152C += TIMERA` against 300,000 at +0x160E, `16L`
-    against 100,000 at +0x33BE) - not read in context yet;
+    the listings for 0029 / 0007 / 0008 / 002A with a timer) is in 64 and 80, below - no other mission has it;
+  - 64 LAN_B5 "Snitch Hitch" (2026-11-14): `$G1524 += TIMERB` (+0x1AF1; TIMERB reset when the blip goes on, counted
+    while Lance and Vic are both in a car) - Lance's line LANB5BA at 300,000: 4.5 s on the PS2, 2.0 at 144; and
+    `3L += TIMERB` (+0x379E) while the player is over 50 m from the jet (-1746, -401; "You are getting too far away
+    from the jet", TIMERB reset when he leaves, `3L` reset when he comes back) - at 100,000 the mission fails
+    (`$G14F4 = 3`, `$G14F5 = 9`): 2.6 s of grace on the PS2, 1.2 at 144;
+  - 80 REN_C3 "Kill Phil" (2026-11-14): `$G152C += TIMERA` (+0x160E) from the limo's blip ("Pick up the bulletproof
+    limo", `$G152B = 1`, TIMERA reset) - the line RENC3AB at 300,000 (`$G1529` 2 -> 3); and `16L += TIMERB` (+0x33BE)
+    while the player is over 80 from the limo (`$G1539`, "You are getting too far away from the limo") - at 100,000
+    the mission fails (`15L = 4`, `4L = 10`): 2.6 s of grace, 1.2 at 144. Measured (the line, from the blip, game
+    time): 4.47 / 4.46 s at 1/30 / 1/144, 2.03 with `VCS_SCRIPT_TIMESTEP=0` at 1/144. The two fails come late in their
+    missions and were not driven by the rig; `--sites --only 64,80` finds all four;
   - 67 UMB_B2 "Balls": havoc `$G14E9` +0.005 a frame per living Cholo (+0x24CF), the mission fails at 100;
   - 97 DIA_C2 "The Exchange": the snipers' TIME bar `$G154C` -0.04 a frame from 100 (+0x1E3F; 83 s at 30 fps);
   - 80 REN_C3 "Kill Phil": the Phil bar `$G152E` -0.25 a pass in the thugs state, a pass = two `WAIT 0`s (+0x27EC);
