@@ -995,8 +995,8 @@ namespace vcs::input
                 s.section = "Mouse";
                 s.label = "Car camera return";
                 s.help = "Behind a car, boat or bike the camera stays where the mouse puts it while the mouse moves; this "
-                         "long after the mouse stops it eases back behind the vehicle. Never: it stays until the game's "
-                         "own camera turns it (when driving on).";
+                         "long after the mouse stops it eases back behind the vehicle (not while a fire truck sprays water). "
+                         "Never: it stays until the game's own camera turns it (when driving on).";
                 s.type = Type::Choice;
                 s.choices = {{"0.5 s", 5}, {"1 s", 10}, {"1.5 s", 15}, {"2 s", 20}, {"3 s", 30}, {"5 s", 50}, {"Never", -1}};
                 s.defaultValue = 15;

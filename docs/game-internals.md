@@ -327,6 +327,9 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
     **Car camera return** after the mouse stops (1.5 s by default), and the turret follows it: aimed 86 degrees aside
     with the mouse while spraying from a standing truck, the water swung back to straight ahead 1.5 - 3.5 s later. The
     right stick's turn stays (73 degrees for 5 s): the game's own camera doesn't return while the vehicle stands.
+    Fixed: vcs_carcam.cpp holds the camera (no return, a return under way stopped) while a water cannon's +0 is the
+    followed vehicle - the 0.5 s after the button is let go included, so the delay counts from when the water stops.
+    The same test: 85.9 degrees held for 5 s of spraying, the return starting 2.0 s after Circle was let go.
   - **Braking audit** (`framerate_audit.py --only bikebrake,brake`, the airport runway: RUNWAY_SPOT, a PCJ-600 from 36
     m/s, a Sentinel from 24; before = `VCS_PHYSICS_TIMESTEP=0`):
 

@@ -1,7 +1,8 @@
 // The mouse on the camera behind a vehicle (docs/CONTROLS.md, game-internals.md 12b): the mouse turns it itself, as on
 // foot, and while the mouse moves the camera stays where it was put - neither dragged after the car nor pulled toward
 // where it drives. A short time after the mouse stops (Keyboard > Car camera return) it eases back behind the car and
-// the game's own camera carries on. VCS_CARCAM=0 leaves it out (the mouse moves the right stick there, as before).
+// the game's own camera carries on - not while a fire truck's hose sprays (it aims where the camera looks), only after
+// its water has stopped. VCS_CARCAM=0 leaves it out (the mouse moves the right stick there, as before).
 #pragma once
 
 #include <cstdint>

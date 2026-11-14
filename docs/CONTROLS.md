@@ -120,7 +120,8 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
   aim** it turns the view itself too (above). **Behind a car, bike or boat** it turns the camera itself as well, and
   while the mouse moves the camera stays where it is put - the car neither drags it along nor pulls it back; **Car
   camera return** (1.5 s; 0.5-5 s or Never) after the mouse stops it eases back behind the vehicle (about 2 s) and the
-  game's camera carries on. The gamepad's right stick (or the camera keys) takes it back at once, held or not.
+  game's camera carries on. Never while a fire truck sprays water: its hose aims where the camera looks, so the camera
+  stays where the mouse left it until the water has stopped. The gamepad's right stick (or the camera keys) takes it back at once, held or not.
   **Car camera sensitivity** (100%, 10-400%) scales its turn on top of Mouse sensitivity.
   `VCS_CARCAM=0` puts the old way back (the mouse as the right stick). **In the other vehicle
   cameras and locked on** the mouse's speed becomes the right stick's tilt (1,500 counts a second is full tilt), so very

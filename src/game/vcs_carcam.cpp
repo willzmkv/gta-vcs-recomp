@@ -39,6 +39,10 @@ namespace vcs::carcam
         constexpr uint32_t kFrameCounter = 0x004CD124u; // CTimer::m_FrameCounter
         constexpr uint32_t kEntityPos = 0x30u, kEntityForward = 0x10u, kMoveSpeed = 0x140u;
         constexpr uint32_t kVehicleType = 0x354u;   // 4: a boat (the camera follows its nose, not where it moves)
+        // CWaterCannons: 3 of 0x250 bytes, +0 the vehicle spraying (0 free; kept until its water has run out, about
+        // 0.5 s after the fire button is let go; game-internals.md 4, "The fire truck's water cannon")
+        constexpr uint32_t kCannons = 0x004E3A60u, kCannonSize = 0x250u;
+        constexpr int kCannonCount = 3;
 
         constexpr float kTwoPi = 6.2831855f;
         constexpr float kReturnTime = 0.6f;  // the way back eases out: 1 - e^(-t / this) of what is left (95% in 1.8 s)
@@ -167,6 +171,16 @@ namespace vcs::carcam
             return wrap(std::atan2(-y, -x));
         }
 
+        // The vehicle's water cannon is spraying. Its hose turns toward where the camera looks, so a camera easing back
+        // behind the truck dragged the water off the fire it was aimed at (the right stick's turn stays put).
+        bool spraying(uint32_t vehicle)
+        {
+            for (int i = 0; i < kCannonCount; ++i)
+                if (rd32(kCannons + i * kCannonSize) == vehicle)
+                    return true;
+            return false;
+        }
+
         void reset(uint32_t vehicle)
         {
             pullOff(false);
@@ -219,6 +233,13 @@ namespace vcs::carcam
             {
                 if (g_state != State::Hold)
                     g_pitch = pitchOf(cam + kCamPoints[0], p);
+                setState(State::Hold);
+                g_idle = 0.0f;
+            }
+            else if (g_state != State::Idle && spraying(vehicle))
+            {
+                // never back while the hose sprays: held where the mouse left it (a return under way stops there); the
+                // delay counts from when the water has run out
                 setState(State::Hold);
                 g_idle = 0.0f;
             }
