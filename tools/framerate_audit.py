@@ -36,6 +36,8 @@ Scenarios (each from a fresh teleport, so earlier ones don't leak into later one
   footcam the on-foot camera while the player runs to its right: how fast it turns after him
   particles an idling car in the rain: exhaust, rain on its body and on the screen - made per second and how long
           they live (once a frame before 2026-11-14: exhaust 83-102 ms at 144 fps against 270 at 30)
+  effects a storm with the video-cam overlay on: PS2 frames counted, cloud turn / spin, the overlay's flips and noise,
+          lightning's rolls - per second (once a frame before 2026-11-14)
   clock   game clock ms per frame vs the step; frames per simulated second
   heat    PHI_A2's heat bar: its floor and the heat at +1 a frame, per simulated second (starts the mission: last)
 
@@ -78,7 +80,8 @@ RUNWAY_SPOT = (-1600.0, -1450.0, 0.0)
 class Session:
     def __init__(self, step, name, port):
         env = {"VCS_ASPECT": "43", "VCS_TIMING": "1", "VCS_TIMESTEP": str(step), "VCS_FPS": "0", "PS2X_INPUT": "injected",
-               "VCS_PARTICLE_LOG": "1"}  # a line every 10 s of game clock (scenario_particles)
+               "VCS_PARTICLE_LOG": "1",  # a line every 10 s of game clock (scenario_particles)
+               "VCS_EFFECTS_LOG": "1"}   # every 30 s (scenario_effects)
         env.update(dict(e.split("=", 1) for e in os.environ.get("AUDIT_ENV", "").split() if "=" in e))
         self.step = step
         self.in_car = False
@@ -709,6 +712,41 @@ def scenario_particles(s):
     return out
 
 
+EFFECTS_LINE = re.compile(r"^\[effects\] \d+ s: [\d.]+ frames/s, ([\d.]+) PS2 frames/s; .*clouds turn (-?[\d.]+) / s, "
+                          r"spin (-?[\d.]+) / s$", re.M)
+EFFECTS_COUNTS = re.compile(r"^\[effects\] taking effect, per second:(.*)$", re.M)
+
+
+def scenario_effects(s):
+    """Effects that step or re-roll once a frame (vcs_effects_timing.cpp), in a storm with the video-cam overlay on
+    (flag 0x481CD4): the PS2 frames the fix counts, the clouds' turn and spin, the overlay's scanline flips and noise
+    rolls and lightning's rolls per second - 30 a second each at any frame rate (once a frame before 2026-11-14). The
+    turn follows the camera's heading (sin(heading - 0.85)), which settles a little differently per run: ~6%. Read
+    from VCS_EFFECTS_LOG's lines (one per 30 s of the clock): the second after the start lies wholly inside."""
+    g = s.g
+    leave_vehicle(s)
+    s.in_car = False
+    fx, fy, h = FOOT_SPOT
+    s.place(fx, fy, heading=h)
+    g.weather(2)
+    g.cmd("poke 0x481cd4 01000000")
+    read = lambda: open(g.log_path, encoding="utf-8", errors="replace").read()
+    n0, t0 = len(EFFECTS_LINE.findall(read())), s.clock()
+    while len(EFFECTS_LINE.findall(read())) < n0 + 2 and s.clock() - t0 < 75.0:
+        s.wait_sim(0.5)
+    g.cmd("poke 0x481cd4 00000000")
+    g.weather(0)
+    text = read()
+    lines, counts = EFFECTS_LINE.findall(text), EFFECTS_COUNTS.findall(text)
+    if len(lines) < n0 + 2 or len(counts) < n0 + 2:
+        raise RuntimeError("no effects log (VCS_EFFECTS_LOG) lines")
+    ps2, turn, spin = (float(v) for v in lines[n0 + 1])
+    per = {k.strip(): float(v) for k, v in re.findall(r"([a-z ]+?) ([\d.]+)", counts[n0 + 1])}
+    return {"ps2_frames_per_s": ps2, "clouds_turn_per_s": turn, "clouds_spin_per_s": spin,
+            "video_flips_per_s": per.get("video flips", 0.0), "dash_rolls_per_s": per.get("dash rolls", 0.0),
+            "lightning_rolls_per_s": per.get("lightning rolls", 0.0)}
+
+
 def scenario_clock(s):
     c0, f0 = s.g.u32(CLOCK_MS), s.g.u32(FRAME_COUNTER)
     s.wait_sim(5.0)
@@ -738,6 +776,7 @@ SCENARIOS = {
     "carcam": scenario_carcam,
     "footcam": scenario_footcam,
     "particles": scenario_particles,
+    "effects": scenario_effects,
     "heat": scenario_heat,  # starts a mission: last
 }
 

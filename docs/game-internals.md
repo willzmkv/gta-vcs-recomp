@@ -416,6 +416,26 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
   - **Peds fading out** (bFadeOut, 0x1F4CFC): alpha -= 8 a frame (0x1F4D10): 0.22 s instead of 1.07. **Melee swing
     streaks** (CMotionBlurStreaks::Update `FUN_00169F88`, from CSpecialFX::AddWeaponStreak `FUN_00166CE0`): a 4-slot
     position history shifted every frame - 1/4.8 as long.
+  - **Fixed 2026-11-14** (weather, sky, shake, 2D FX, HUD bar, ped fade, streaks, rubbish, steam:
+    `src/game/vcs_effects_timing.cpp`, PROGRESS.md has the numbers). A "PS2 frame tick" on the real-time clock
+    **`0x488280`** (CTimer's unscaled ms, also running in slow motion and while the photo stops time - as the PS2's frames
+    did) decides when what is stepped or re-rolled per frame takes effect; smooth motion is scaled by the frame's share.
+    Found on the way:
+    - **rand = `FUN_00408058`**: Park-Miller (seed `0x48A5B8` x 16807 mod 2^31 - 1, Schrage's method: q 127773, r 2836),
+      a leaf; replaced by the same computation, which holds or vetoes values for chosen return addresses: lightning end
+      0x3E3924 (`(u8) < 0x20`), start 0x3E39DC (`(u16) < 200`), sun glare 0x3E3F40, camera shake 0x37ACC8, the video
+      overlay's dashes 0x167970 / 0x16798C, the rubbish pick 0x36B54C. (The lightning flash's toggle 0x3E39BC is on a
+      50 ms timer.)
+    - **Lightning state**: `0x4CD638` a burst is on, `0x4CD63C` the frame counter at its start, `0x4CD644` the last
+      toggle (ms), `0x4CD640` the burst's length in frames (min 20), `0x4CD634` when the thunder plays (end + (20 - n) x
+      150 ms; then FUN_002FA458 and the pad's rumble FUN_00283908 scale with n), `0x4CD2E0` the flash.
+    - **CPed alpha**: FUN_0036ED68 = `lw $v0, 0x14($a0)` (the clump's alpha); CPed::ProcessControl reads it at 0x1F4CF4
+      for the fade (+0x1C8's sign: out, -8 a frame, removed below 0 through vtable +0x54; else in, +16 to 255).
+    - **Rubbish**: 32 sheets at `0x746D00`, 0x48 bytes each, +0x1C the state (1 lying ready, 2 blowing); visibility
+      `0x4CD5B4` (0..255), `0x4CD5B0` set = fading out. **Video cam**: flag `0x481CD4` (u32), scanline phase `0x481D64`
+      (byte; flipped once a frame in all: once, then 112 times in the loop). **Photo**: flag `0x481CF8`, counter
+      `0x481CF4` (u32 each). **Steam after rain**: CWeather::AddRain counts `0x48A120` down from 800 after each
+      FUN_003E4270 call while `0x48A0F0` is set.
   - **Fine** (time-based): the Purple Haze drift (`0x481CE0` / `E4` are sin / cos of the ms clock, FUN_001676C8),
     coronas (CCoronas::Update `FUN_0027C308`, CRegisteredCorona::Update `FUN_0027BFF8`: step-scaled; only a 3-frame
     snap after the look direction changes), the sun and moon, camera and music fades (`FUN_0037B620` / `0037B778`), bullet

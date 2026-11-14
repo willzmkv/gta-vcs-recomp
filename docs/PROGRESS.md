@@ -605,12 +605,23 @@ dropped on uploads (lazy render-target patching).
       2.02 / 2.01 s (0.46). Left: an explosion's opening burst counts frames (CExplosion::Update's step byte, `0x51E544`
       in each 0x50-byte record from `0x51E510`), so the fireball forms in 70 ms instead of 0.33 s - the same particles,
       lasting as long; it also drives coronas, lights and damage, so it needs its own fix.
+- [x] **Effects at the PS2's 30 a second** (2026-11-14, the rest of the effects survey; game-internals.md 4):
+      lightning, sun glare, clouds, camera shake, the video-cam overlay, the photo flash, the HUD bar flash's count, peds
+      fading in / out, melee swing streaks, rubbish and steam after rain stepped or re-rolled once a frame.
+      `src/game/vcs_effects_timing.cpp` (`VCS_EFFECTS_TIMING=0` off): a PS2 frame tick on the real-time clock gates what
+      is stepped or re-rolled; the game's rand is replaced by the same generator, which holds or vetoes values for those
+      callers. Measured with `VCS_EFFECTS_LOG=1` (30 / 144 fps / 144 before): PS2 frames counted 28-30 / 29-30 / -;
+      lightning in a 2-minute storm 4-8 / 4-10 / 12-26 bursts a minute, 166-772 / 150-273 / 32-59 ms each; cloud spin
+      908-1285 / 900-1349 / 2703-3601 a second, turn the same at 30 and 144 (-0.022 / s in the storm, -0.088..-0.100
+      before); camera shake rolls 28-30 / 29-30 / 130-155 a second (explosions 25 m away); the video overlay's flips
+      and noise, ped fade steps, rubbish picks and steam steps the same at 30 and 144, 4-5x before. Not seen in a run:
+      the photo flash, the HUD bar flash (no trigger at hand) and melee streaks - the same mechanism, read in the code.
+      `tools/framerate_audit.py --only effects`.
 - [ ] Fixes for what changes at the shorter step (physics, animations, script waits, particles, camera), each behind
       the switch; frame pacing. Left from the script survey (game-internals.md 11f): per-frame object / camera /
       text animations in missions (looks only). Effects survey (2026-11-14, game-internals.md 4 "Effects that run per
-      frame"): particles - fixed (above) except an explosion's opening burst; lightning, sun glare, clouds, rubbish,
-      camera shake, photo flash, video-cam overlay, the HUD bar flash's countdown, peds fading out, melee streaks, steam
-      after rain (800 frames) - not fixed yet.
+      frame"): particles and the other effects found - fixed (above), except an explosion's opening burst. Open from
+      the survey: neon / flickering / traffic lights, explosion screen flashes, FUN_002ED8E8, FUN_0032FD78.
 ## Milestone 5 - movies (2026-10-24) - done
 - [x] STINGS.PSS (the Rockstar logos) and INTRO.PSS play natively at boot (`src/game/vcs_movie.cpp`): own PSS
       demuxer, MPEG-2 video through FFmpeg, shown by the presenter at 4:3 (pillarboxed in widescreen), 48 kHz PCM
@@ -1207,6 +1218,8 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_PHYSICS_TIMESTEP=0` | the push of a body under a wheel, the rolling resistance and a bike's brake wobble stay per frame (game-internals.md 4; the reference) |
 | `VCS_MUSIC_TIMESTEP=0` | radio stations off the air advance a frame's worth per frame, as on the PS2 (game-internals.md 9; the reference) |
 | `VCS_PARTICLE_TIMING=0` | particles fade, grow and spawn once a frame (before 2026-11-14: smoke 1/4.8 as long at 144 fps, fires thin) |
+| `VCS_EFFECTS_TIMING=0` | lightning, sun glare, clouds, camera shake, the video overlay, the photo flash, the HUD bar flash, peds fading, streaks, rubbish and steam after rain step once a frame (before 2026-11-14) |
+| `VCS_EFFECTS_LOG=1` | every 30 s of real time: frames and PS2 frames a second, lightning bursts (count, length), cloud turn / spin a second, and each effect's steps / rolls that took effect a second (with `VCS_EFFECTS_TIMING=0`: the per-frame counts) |
 | `VCS_PARTICLE_LOG=1` | every 10 s of game clock: AddParticle calls / passed per second by return address (`*` = throttled), and particles died per second and their mean lifetime by type |
 | `VCS_TURN_LOG=<model>` | every ApplyTurnForce on vehicles of that model (212 = PCJ-600): caller, its change to the yaw / pitch rate (sum by caller to find a per-frame push) |
 | `VCS_WHEEL_LOG=1` | each bike wheel's ProcessWheel inputs per frame: brake, grip, the contact's forward / sideways speed, wheel state |

@@ -20,6 +20,7 @@
 #include "game/vcs_world_detail.h"
 #include "game/vcs_script_fixes.h"
 #include "game/vcs_script_timing.h"
+#include "game/vcs_effects_timing.h"
 #include "game/vcs_particle_timing.h"
 #include "game/vcs_physics_timing.h"
 #include "game/vcs_music_timing.h"
@@ -1206,6 +1207,7 @@ namespace
         vcs::installPhysicsTimingHooks(runtime); // per-frame vehicle pushes on the time step (game/vcs_physics_timing.h)
         vcs::installMusicTimingHooks(runtime);   // the radio off the air on the time step (game/vcs_music_timing.h)
         vcs::installParticleTimingHooks(runtime); // particle fades and emitters on the time step (game/vcs_particle_timing.h)
+        vcs::installEffectsTimingHooks(runtime);  // lightning, clouds, shake ... at 30 a second (game/vcs_effects_timing.h)
         vcs::installScriptFixHooks(runtime); // mission scripts stuck above 30 fps (game/vcs_script_fixes.h)
         vcs::installMovieHooks(runtime);     // STINGS / INTRO played natively (game/vcs_movie.h)
         const bool stream = vcs::installStreamHooks(runtime); // disc streaming without the IOP (game/vcs_stream.h)
