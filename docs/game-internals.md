@@ -311,6 +311,22 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
     Left per frame: PushPeds on every 4th frame (pushes 4.8 times as often at 144, each lift step-sized, so the lift
     per second is the same; the knock-down and the speed it sets are not) - not gated, since gating it would weaken
     the lift.
+    **Where the water hits vs where it looks to hit** (2026-11-14, a player's report in Hose the Hoes): the ribbon
+    `FUN_00186D30` draws is the 16 simulated points themselves (from the newest back, half-width 0.05 x n, alpha 1 -
+    n^2/256, sideways across the camera's forward `TheCamera + 0x10`) - checked by projecting the points read from
+    memory onto a screenshot: they sit on the drawn stream. What differs is the game's hit rule: a fire goes out when
+    it is within **4 m** of any point (reVC's Vice City: 2 m), its point being the base of the flames; the points go
+    through walls and the ground (no collision); one fire a frame, the first point in array order (not along the
+    stream) and the first fire in the list. A fire 3.5 m beside the stream's path went out in 2.5 s, as one hit dead
+    on. The turret's aim: with the camera behind the vehicle (mode 18, `Cams[active]` at `0x6F4540 + 0x270 n`, n the
+    byte at `0x6F4520`) it turns toward the camera's Front (+0x10) seen from the truck, pitched **15 degrees above** it
+    (`0x48612C`), at most 0.05 / 0.02 rad a step (143 / 57 degrees a second, `0x486130` / `0x486134`), pitch clamped
+    to -3.4 .. 17.2 degrees (`0x486128` / `0x486124`); in other camera modes the right stick turns it (FUN_00285600 /
+    FUN_00286B20, x 1/128). So the stream runs parallel to the view from the nozzle, above the middle of the screen,
+    and lags a quick turn. **The mouse's car camera** (`vcs_carcam.cpp`) eases the camera back behind the vehicle
+    **Car camera return** after the mouse stops (1.5 s by default), and the turret follows it: aimed 86 degrees aside
+    with the mouse while spraying from a standing truck, the water swung back to straight ahead 1.5 - 3.5 s later. The
+    right stick's turn stays (73 degrees for 5 s): the game's own camera doesn't return while the vehicle stands.
   - **Braking audit** (`framerate_audit.py --only bikebrake,brake`, the airport runway: RUNWAY_SPOT, a PCJ-600 from 36
     m/s, a Sentinel from 24; before = `VCS_PHYSICS_TIMESTEP=0`):
 
