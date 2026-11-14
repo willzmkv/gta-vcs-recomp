@@ -222,11 +222,20 @@ def git_commit():
 def test_window(env, visible=False):
     """Test runs are hidden by default (the user's choice, 2026-10-24): no window on the desktop, physical input
     ignored, driven through the control channel (tools/gamectl.py). Sound stays on (PS2X_AUDIO=1; the user mutes the
-    game in Windows). visible=True or VCS_TEST_VISIBLE=1 shows the window."""
-    if visible or os.environ.get("VCS_TEST_VISIBLE") == "1":
+    game in Windows). visible=True: a run started by hand (run.py without --hidden), the player's own game in a
+    window. VCS_TEST_VISIBLE=1 only shows a test run's window (the Mac's test runs, the user's choice): the run is
+    still a test - the player's vcs.ini is never rewritten (VCS_KEEP_SETTINGS) and the timing is pinned as below.
+    Before 2026-11-14 a shown test run was treated as a run by hand: controls_check's volume levels, bindings and
+    "Reset all settings" landed in the player's vcs.ini, and the checks ran at the player's frame rate."""
+    if visible:
         env.pop("PS2X_HIDDEN", None)
         return env
-    env["PS2X_HIDDEN"] = "1"
+    if os.environ.get("VCS_TEST_VISIBLE") == "1":
+        env.pop("PS2X_HIDDEN", None)
+        env.setdefault("VCS_FULLSCREEN", "0")
+        env["VCS_KEEP_SETTINGS"] = "1"  # settings changed by the test last for this run only, as in a hidden run
+    else:
+        env["PS2X_HIDDEN"] = "1"
     env.setdefault("PS2X_AUDIO", "1")
     # the timing the regression baselines and checks were made with: original, 30 fps. Players' default is 60 with
     # frame-rate independent timing (2026-10-30); a test that wants another sets VCS_TIMING / VCS_FPS itself, and one

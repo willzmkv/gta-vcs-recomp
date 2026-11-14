@@ -1471,6 +1471,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `display.window=0\|1` in vcs.ini, `VCS_FULLSCREEN=0\|1` for one run, Alt+Enter | windowed / full screen (borderless) |
 | **F8** (`controls.screenshot_key`), `VCS_SCREENSHOT_DIR=<dir>` | screenshot of the window as shown (its resolution, menus / overlays included) to `screenshots/` next to vcs.exe, or that folder (docs/CONTROLS.md) |
 | `PS2X_HIDDEN_WINDOW=WxH` | a hidden test run's window at that size instead of 640x448 (a player's window: the screenshot key at 2560x1440) |
+| `VCS_TEST_VISIBLE=1` (test tools), `VCS_KEEP_SETTINGS=1` | a test run with its window shown (the Mac's): still pinned to the tests' timing, and vcs.ini is never rewritten - `toolchain.test_window` sets `VCS_KEEP_SETTINGS`, which keeps settings changed in the run for that run only, as a hidden run does (before 2026-11-14 shown test runs wrote controls_check's values into the player's vcs.ini) |
 | `display.aspect=43\|1610\|169\|219\|329\|0` in vcs.ini, `VCS_ASPECT=...` for one run | aspect ratio (Hor+ widescreen; 0 = match the window) |
 | `display.hud=0\|1` | widescreen HUD: keep 4:3 in the middle / stretch |
 | `window.*` in vcs.ini | where the window was last (monitor, position, size, maximized); written by the game, delete the lines to reset (docs/SETTINGS_MENU_WIDESCREEN.md) |

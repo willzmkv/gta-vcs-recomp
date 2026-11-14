@@ -914,8 +914,10 @@ int main(int argc, char *argv[])
             setEnv("PS2X_GS", "hw");
         registerSettings();
         settings::load(exeDirectory() / "vcs.ini");
-        if (ps2control::hiddenMode())
-            settings::keepFile(); // a test run never changes the player's settings
+        // a test run never changes the player's settings: hidden, or shown (VCS_KEEP_SETTINGS=1 from
+        // toolchain.test_window when VCS_TEST_VISIBLE=1)
+        if (const char *keep = std::getenv("VCS_KEEP_SETTINGS"); ps2control::hiddenMode() || (keep && keep[0] == '1'))
+            settings::keepFile();
         settings::applyAll();
         restoreWindowPlacement();
         const fs::path isoPath = locateIso(argc, argv);
