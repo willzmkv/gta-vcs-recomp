@@ -506,6 +506,38 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
       The functions that read the frame counter and register coronas or lights are only these three and the explosion:
       no neon / traffic light counts frames (both are on the ms clock), and no separate explosion screen flash was found
       - the flash is the explosion's coronas and light.
+  - **Rain** (2026-11-14; `build/analysis/decomp/rain.c`, `fx_weather.c`; checked in the running game with
+    `build/analysis/rain_probe.py`):
+    - **The amount**: CWeather::Rain `0x4CD144` is set by CWeather::Update (`FUN_003E3720`) with no ramp: 0.5 while the
+      new weather `0x4CD2A0` is rainy (2) or hurricane (5), else 0 (old weather `0x4CD29E`, interpolation `0x4CD2F0`;
+      the `(ms >> 14) & 1` terms there are all raised to 0.5 - measured: 0.5 for the whole of a rainy run).
+    - **CWeather::AddRain** `FUN_003E47B8` (from Update): steam after rain, RAINDROP_2D (85) drops on the screen
+      (`(int)(Rain x 5)` x 3 a frame), skipped while paused (`FUN_0040D478` / `0040D490`: bit 3 of `0x4CD680` /
+      `0x4CD684`); when a check through the camera (`FUN_00377468(0x6F44D0)`, `FUN_0024A2D0`, `FUN_003EA5D0`; not
+      read further) says no, it clears type 85 instead (`FUN_001EBC98`).
+    - **CWeather::RenderRainStreaks** `FUN_003E52C8` (the falling rain; `FUN_003E4BD0` adds one streak's 5 vertices
+      / 12 indices to the Im3D buffer at `0x709650` / `0x70C650`, counts `0x70CE54` / `0x70CE50`, then
+      RwIm3DTransform `FUN_002FBFA8` + RenderIndexedPrimitive(3, ...) `FUN_002FC2E8`, raster `*0x4FE7B8`). Skipped while
+      paused (as AddRain, and m_CodePause `0x4CD11C`), with the time cycle's (`*0x486838`) `+0x3378` > 0, or camera
+      `0x6F4DEC` > 1.75 (0 in the open; both 0 in a rainy run). 35 slots
+      of 0x1C at `0x711740` (position, direction, start ms as a u32 at +0x18; 0 = free). A free slot starts on
+      `(rand & 0xF00) == 0` (rand's return 0x3E577C) at camera position (`0x6F4500`) + 6 x camera forward (`0x6F44E0`)
+      + 8 m up, direction (0, 0, -12) per 1024 ms, led by FindPlayerSpeed (`FUN_0024A238`: the player's or his
+      vehicle's +0x140, per step) x 54 - in a cutscene (`*0x48F820` +0x1C) by the camera's move since `0x6F4CE0` x 20
+      instead (per frame: 1/4.8 the lead at 144 fps; left), +-5 m random in x and y. A streak then stays where it started in the
+      world and falls; age = (ms - start) / 1024: fades in to 0.3, out from 3.7, freed at 4. Brightness `(int)(Rain x
+      255) / 64 x (64 - time cycle +0x336C)` / 4, x 3.5 as alpha. Each streak is a **diamond-shaped sheet facing the
+      camera**: centre, +-11 m along the fall direction tilted 0.1 toward the camera, +-9 m sideways (perpendicular to
+      camera -> streak in the ground plane), so one fills the view from 6 m; its texture repeats 10 x 18 times across it,
+      halved between 8 and 16 m away. UV offsets `0x711710` / `14` / `18` are only zeroed while paused (no other
+      writer found). So it is world-fixed rain on a screen-filling billboard: it turns with the camera, its texture
+      rescales as the camera nears or leaves it, and turning the camera away leaves the slots in use behind it until
+      they expire - all the PS2's own. A sheet is at the camera's height for ~1.5 s of its 4 s (8 m up, -12 m/s),
+      then under the ground.
+    - **Pulsing above 30 fps (fixed 2026-11-14)**: the start roll is per frame. At 30 fps the slots' 1-in-16 waits
+      (~0.5 s each) spread the streaks out within ~20 s of rain starting (until then the PS2's rain pulses too: all 35
+      start together); at 144 fps the waits are ~0.1 s, so they stay together for minutes - ~1.5 s of rain, ~3 s of
+      none. `vcs_effects_timing.cpp` 13: the roll fails between PS2 frame ticks (PROGRESS.md has the numbers).
   - **Fine** (time-based): the Purple Haze drift (`0x481CE0` / `E4` are sin / cos of the ms clock, FUN_001676C8),
     coronas (CCoronas::Update `FUN_0027C308`, CRegisteredCorona::Update `FUN_0027BFF8`: step-scaled; only a 3-frame
     snap after the look direction changes), the sun and moon, camera and music fades (`FUN_0037B620` / `0037B778`), bullet

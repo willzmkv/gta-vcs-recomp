@@ -32,6 +32,10 @@
 // 11. Explosions (CExplosion::Update FUN_002E23A0): the step count that drives their bursts advances at 30 a second
 //    per explosion, the bursts pass on fresh steps only, the coronas' `frame & 1` reads the PS2 frames' parity (see 11.).
 // 12. The banknote spray (FUN_0032FD78): runs on ticks only, with the steps since the last one.
+// 13. Rain streaks (CWeather::RenderRainStreaks FUN_003E52C8): each of the 35 free slots starts a streak on
+//    `(rand & 0xF00) == 0` (0x3E577C), rolled every frame; a streak then lives 4 s on the ms clock. At 144 fps the slots
+//    refill within ~0.1 s of each other, so all 35 fall past the camera together, then none for ~3 s: the rain pulsed
+//    and vanished (on the PS2 the 1-in-16 roll per 1/30 s spreads them out within ~20 s). The roll fails between ticks.
 //
 // rand (FUN_00408058, Park-Miller: seed 0x48A5B8 x 16807 mod 2^31 - 1) is replaced by the same computation, which
 // does what is said above for the listed return addresses only.
@@ -67,7 +71,7 @@ namespace vcs
         // rand's callers handled here (return addresses)
         constexpr uint32_t kLightningEnd = 0x003E3924u, kLightningStart = 0x003E39DCu, kSunGlare = 0x003E3F40u;
         constexpr uint32_t kCameraShake = 0x0037ACC8u, kVideoDashX = 0x00167970u, kVideoDashY = 0x0016798Cu;
-        constexpr uint32_t kRubbishPick = 0x0036B54Cu;
+        constexpr uint32_t kRubbishPick = 0x0036B54Cu, kRainSpawn = 0x003E577Cu;
         constexpr uint32_t kPedAlphaRead = 0x001F4CFCu;
 
         PS2Runtime::RecompiledFunction g_origWeather = nullptr, g_origClouds = nullptr, g_orig2DFx = nullptr,
@@ -218,11 +222,12 @@ namespace vcs
             StreakShifts,
             RubbishPicks,
             SteamSteps,
+            RainRolls,
             CountN
         };
         const char *const kCountNames[CountN] = {"lightning rolls", "glare rolls", "shake rolls", "dash rolls", "photo steps",
                                                  "video flips", "hud flash drops", "ped fade steps", "streak shifts",
-                                                 "rubbish picks", "steam steps"};
+                                                 "rubbish picks", "steam steps", "rain streak rolls"};
         uint64_t g_counts[CountN] = {};
 
         struct LightningLog
@@ -238,7 +243,7 @@ namespace vcs
             int32_t v;
             const bool special = (enabled() || logOn()) && (ra == kLightningEnd || ra == kLightningStart || ra == kSunGlare ||
                                                ra == kCameraShake || ra == kVideoDashX || ra == kVideoDashY ||
-                                               ra == kRubbishPick);
+                                               ra == kRubbishPick || ra == kRainSpawn);
             if (!special)
                 v = nextRand(rdram);
             else
@@ -249,8 +254,11 @@ namespace vcs
                                : ra == kSunGlare                            ? GlareRolls
                                : ra == kCameraShake                         ? ShakeRolls
                                : ra == kRubbishPick                         ? RubbishPicks
+                               : ra == kRainSpawn                           ? RainRolls
                                                                             : DashRolls];
-                if (ra == kLightningStart)
+                if (ra == kRainSpawn)
+                    v = c.tick ? nextRand(rdram) : 0xF00;  // & 0xF00 != 0: no streak starts
+                else if (ra == kLightningStart)
                     v = c.tick ? nextRand(rdram) : 0xFFFF; // >= 200: no burst starts
                 else if (ra == kLightningEnd)
                     v = c.tick ? nextRand(rdram) : 0xFF;   // >= 0x20: the burst goes on
