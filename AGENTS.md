@@ -46,7 +46,7 @@ choices).
 | Path | What |
 |---|---|
 | `src/main.cpp` | Launcher: ISO, settings registration, runtime start |
-| `src/game/` | Game-specific code: overrides / hooks (`vcs_overrides.cpp`), native draw HLE (`vcs_hle_world.cpp`), display (`vcs_display.cpp`), the trainer (`vcs_trainer.cpp`), frame timing (`vcs_framerate.cpp`, per-frame mission meters `vcs_script_timing.cpp`), the animation's node loop on worker threads (`vcs_anim.cpp`), the player's controls (`vcs_input.cpp`; free aim `vcs_aim.cpp`; the pause menu's keys and mouse `vcs_frontend.cpp`), the game's music / effects levels as settings (`vcs_volume.cpp`), button prompts by device (`vcs_prompts.cpp`, its glyphs `vcs_glyph_art.cpp`), traffic / pedestrian density and draw distance (`vcs_world_detail.cpp`), the NPC drive-by's fire rate (`vcs_driveby.cpp`), mission scripts stuck above 30 fps (`vcs_script_fixes.cpp`) |
+| `src/game/` | Game-specific code: overrides / hooks (`vcs_overrides.cpp`), native draw HLE (`vcs_hle_world.cpp`), display (`vcs_display.cpp`), the trainer (`vcs_trainer.cpp`), frame timing (`vcs_framerate.cpp`, per-frame mission meters `vcs_script_timing.cpp`, particles `vcs_particle_timing.cpp`), the animation's node loop on worker threads (`vcs_anim.cpp`), the player's controls (`vcs_input.cpp`; free aim `vcs_aim.cpp`; the pause menu's keys and mouse `vcs_frontend.cpp`), the game's music / effects levels as settings (`vcs_volume.cpp`), button prompts by device (`vcs_prompts.cpp`, its glyphs `vcs_glyph_art.cpp`), traffic / pedestrian density and draw distance (`vcs_world_detail.cpp`), the NPC drive-by's fire rate (`vcs_driveby.cpp`), mission scripts stuck above 30 fps (`vcs_script_fixes.cpp`) |
 | `src/render/`, `src/rhi/`, `src/platform/` | Presenter + shaders (HLSL; DXBC by fxc, SPIR-V by `tools/hlsl_spirv.py`), the RHI (backends `d3d11/`, `vulkan/`, `null/`; only they see a graphics API), SDL3 platform layer |
 | `src/sound/` | Sony's libsd on the host (the native sound driver in `src/game/vcs_sound.cpp` drives the SPU2 through it) |
 | `src/settings/`, `src/ui/` | Settings registry + vcs.ini, the in-game settings menu (F2), the trainer menu (F5) |
@@ -254,6 +254,9 @@ itself ("GTA Vice City Stories Launcher vX"), so the file has no heading. Follow
   a truck that only keeps rolling at shorter frames - game-internals.md 11h, `src/game/vcs_script_fixes.cpp`). The
   wait ends by itself now (`[script-fix] mission audio slot ... was freed` in the log): look for what killed the speaker.
 - Something wrong only above 100 fps: a `ms_fTimeStep < 0.5` branch the PS2 never takes (game-internals.md 4).
+- An effect faster, shorter or busier at high frame rates (smoke, sprays, flashes, flicker, trails): it counts frames,
+  not time - game-internals.md 4 "Effects that run per frame" lists the known ones; `VCS_PARTICLE_LOG=1` shows which
+  particle call sites run per frame (their calls per second grow with the frame rate).
 - A mission bar / meter / timer faster at high frame rates: the mission script adds a fixed amount every frame; add
   the instruction to `src/game/vcs_script_timing.cpp` (game-internals.md 11f has the survey and how to read a mission).
 - Load Game stuck on "Loading..." then a return to text (`0x4548435F`) from the script VM: host code took a game

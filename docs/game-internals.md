@@ -386,7 +386,19 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
     fade gives the same number on screen (measured: ~68 live at 30 and 144 fps next to a parked car) but trails and
     plumes 1/4.8 as long; **CFire::ProcessFire `FUN_002BDDC8` spawns on ms timers** (80 / 200 / 400 ms), so with the
     per-frame fade fires show ~1/4.8 as many flames. Shots, hits and crashes spawn per event: unchanged. Steam after
-    rain counts 800 frames (`0x48A120`): 26.7 s becomes 5.6 s.
+    rain counts 800 frames (`0x48A120`): 26.7 s becomes 5.6 s. **Fixed 2026-11-14** (`src/game/vcs_particle_timing.cpp`;
+    PROGRESS.md has the numbers): before each Update the per-particle rates are scaled by step / (50/30), and the
+    continuous emitters' calls pass at the PS2's rate. Measured with `VCS_PARTICLE_LOG=1` (calls per second by return
+    address at 30 / 144 fps, then lifetimes by type), which also sorted the call sites: those that scaled with the frame
+    rate are per frame; e.g. the rain-on-the-body site 0x143D94 (1070 / 4270 a second), CFire's 0x2BE65C / 0x2BE728 not
+    (24 / 25-30: ms timers), CPed's splash-up 0x1FA5B8 not. AddParticle's callers that read the particle back (and so
+    must not get 0 from a skipped call): 0x229BBC (CParticleObject stores it) and 0x33D9B8; the rest overwrite $v0 or
+    call on before reading it (checked in the listing after each jal, build/analysis/particle_sites_v0.txt).
+    **CExplosion::Update** (`FUN_002E23A0`; records of 0x50 bytes from `0x51E510`, the byte at +0x34 (`0x51E544`) both
+    "active" and a step count, +1 a frame): a car explosion (type 1) bursts `(int)(steps x 0.55) x 30` flames a frame
+    for steps 1-9, then 4 CARFLAME_SMOKE a frame (0x2E2EC8, throttled); burning cars (3-5) jet (AddJetExplosion
+    `FUN_001EBD28`, 1 in 16 a frame, 0x2E2734, throttled) and smoke on odd steps (0x2E25FC / 0x2E268C, throttled).
+    The burst by steps is left: the step count also gates coronas, lights and damage calls in the same function.
   - **Weather and sky** (CWeather::Update `FUN_003E3720`): a lightning burst starts on `(u16)rand() < 200` and ends on
     `(u8)rand() < 0x20`, both per frame (the flash toggle itself is on a 50 ms timer; `0x4CD2E0`, FUN_001A6310 lights the
     scene with it): bursts 4.8x as often and 1/4.8 as long. Sun glare `0x4CD434 *= 1 - (rand & 31) * 0.007` per frame.

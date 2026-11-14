@@ -592,12 +592,25 @@ dropped on uploads (lazy render-target patching).
       on at 30 fps against 19.3 / 24.2 at 60. The count function (FUN_0018B668) now adds the frame's step / (50/30)
       (`src/game/vcs_music_timing.cpp`, `VCS_MUSIC_TIMESTEP=0` off): 30.0 counts a second at 30 (original timing, the
       game's path), 60 and 120 fps; resumed 12.9 / 18.0 s on at 60 and 13.2 / 17.9 at 120.
+- [x] **Particles on the time step** (2026-11-14, from the effects survey; game-internals.md 4 "Effects that run per
+      frame"): CParticle::Update faded, grew, turned and animated each particle once a frame, and the continuous emitters
+      spawned once a frame, so at 144 fps smoke and spray lived 1/4.8 as long (with 4.8x as many made) and fires, which
+      spawn on a timer, showed 1/4.8 as many flames. `src/game/vcs_particle_timing.cpp` (`VCS_PARTICLE_TIMING=0` off):
+      the per-particle rates are set to step / (50/30) of the game's before each Update (integers dithered per particle),
+      the type's animation period stretched, and 185 emitter call sites (by return address, only those that ignore the
+      result) pass at the PS2's rate per (site, entity, call of the frame). `tools/framerate_audit.py --only particles`
+      (an idling car in the rain): exhaust 267 / 272 / 271 ms at 1/30 / 60 / 144 (56 ms at 1/144 before), made 36 / 36 /
+      35 a second (174 before); rain on the body 1080 a second at all three (5180 before), on the screen 180 (865).
+      Fires (explosions at night, `VCS_PARTICLE_LOG=1`): flames 1.77 / 1.80 s at 30 / 144 (0.68 before), their smoke
+      2.02 / 2.01 s (0.46). Left: an explosion's opening burst counts frames (CExplosion::Update's step byte, `0x51E544`
+      in each 0x50-byte record from `0x51E510`), so the fireball forms in 70 ms instead of 0.33 s - the same particles,
+      lasting as long; it also drives coronas, lights and damage, so it needs its own fix.
 - [ ] Fixes for what changes at the shorter step (physics, animations, script waits, particles, camera), each behind
       the switch; frame pacing. Left from the script survey (game-internals.md 11f): per-frame object / camera /
       text animations in missions (looks only). Effects survey (2026-11-14, game-internals.md 4 "Effects that run per
-      frame"): particles fade / grow / animate per frame and most emitters spawn per frame (smoke, sprays 1/4.8 as long
-      at 144 fps, fires thinner), lightning, sun glare, clouds, rubbish, camera shake, photo flash, video-cam overlay,
-      the HUD bar flash's countdown, peds fading out, melee streaks - not fixed yet.
+      frame"): particles - fixed (above) except an explosion's opening burst; lightning, sun glare, clouds, rubbish,
+      camera shake, photo flash, video-cam overlay, the HUD bar flash's countdown, peds fading out, melee streaks, steam
+      after rain (800 frames) - not fixed yet.
 ## Milestone 5 - movies (2026-10-24) - done
 - [x] STINGS.PSS (the Rockstar logos) and INTRO.PSS play natively at boot (`src/game/vcs_movie.cpp`): own PSS
       demuxer, MPEG-2 video through FFmpeg, shown by the presenter at 4:3 (pillarboxed in widescreen), 48 kHz PCM
@@ -1193,6 +1206,8 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_SCRIPT_FIXES=0` | the mission script fixes off: the wait for an audio line never ends when its slot is freed, Purple Haze's truck is not parked early (game-internals.md 11h; the reference: sticks on "Loading..." at 60 fps) |
 | `VCS_PHYSICS_TIMESTEP=0` | the push of a body under a wheel, the rolling resistance and a bike's brake wobble stay per frame (game-internals.md 4; the reference) |
 | `VCS_MUSIC_TIMESTEP=0` | radio stations off the air advance a frame's worth per frame, as on the PS2 (game-internals.md 9; the reference) |
+| `VCS_PARTICLE_TIMING=0` | particles fade, grow and spawn once a frame (before 2026-11-14: smoke 1/4.8 as long at 144 fps, fires thin) |
+| `VCS_PARTICLE_LOG=1` | every 10 s of game clock: AddParticle calls / passed per second by return address (`*` = throttled), and particles died per second and their mean lifetime by type |
 | `VCS_TURN_LOG=<model>` | every ApplyTurnForce on vehicles of that model (212 = PCJ-600): caller, its change to the yaw / pitch rate (sum by caller to find a per-frame push) |
 | `VCS_WHEEL_LOG=1` | each bike wheel's ProcessWheel inputs per frame: brake, grip, the contact's forward / sideways speed, wheel state |
 | `VCS_COLL_LOG=1` | each ApplyCollisionAlt (FUN_0034D670) of the player's vehicle: the other entity, contact point, normal, speeds |
