@@ -361,6 +361,59 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
     twoDPass / timerUpdate) - the value stays within 63 of the real counter for anything else reading it then.
     The four outside the 2D pass are not covered yet;
   - timestamps (stored, compared with frame - 1: "seen last frame"): FUN_00383028 .. 003868c0, 003ac9c8 - harmless.
+  - The four outside the 2D pass (identified 2026-11-14, below): FUN_001419d0 / 0033dca0 gate wheel spray / sand
+    particles, 003f29d8 a hull splash, 002af6e0 the HUD bar flash's countdown.
+- **Effects that run per frame** (survey 2026-11-14, after the motion blur's trails were found to be per frame (6g);
+  `tools/eedecomp.py` of the readers of the frame counter, the step and the particle entry, decompiles in
+  `build/analysis/decomp/particle_*.c` / `fx_*.c`; static unless said. x4.8 = 144 fps against the PS2's 30):
+  - **Particles.** `FUN_001E9078` = CParticle::AddParticle (type a0, pos a1, dir a2, entity a3, size f12, colour t0,
+    rot speed t1, rot t2, frame t3, lifespan on the stack; `FUN_001E9040` the overload without a colour; matches reVC
+    line for line). Systems: pointer at `0x70F318`, 0x84 bytes each, 90 types in GAME.DAT's default order (SPARK 0 ...
+    EXHAUST_FUMES 65, RUBBER_SMOKE 66 ... FLOOR_HIT 89). Pool: 750 x 0x50 at `0x4EFC30`, free list head `0x4CD318`,
+    linked through **+0x48** (checked in the running game); a full pool makes AddParticle return 0. **CParticle::Update
+    `FUN_001E9C90`** moves, drags and times them by the step / ms clock, but changes per frame: size += expansion (+0x30,
+    0x1EA590), fade to black (+0x2C, 0x1EAC1C), **alpha -= fade (+0x2D, freed at 0: 0x1EAC64; read in the
+    decompile)**, the animation frame counter (+0x3C) and rotation (+0x40 += +0x3E). So every type whose alpha runs out
+    before its ms lifetime lives 1/4.8 as long (exhaust ~8 frames, rubber smoke 12, engine smoke ~18, car splash 20,
+    flames 25-40). Most continuous emitters also spawn once a frame without the step: exhaust and tyre smoke / rim
+    sparks / rain on the body (CAutomobile::PreRender `FUN_00141FE8`, bikes `FUN_0033F010` / `0033DCA0` / `0033D5A0`),
+    wheel dirt and spray (`FUN_001419D0`, `frame & 1` / `& 2` gates), engine smoke (`FUN_00140B28`, health +0x27C <
+    650), car fire (`FUN_0013A0A0`, < 250), rotor dust (`FUN_003EF3B8`), bow splashes (`FUN_003F29D8`), propeller
+    (`FUN_0019FDA0`), screen rain (CWeather::AddRain `FUN_003E47B8`), insects (`FUN_003E5B20`, `frame % 10`), blood
+    from a severed limb and rain on peds (CPed::PreRender `FUN_00200660`), swimming wake (`FUN_001F3390`), particle
+    objects - fountains, hydrants, steam (`FUN_002294A8`, a skip counter in frames), explosions (CExplosion::Update
+    `FUN_002E23A0`: bursts by a per-frame iteration counter, jets on a per-frame chance). Per-frame spawn with per-frame
+    fade gives the same number on screen (measured: ~68 live at 30 and 144 fps next to a parked car) but trails and
+    plumes 1/4.8 as long; **CFire::ProcessFire `FUN_002BDDC8` spawns on ms timers** (80 / 200 / 400 ms), so with the
+    per-frame fade fires show ~1/4.8 as many flames. Shots, hits and crashes spawn per event: unchanged. Steam after
+    rain counts 800 frames (`0x48A120`): 26.7 s becomes 5.6 s.
+  - **Weather and sky** (CWeather::Update `FUN_003E3720`): a lightning burst starts on `(u16)rand() < 200` and ends on
+    `(u8)rand() < 0x20`, both per frame (the flash toggle itself is on a 50 ms timer; `0x4CD2E0`, FUN_001A6310 lights the
+    scene with it): bursts 4.8x as often and 1/4.8 as long. Sun glare `0x4CD434 *= 1 - (rand & 31) * 0.007` per frame.
+    CClouds::Update `FUN_0018CD88`: the cloud rotation `0x4CD2B0` gets a per-frame wind term and `0x4CD2B4` a constant 18
+    a frame besides its step term - clouds spin ~4.8x as fast. CRubbish::Update `FUN_0036AFD0` spawns newspapers on
+    `frame & mask` (mask by wind): up to 4.8x as many.
+  - **Camera shake** (CCamera::Process `FUN_00378DD8`, 0x37ACC0..0x37AD50): strength decays on the ms clock, but a new
+    random offset every frame - the same amplitude, 4.8x the frequency (a buzz).
+  - **2D / special FX** (CSpecialFX::Render2DFXs `FUN_001676C8`, in the 2D pass): the photo snapshot's counter
+    `0x481CF4` +1 a frame (white fade frames 1-9, time scale `0x4CD168` held at 0 until frame 21: 69 ms / 0.15 s
+    instead of 333 ms / 0.7 s); the video-cam overlay (`0x481CD4`) toggles its scanline offset `0x481D64` and re-rolls
+    200 noise dashes every frame. The HUD bars' flash (`FUN_002AF6E0` state 4, set with count 40 by FUN_0031F3F0 for
+    items 10 / 11) counts down on frames with `(frame & 8) == 0`: the 2D pass's 30 Hz counter keeps the blink's phase,
+    not the countdown (~1 blink instead of 5 over 2.7 s).
+  - **Peds fading out** (bFadeOut, 0x1F4CFC): alpha -= 8 a frame (0x1F4D10): 0.22 s instead of 1.07. **Melee swing
+    streaks** (CMotionBlurStreaks::Update `FUN_00169F88`, from CSpecialFX::AddWeaponStreak `FUN_00166CE0`): a 4-slot
+    position history shifted every frame - 1/4.8 as long.
+  - **Fine** (time-based): the Purple Haze drift (`0x481CE0` / `E4` are sin / cos of the ms clock, FUN_001676C8),
+    coronas (CCoronas::Update `FUN_0027C308`, CRegisteredCorona::Update `FUN_0027BFF8`: step-scaled; only a 3-frame
+    snap after the look direction changes), the sun and moon, camera and music fades (`FUN_0037B620` / `0037B778`), bullet
+    traces, wind gusts, the rainbow, the time-cycle recompute every 16 frames. **Unused in VCS**: CMBlur's screen FX
+    (OverlayRenderFx `FUN_001AC1F8`: its list is filled only by `FUN_001AD2F8`, which nothing calls - no heat haze or
+    screen drops) and the drunk blur (+0x10 has no writer found). The renderer's own effects (bloom, the 512-wide smear -
+    its warp is the same every frame, checked in the vertex log -, the reflection map) carry nothing from frame to frame.
+  - **Open**: neon / flickering and traffic lights, explosion screen flashes, `FUN_002ED8E8` (`frame % 18`, from
+    CPlayerPed::ProcessControl), `FUN_0032FD78` (50 pieces, velocity x 0.714 a frame), the rocket trail, which vehicles
+    `FUN_003621F8` / `00399FA0` are, the exhaust threshold `0x481A44`.
 - **Mission scripts that count per frame**: a meter changed by a fixed amount each `WAIT 0` pass (PHI_A2's heat bar,
   eleven more missions) moved with the frame rate - section 11f.
 - **Emulated time and the VBlank chain** (found when independent timing first ran at 5 fps): VBlank events are chained

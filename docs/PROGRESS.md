@@ -594,7 +594,10 @@ dropped on uploads (lazy render-target patching).
       game's path), 60 and 120 fps; resumed 12.9 / 18.0 s on at 60 and 13.2 / 17.9 at 120.
 - [ ] Fixes for what changes at the shorter step (physics, animations, script waits, particles, camera), each behind
       the switch; frame pacing. Left from the script survey (game-internals.md 11f): per-frame object / camera /
-      text animations in missions (looks only).
+      text animations in missions (looks only). Effects survey (2026-11-14, game-internals.md 4 "Effects that run per
+      frame"): particles fade / grow / animate per frame and most emitters spawn per frame (smoke, sprays 1/4.8 as long
+      at 144 fps, fires thinner), lightning, sun glare, clouds, rubbish, camera shake, photo flash, video-cam overlay,
+      the HUD bar flash's countdown, peds fading out, melee streaks - not fixed yet.
 ## Milestone 5 - movies (2026-10-24) - done
 - [x] STINGS.PSS (the Rockstar logos) and INTRO.PSS play natively at boot (`src/game/vcs_movie.cpp`): own PSS
       demuxer, MPEG-2 video through FFmpeg, shown by the presenter at 4:3 (pillarboxed in widescreen), 48 kHz PCM
