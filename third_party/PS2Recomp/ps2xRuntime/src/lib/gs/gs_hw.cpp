@@ -2070,6 +2070,16 @@ namespace
             return on;
         }
         static constexpr int64_t kPs2FrameNs = 33366667; // NTSC: two fields of 59.94 Hz
+        // the motion blur's strength above 30 fps or 1x, over the game's (nativeFrameCopy)
+        static float blurStrength()
+        {
+            static const float k = [] {
+                const char *e = std::getenv("PS2X_HW_BLUR_STRENGTH");
+                const float v = e && e[0] ? static_cast<float>(std::atof(e)) : 0.75f;
+                return std::clamp(v, 0.0f, 2.0f);
+            }();
+            return k;
+        }
 
         struct BlurPicture
         {
@@ -2228,12 +2238,22 @@ namespace
             LayerTarget t;
             t.opaque = false;
             t.vertices = m_postVb.get();
+            HwState bs = s;
             if (s.abe)
+            {
                 t.rtTexture = blurHistoryPick(f, s, src->second); // [gta-recomp] a PS2 frame back, not one frame
-            draw(s, 0u, 6u, nullptr, &t);
+                // [gta-recomp] Above the PS2's 30 fps (the history in use) or its resolution, the ghost is a sharp copy
+                // over a smooth, sharp picture - at speed it stood out more than the PS2's, whose 640x448 picture and
+                // 30 fps judder softened it. There its strength (FIX 16, 12.5%) is scaled by PS2X_HW_BLUR_STRENGTH
+                // (default 0.75: FIX 12, ~9.4%; 1 = the PS2's everywhere). At 30 fps and 1x it is the game's own.
+                const Scale &sc = src->second.scale;
+                if (s.bc == 2u && (t.rtTexture || sc.x > 1.01f || sc.y > 1.01f))
+                    bs.fix = static_cast<decltype(bs.fix)>(std::lround(static_cast<float>(s.fix) * blurStrength()));
+            }
+            draw(bs, 0u, 6u, nullptr, &t);
             if (log)
-                std::fprintf(stderr, "[draw] native frame %s %u -> %u%s\n", s.abe ? "blend" : "copy (quad)", s.rtFbp, s.fbp,
-                             t.rtTexture ? " (from the blur history)" : "");
+                std::fprintf(stderr, "[draw] native frame %s %u -> %u fix %u%s\n", s.abe ? "blend" : "copy (quad)", s.rtFbp, s.fbp,
+                             bs.fix, t.rtTexture ? " (from the blur history)" : "");
             if (s.abe)
                 blurHistoryStats(t.rtTexture != nullptr);
             return 1;

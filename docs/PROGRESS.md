@@ -1325,6 +1325,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `PS2X_HW_PIXEL_CENTRE=0` | draws without the GS pixel-centre offset (softer copies, as before 2026-10-23) |
 | `PS2X_HW_RT_FULL=0` | render targets read once per PS2 texel everywhere (higher internal resolutions lost in the copies) |
 | `PS2X_HW_POSTFX=0` or letters `btc` | effects drawn as recorded / only these native: b bloom, t trails, c frame copy + motion blur |
+| `PS2X_HW_BLUR_STRENGTH=<k>` | the motion blur's strength above 30 fps or 1x, times the game's (default 0.75; 1 = the PS2's everywhere) |
 | `PS2X_HW_BLUR_HISTORY=0` | the motion blur reads the last picture at any frame rate (before 2026-11-13: no light trails above 30 fps), not the one a PS2 frame (33 ms) back |
 | `PS2X_HW_SCALE=0` | native frame: the picture's targets at the window's size (menu: Internal resolution > Match window) |
 | `python tools/rig.py burst DIR N` | the next N presented frames as DIR/burst_NNNN.png + DIR/burst.txt (shape, the renderer's batch) |

@@ -445,6 +445,12 @@ then makes it hold at higher resolutions:
   buffer is read as before. Resolution plays no part: the ghost is a sharp 1:1 copy at any size, as on the GS. The
   game's flag that gates the blend (`0x48653C`, presumably the Display page's Trails) is untouched. `[gs-hw] motion blur` every 10 s:
   blends, how many read the history, the ghost's mean age.
+  **Its strength above 30 fps or 1x** (2026-11-14, the user's request: at speed in a car the ghost stood out a little
+  more than on the PS2, where the 640x448 picture and the 30 fps judder softened it): when the history is read (above
+  ~40 fps) or the frame target is above 1x, the blend's FIX 16 (12.5%) is scaled by `PS2X_HW_BLUR_STRENGTH` (default
+  0.75: FIX 12, ~9.4%; 1 = the game's everywhere). At 30 fps and 1x it is the game's own. Checked in the draw log
+  (`native frame blend 0 -> 140 fix N`): 16 at 30 fps 1x, 12 at 144 fps 1x and at 30 fps above 1x, 16 with the
+  switch at 1.
 
 ### Native frame (milestone 3 step 4, started 2026-10-23)
 
