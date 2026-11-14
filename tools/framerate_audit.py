@@ -732,7 +732,12 @@ def scenario_effects(s):
     g.cmd("poke 0x481cd4 01000000")
     read = lambda: open(g.log_path, encoding="utf-8", errors="replace").read()
     n0, t0 = len(EFFECTS_LINE.findall(read())), s.clock()
+    _, (px, py, pz), _ = g.player()
+    booms = 0
     while len(EFFECTS_LINE.findall(read())) < n0 + 2 and s.clock() - t0 < 75.0:
+        if s.clock() - t0 > booms * 5.0:  # a molotov (type 1) 20 m away every 5 s: its length and step count
+            g.scm(rig.Scm.op(0x013C, rig.Scm.f(px + 20.0), rig.Scm.f(py), rig.Scm.f(pz), rig.Scm.i(1)))
+            booms += 1
         s.wait_sim(0.5)
     g.cmd("poke 0x481cd4 00000000")
     g.weather(0)
@@ -742,9 +747,17 @@ def scenario_effects(s):
         raise RuntimeError("no effects log (VCS_EFFECTS_LOG) lines")
     ps2, turn, spin = (float(v) for v in lines[n0 + 1])
     per = {k.strip(): float(v) for k, v in re.findall(r"([a-z ]+?) ([\d.]+)", counts[n0 + 1])}
-    return {"ps2_frames_per_s": ps2, "clouds_turn_per_s": turn, "clouds_spin_per_s": spin,
-            "video_flips_per_s": per.get("video flips", 0.0), "dash_rolls_per_s": per.get("dash rolls", 0.0),
-            "lightning_rolls_per_s": per.get("lightning rolls", 0.0)}
+    out = {"ps2_frames_per_s": ps2, "clouds_turn_per_s": turn, "clouds_spin_per_s": spin,
+           "video_flips_per_s": per.get("video flips", 0.0), "dash_rolls_per_s": per.get("dash rolls", 0.0),
+           "lightning_rolls_per_s": per.get("lightning rolls", 0.0)}
+    # explosions ended after the first line (before 2026-11-14 at 144 fps: 1.1 s and 157 steps, against 1.55 s and 46)
+    starts = [m.start() for m in EFFECTS_LINE.finditer(text)]
+    tail = text[starts[n0]:]
+    ex = re.findall(r"^\[effects\] explosions: \d+ ended, (\d+) ms, ([\d.]+) steps", tail, re.M)
+    if ex:
+        out["explosion_ms"] = sum(float(m) for m, _ in ex) / len(ex)
+        out["explosion_steps"] = sum(float(st) for _, st in ex) / len(ex)
+    return out
 
 
 def scenario_clock(s):

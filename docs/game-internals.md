@@ -436,6 +436,28 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
       (byte; flipped once a frame in all: once, then 112 times in the loop). **Photo**: flag `0x481CF8`, counter
       `0x481CF4` (u32 each). **Steam after rain**: CWeather::AddRain counts `0x48A120` down from 800 after each
       FUN_003E4270 call while `0x48A0F0` is set.
+  - **Phase 3, fixed 2026-11-14** (`vcs_effects_timing.cpp` 11-12):
+    - **CExplosion::Update** (`FUN_002E23A0`, from FUN_002C0D88 = CExplosion::Update then CProjectileInfo::Update
+      `FUN_00181208` then FUN_003C1348; 48 records of 0x50 from `0x51E510`: +0x00 type, +0x10 position, +0x20 radius
+      (+= step x +0x24), +0x28 creator, +0x2C the vehicle (burning cars), +0x30 end (ms), +0x34 a byte that is both
+      "active" and the step count (+1 a frame, 0 at the end), +0x3C a start delay (ms; TriggerExplosion `FUN_00192760`
+      at 0x2E249C when it passes), +0x40 power, +0x44 the ground z). The molotov (type 1) calls FUN_00196B38 /
+      00196EC8 / 00197068 every frame (reVC's SetPedsOnFire / SetCarsOnFire / SetWorldOnFire: idempotent), bursts FLAME
+      `(int)(step x 0.55) x 30` a frame for steps 1-9 (0x2E2D98), 9 more and a second TriggerExplosion at step 7
+      (0x2E2FEC, 0x2E3018); types 10 / 11 burst EXPLOSION_LARGE for steps 1-4 (0x2E332C); coronas (FUN_0027DD80) and a
+      point light (FUN_0040E1D0) alternate on `frame & 1`. **The step byte wrapped**: at 144 fps a 1.5 s explosion
+      counted 157 steps on average and the ones past 255 ended there - measured 1.1 s against 1.55 s at 30 fps.
+    - **The banknote spray**: `FUN_0032FD78` animates up to 50 notes (0x90 bytes each; their age counts the step, but
+      speed x 0.714, -0.03 z, position and spin a frame, a 1-in-60 flutter rolled a frame) of the "dollar" effect at
+      `0x488784` (created by FUN_0032F528, freed by FUN_0032F568), thrown by the script command handler `FUN_0011D488`;
+      run from CSpecialFX::Update `FUN_00167610` (then FUN_00169CC0, 00168F70, 00169140). Not triggered in a run.
+    - **Harmless**: `FUN_002ED8E8` (from CPlayerPed::ProcessControl) rebuilds the player's lists of nearby peds /
+      vehicles / objects (radii 40 / 80 / 20 m, `FUN_002EC8F8`) one a frame on `frame % 6 == 0` - fresher lists above
+      30 fps. `FUN_002CB7C0` is the hit-scan shot (light, bullet trace, then FUN_002CFEA8 on `frame & 3 == 0`): per
+      shot. CAutomobile::PreRender's `frame & 1` reads alternate exhaust puffs between the pipes (spawns throttled).
+      The functions that read the frame counter and register coronas or lights are only these three and the explosion:
+      no neon / traffic light counts frames (both are on the ms clock), and no separate explosion screen flash was found
+      - the flash is the explosion's coronas and light.
   - **Fine** (time-based): the Purple Haze drift (`0x481CE0` / `E4` are sin / cos of the ms clock, FUN_001676C8),
     coronas (CCoronas::Update `FUN_0027C308`, CRegisteredCorona::Update `FUN_0027BFF8`: step-scaled; only a 3-frame
     snap after the look direction changes), the sun and moon, camera and music fades (`FUN_0037B620` / `0037B778`), bullet
@@ -443,9 +465,9 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
     (OverlayRenderFx `FUN_001AC1F8`: its list is filled only by `FUN_001AD2F8`, which nothing calls - no heat haze or
     screen drops) and the drunk blur (+0x10 has no writer found). The renderer's own effects (bloom, the 512-wide smear -
     its warp is the same every frame, checked in the vertex log -, the reflection map) carry nothing from frame to frame.
-  - **Open**: neon / flickering and traffic lights, explosion screen flashes, `FUN_002ED8E8` (`frame % 18`, from
-    CPlayerPed::ProcessControl), `FUN_0032FD78` (50 pieces, velocity x 0.714 a frame), the rocket trail, which vehicles
-    `FUN_003621F8` / `00399FA0` are, the exhaust threshold `0x481A44`.
+  - **Open**: the rocket trail (AddParticlesAlongLine: spacing or one a frame), which vehicles `FUN_003621F8` /
+    `00399FA0` are, the exhaust threshold `0x481A44`. (Lights, explosion flashes, `FUN_002ED8E8` and `FUN_0032FD78`:
+    phase 3, above.)
 - **Mission scripts that count per frame**: a meter changed by a fixed amount each `WAIT 0` pass (PHI_A2's heat bar,
   eleven more missions) moved with the frame rate - section 11f.
 - **Emulated time and the VBlank chain** (found when independent timing first ran at 5 fps): VBlank events are chained

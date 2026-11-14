@@ -29,6 +29,9 @@
 //    not lying ready, so none starts.
 // 10. Steam after rain (CWeather::AddRain FUN_003E47B8): 800 frames counted down after each FUN_003E4270 call - the
 //    count is put back between ticks.
+// 11. Explosions (CExplosion::Update FUN_002E23A0): the step count that drives their bursts advances at 30 a second
+//    per explosion, the bursts pass on fresh steps only, the coronas' `frame & 1` reads the PS2 frames' parity (see 11.).
+// 12. The banknote spray (FUN_0032FD78): runs on ticks only, with the steps since the last one.
 //
 // rand (FUN_00408058, Park-Miller: seed 0x48A5B8 x 16807 mod 2^31 - 1) is replaced by the same computation, which
 // does what is said above for the listed return addresses only.
@@ -108,6 +111,9 @@ namespace vcs
             bool tick = true;       // a PS2 frame has passed with this frame
             uint64_t seq = 0;       // frames seen
             uint64_t ticks = 0;
+            float dt = kPs2FrameMs; // this frame, ms (a PS2 frame's when the fix is off)
+            float stepSum = 0.0f;   // the game's time steps since the last tick
+            float tickStep = 0.0f;  // on a tick: the steps since the one before (about 50/30)
         } g_clock;
 
         // updated once a frame (the first caller after the real-time clock moved)
@@ -138,6 +144,13 @@ namespace vcs
                     c.carry = std::clamp(c.carry - kPs2FrameMs, -0.1f * kPs2FrameMs, kPs2FrameMs);
             }
             c.ticks += c.tick ? 1u : 0u;
+            c.dt = c.share < 1.0f ? dt : kPs2FrameMs;
+            c.stepSum += rd<float>(rdram, 0x004CD110u);
+            if (c.tick)
+            {
+                c.tickStep = c.stepSum;
+                c.stepSum = 0.0f;
+            }
             return c;
         }
 
@@ -415,6 +428,172 @@ namespace vcs
             g_origSteam(rdram, ctx, runtime);
         }
 
+        // ---- 11. explosions --------------------------------------------------------------------------------------------
+        // CExplosion::Update (FUN_002E23A0; 48 records of 0x50 bytes from 0x51E510: +0x10 the position, +0x34 a byte that
+        // is both "active" and the step count, +1 a frame, +0x3C a start delay) bursts flames by the step (a molotov:
+        // (int)(steps x 0.55) x 30 a frame for steps 1-9, a second fire at step 7; the big ones: EXPLOSION_LARGE for steps
+        // 1-4), and alternates its coronas and light on `frame & 1`. Each explosion gets steps at the PS2's 30 a second
+        // from its own start (set before every Update), its step bursts pass only on a fresh step (the call matched to
+        // its explosion by position), and `frame & 1` reads the PS2 frames' parity (put back when CProjectileInfo::Update,
+        // the next call of FUN_002C0D88, starts). Before, the count also wrapped past 255 - the explosion's end - in 1.8 s
+        // at 144 fps.
+        constexpr uint32_t kExplosionUpdate = 0x002E23A0u, kExplosions = 0x0051E510u, kExplosionCount = 48u;
+        constexpr uint32_t kProjectileUpdate = 0x00181208u, kTriggerExplosion = 0x00192760u;
+        constexpr uint32_t kAddParticle = 0x001E9078u;
+        constexpr uint32_t kBurstSites[] = {0x002E2D98u, 0x002E2FECu, 0x002E332Cu}; // flames, step-7 flames, LARGE
+        constexpr uint32_t kSecondFire = 0x002E3018u;                                  // TriggerExplosion at step 7
+
+        struct Explosion
+        {
+            bool active = false, fresh = true;
+            uint8_t step = 0;
+            float carry = 0.0f;
+            uint32_t startMs = 0, bursts = 0; // VCS_EFFECTS_LOG
+        };
+        Explosion g_explosions[kExplosionCount];
+        struct ExplosionLog
+        {
+            uint32_t ended = 0;
+            double ms = 0.0, steps = 0.0, bursts = 0.0;
+        } g_explLog;
+        bool g_counterSwapped = false;
+        uint32_t g_realCounter = 0;
+        PS2Runtime::RecompiledFunction g_origExplosions = nullptr, g_origProjectiles = nullptr, g_origTrigger = nullptr,
+                                       g_origAddParticle = nullptr;
+
+        PS2_GUEST_CC void explosionUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const Clock &c = clock(rdram);
+            if (c.share < 1.0f || g_counterSwapped)
+            {
+                if (!g_counterSwapped)
+                    g_realCounter = rd<uint32_t>(rdram, kFrameCounter);
+                g_counterSwapped = true;
+                wr<uint32_t>(rdram, kFrameCounter, (g_realCounter & ~1u) | static_cast<uint32_t>(c.ticks & 1u));
+            }
+            for (uint32_t i = 0; i < kExplosionCount; ++i)
+            {
+                const uint32_t rec = kExplosions + i * 0x50u;
+                Explosion &e = g_explosions[i];
+                const uint8_t b = rd<uint8_t>(rdram, rec + 0x34u);
+                if (b == 0u)
+                {
+                    if (e.active)
+                    {
+                        ++g_explLog.ended;
+                        g_explLog.ms += rd<uint32_t>(rdram, kRealClock) - e.startMs;
+                        g_explLog.steps += e.step;
+                        g_explLog.bursts += e.bursts;
+                    }
+                    e.active = false;
+                    continue;
+                }
+                if (!e.active || rd<uint32_t>(rdram, rec + 0x3Cu) != 0u) // new (its first Update), or in its delay
+                {
+                    e = {true, true, b, 0.0f, e.active ? e.startMs : rd<uint32_t>(rdram, kRealClock), e.active ? e.bursts : 0u};
+                    continue;
+                }
+                e.carry += c.dt;
+                e.fresh = e.carry >= kPs2FrameMs * 0.9f;
+                if (e.fresh)
+                {
+                    e.carry = std::clamp(e.carry - kPs2FrameMs, -0.1f * kPs2FrameMs, kPs2FrameMs);
+                    e.step = static_cast<uint8_t>(std::min(e.step + 1, 255)); // the game's +1 after 255 ends it, as there
+                }
+                wr<uint8_t>(rdram, rec + 0x34u, e.step);
+            }
+            g_origExplosions(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void projectileUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (g_counterSwapped)
+            {
+                wr<uint32_t>(rdram, kFrameCounter, g_realCounter);
+                g_counterSwapped = false;
+            }
+            g_origProjectiles(rdram, ctx, runtime);
+        }
+
+        // whether the explosion nearest to a position has a fresh step this frame
+        bool explosionFresh(const uint8_t *rdram, uint32_t posAddr)
+        {
+            const float x = rd<float>(rdram, posAddr), y = rd<float>(rdram, posAddr + 4u);
+            Explosion *best = nullptr;
+            float bestD = 1e30f;
+            for (uint32_t i = 0; i < kExplosionCount; ++i)
+                if (g_explosions[i].active)
+                {
+                    const uint32_t rec = kExplosions + i * 0x50u;
+                    const float dx = rd<float>(rdram, rec + 0x10u) - x, dy = rd<float>(rdram, rec + 0x14u) - y;
+                    if (dx * dx + dy * dy < bestD)
+                        bestD = dx * dx + dy * dy, best = &g_explosions[i];
+                }
+            if (best && best->fresh)
+                ++best->bursts;
+            return !best || best->fresh;
+        }
+
+        PS2_GUEST_CC void addParticleBurst(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ra = GPR_U32(ctx, 31);
+            if (std::find(std::begin(kBurstSites), std::end(kBurstSites), ra) != std::end(kBurstSites) &&
+                !explosionFresh(rdram, GPR_U32(ctx, 5))) // a1: the particle's position
+            {
+                SET_GPR_U32(ctx, 2, 0u); // as with the pool full (these callers ignore it)
+                ctx->pc = ra;
+                return;
+            }
+            g_origAddParticle(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void triggerExplosion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (GPR_U32(ctx, 31) == kSecondFire && !explosionFresh(rdram, GPR_U32(ctx, 4))) // a0: the position
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
+            g_origTrigger(rdram, ctx, runtime);
+        }
+
+        // ---- 12. the banknote spray ------------------------------------------------------------------------------------
+        // FUN_0032FD78 (CSpecialFX::Update FUN_00167610 calls it while the "dollar" effect of 0x488784 exists; a script
+        // command, FUN_0011D488, throws notes): up to 50 notes whose age counts the step but whose speed is x 0.714 and
+        // falls by 0.03 a frame, position and spin added a frame, a 1 in 60 flutter rolled a frame. It runs on PS2 frames
+        // only, with the step set to the steps since the last one (put back when FUN_00169CC0, its next call, starts).
+        constexpr uint32_t kMoneySpray = 0x0032FD78u, kMoneySprayNext = 0x00169CC0u, kTimeStep = 0x004CD110u;
+        bool g_stepSwapped = false;
+        float g_realStep = 0.0f;
+        PS2Runtime::RecompiledFunction g_origMoney = nullptr, g_origMoneyNext = nullptr;
+
+        PS2_GUEST_CC void moneySpray(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const Clock &c = clock(rdram);
+            if (c.share < 1.0f)
+            {
+                if (!c.tick)
+                {
+                    ctx->pc = GPR_U32(ctx, 31);
+                    return;
+                }
+                g_realStep = rd<float>(rdram, kTimeStep);
+                g_stepSwapped = true;
+                wr<float>(rdram, kTimeStep, c.tickStep);
+            }
+            g_origMoney(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void moneySprayNext(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (g_stepSwapped)
+            {
+                wr<float>(rdram, kTimeStep, g_realStep);
+                g_stepSwapped = false;
+            }
+            g_origMoneyNext(rdram, ctx, runtime);
+        }
+
         void logEffects(uint8_t *rdram)
         {
             if (!logOn())
@@ -442,6 +621,10 @@ namespace vcs
                     std::fprintf(stderr, " %s %.1f", kCountNames[i], g_counts[i] / secs);
             std::fprintf(stderr, "\n");
             std::memset(g_counts, 0, sizeof(g_counts));
+            if (g_explLog.ended)
+                std::fprintf(stderr, "[effects] explosions: %u ended, %.0f ms, %.1f steps, %.0f burst calls each\n", g_explLog.ended,
+                             g_explLog.ms / g_explLog.ended, g_explLog.steps / g_explLog.ended, g_explLog.bursts / g_explLog.ended);
+            g_explLog = {};
             g_lightLog = {};
             g_cloudTurn = g_cloudSpin = 0.0;
             lastMs = now, lastSeq = c.seq, lastTicks = c.ticks;
@@ -467,6 +650,12 @@ namespace vcs
             {kStreakUpdate, &g_origStreak, &streakUpdate},
             {kRubbishUpdate, &g_origRubbish, &rubbishUpdate},
             {kRainSteam, &g_origSteam, &rainSteam},
+            {kExplosionUpdate, &g_origExplosions, &explosionUpdate},
+            {kProjectileUpdate, &g_origProjectiles, &projectileUpdate},
+            {kTriggerExplosion, &g_origTrigger, &triggerExplosion},
+            {kAddParticle, &g_origAddParticle, &addParticleBurst}, // chains onto vcs_particle_timing's (installed before)
+            {kMoneySpray, &g_origMoney, &moneySpray},
+            {kMoneySprayNext, &g_origMoneyNext, &moneySprayNext},
         };
         if (!enabled())
         {

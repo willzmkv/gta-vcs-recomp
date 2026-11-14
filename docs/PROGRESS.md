@@ -617,11 +617,21 @@ dropped on uploads (lazy render-target patching).
       and noise, ped fade steps, rubbish picks and steam steps the same at 30 and 144, 4-5x before. Not seen in a run:
       the photo flash, the HUD bar flash (no trigger at hand) and melee streaks - the same mechanism, read in the code.
       `tools/framerate_audit.py --only effects`.
+- [x] **Explosions and the banknote spray at the PS2's 30 a second** (2026-11-14, phase 3 of the effects survey;
+      game-internals.md 4): CExplosion::Update's step byte (+1 a frame) drives a molotov's flame bursts, its second fire
+      at step 7 and the big explosions' bursts, and wrapped past 255 - the explosion's end - so at 144 fps explosions
+      lasted 1.1 s instead of 1.55 (157 steps against 46); its coronas and light alternate on `frame & 1` (72 Hz
+      instead of 15). `vcs_effects_timing.cpp` 11: each explosion's step advances at 30 a second from its start, its
+      bursts pass on fresh steps only (matched by position), and the parity is the PS2 frames'. Measured
+      (`VCS_EFFECTS_LOG=1`, molotov / grenade / large in turn, 30 / 144 / 144 before): 1546 / 1508-1531 / 1112-1148 ms,
+      46 / 45.6 / 157 steps, 217 burst calls each at all three; car-splash and flame-smoke particles 633 / 625 / 132 ms
+      and 2030 / 2007 / 450 ms. The banknote spray (FUN_0032FD78, a script command's flying notes) runs on PS2 frames
+      only with their steps summed - not triggered in a run. Checked harmless: FUN_002ED8E8 (the player's nearby
+      lists), the hit-scan shot's `frame & 3`; no light counts frames (only the explosion's).
 - [ ] Fixes for what changes at the shorter step (physics, animations, script waits, particles, camera), each behind
       the switch; frame pacing. Left from the script survey (game-internals.md 11f): per-frame object / camera /
       text animations in missions (looks only). Effects survey (2026-11-14, game-internals.md 4 "Effects that run per
-      frame"): particles and the other effects found - fixed (above), except an explosion's opening burst. Open from
-      the survey: neon / flickering / traffic lights, explosion screen flashes, FUN_002ED8E8, FUN_0032FD78.
+      frame"): all found fixed (above). Open: the rocket trail (AddParticlesAlongLine, one a frame at least).
 ## Milestone 5 - movies (2026-10-24) - done
 - [x] STINGS.PSS (the Rockstar logos) and INTRO.PSS play natively at boot (`src/game/vcs_movie.cpp`): own PSS
       demuxer, MPEG-2 video through FFmpeg, shown by the presenter at 4:3 (pillarboxed in widescreen), 48 kHz PCM
@@ -1218,7 +1228,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_PHYSICS_TIMESTEP=0` | the push of a body under a wheel, the rolling resistance and a bike's brake wobble stay per frame (game-internals.md 4; the reference) |
 | `VCS_MUSIC_TIMESTEP=0` | radio stations off the air advance a frame's worth per frame, as on the PS2 (game-internals.md 9; the reference) |
 | `VCS_PARTICLE_TIMING=0` | particles fade, grow and spawn once a frame (before 2026-11-14: smoke 1/4.8 as long at 144 fps, fires thin) |
-| `VCS_EFFECTS_TIMING=0` | lightning, sun glare, clouds, camera shake, the video overlay, the photo flash, the HUD bar flash, peds fading, streaks, rubbish and steam after rain step once a frame (before 2026-11-14) |
+| `VCS_EFFECTS_TIMING=0` | lightning, sun glare, clouds, camera shake, the video overlay, the photo flash, the HUD bar flash, peds fading, streaks, rubbish, steam after rain, explosions (bursts, length, flicker) and the banknote spray step once a frame (before 2026-11-14) |
 | `VCS_EFFECTS_LOG=1` | every 30 s of real time: frames and PS2 frames a second, lightning bursts (count, length), cloud turn / spin a second, and each effect's steps / rolls that took effect a second (with `VCS_EFFECTS_TIMING=0`: the per-frame counts) |
 | `VCS_PARTICLE_LOG=1` | every 10 s of game clock: AddParticle calls / passed per second by return address (`*` = throttled), and particles died per second and their mean lifetime by type |
 | `VCS_TURN_LOG=<model>` | every ApplyTurnForce on vehicles of that model (212 = PCJ-600): caller, its change to the yaw / pitch rate (sum by caller to find a per-frame push) |
