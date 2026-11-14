@@ -112,6 +112,8 @@ python tools/shakedown.py [OUT]                               # mission 50: cuts
 python tools/haze_check.py [OUT] [--timing 1 --fps 144]       # mission 94 at 60 fps: the cutscene that stuck on "Loading...",
                                                               # the haze across a 16:9 picture
 python tools/soundcheck.py all OUT [--mission N]             # native sound vs the emulated IOP: record, replay, compare
+python tools/hose_check.py [OUT] [--step 144]                 # Hose the Hoes at a simulated frame rate: the girls' bar,
+                                                              # the parked cars' fuses (the hose: framerate_audit --only hose)
 python tools/trainer_check.py [OUT] [--vehicles all]          # every trainer feature, checked in the game's memory
 python tools/finale_check.py [OUT] [--story] [--full]         # Last Stand's end from the trainer: final cutscene, credits
 python tools/controls_check.py [OUT]                          # bindings, presets, reset, vibration, volume levels; menu screenshots

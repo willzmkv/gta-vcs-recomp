@@ -29,6 +29,8 @@ Scenarios (each from a fresh teleport, so earlier ones don't leak into later one
           wobble was put on the step), lean, roll at the end (up z), whether the rider came off
   rotor   a Maverick standing in an alley narrower than its rotor: the health its blades cost per second (per frame
           before 2026-11-10: 382 a second at 30 fps, 1590 at 144 - on fire within a second)
+  hose    a fire truck's water cannon: how far it reaches, then how long a fire 18 m ahead takes to put out (the
+          trail moved on once a frame before 2026-11-14: 7 m of reach at 144 fps against 26.8, the fire never out)
   carwater the car dropped into the sea at 15 m/s: its speed 1 s after it reaches the water (the water's drag)
   bikewater the PCJ-600 dropped into the sea: how deep it settles
   ferris  the player in a ferris wheel carriage for 10 s: how long he stays where he stood in it, how far he drifts
@@ -498,6 +500,81 @@ def scenario_rotor(s):
     return {"health_per_s": (a[1] - b[1]) / (b[0] - a[0]), "seconds_900_to_300": b[0] - a[0], "health_after_4s": rows[-1][1]}
 
 
+FIRE_TRUCK = 194
+CANNONS, CANNON_SIZE = 0x4E3A60, 0x250  # CWaterCannon x 3 (vcs_physics_timing.cpp 5.): +0 vehicle, +0x10 16 points
+FIRES = 0x51D7E0  # CFireManager (0x51D7D0) + 0x10: 40 fires of 0x40 bytes; +0 burning, +1 script fire, +0x10 position,
+                  # +0x38 how hard it burns (water takes 0.012 x step a frame, it goes out below 0)
+START_SCRIPT_FIRE, REMOVE_SCRIPT_FIRE = 0x01BC, 0x01BE
+HOSE_FIRE_AHEAD = 18.0  # m in front of the truck: in reach at 30 fps (the stream's 26 m), out of it at 144 before
+
+
+def cannon_points(g, vehicle):
+    """The used points of the vehicle's water cannon: [(x, y, z)], or None when it has none."""
+    import struct
+    for n in range(3):
+        raw = g.peek(CANNONS + n * CANNON_SIZE, CANNON_SIZE)
+        if struct.unpack_from("<I", raw, 0)[0] != vehicle:
+            continue
+        return [struct.unpack_from("<3f", raw, 0x10 + 16 * i) for i in range(16) if struct.unpack_from("<I", raw, 0x210 + 4 * i)[0]]
+    return None
+
+
+def scenario_hose(s):
+    """The fire truck's water cannon (GitHub issue 144, Hose the Hoes): its trail of 16 points moved on every frame,
+    so the water reached 26 m at 30 fps and 5.6 m at 144 and the brothel's fires never went out. vcs_physics_timing.cpp
+    moves it on once per 1/30 s. Circle (Ctrl) held in a new fire truck for 2 s: how far the water reaches; then a
+    script fire HOSE_FIRE_AHEAD m ahead and Circle held until it is out (10 s at most): how long that took."""
+    import struct
+    g, S = s.g, rig.Scm
+    leave_vehicle(s)
+    x, y, h = CAR_SPOT
+    s.place(x, y, heading=h)
+    z = s.pos()[2] + 0.5
+    ints, _ = g.scm_outputs(S.op(S.REQUEST_MODEL, S.i(FIRE_TRUCK)) + S.op(S.LOAD_ALL_MODELS_NOW) +
+                            S.op(S.CREATE_CAR, S.i(FIRE_TRUCK), S.f(x + 4.0), S.f(y), S.f(z), S.LOCAL0) +
+                            S.op(S.WARP_CHAR_INTO_CAR, S.PLAYER, S.LOCAL0), 1)
+    car = ints[0]
+    vehicle = g.u32(g.u32(0x487A98)) + (car >> 8) * 0x8C0
+    s.wait_sim(2.0)
+    vx, vy, vz = g.peekf(vehicle + 0x30, 3)
+    fx, fy, _ = g.peekf(vehicle + 0x10, 3)
+    reach = 0.0
+    s.key("Ctrl", True)
+    t0 = s.clock()
+    while s.clock() - t0 < 2.0:
+        for p in cannon_points(g, vehicle) or []:
+            reach = max(reach, (p[0] - vx) * fx + (p[1] - vy) * fy)  # along the truck
+        time.sleep(0.01)
+    s.key("Ctrl", False)
+    s.wait_sim(2.0)  # the trail runs out
+    # a fire ahead, on the ground
+    fire_at = (vx + fx * HOSE_FIRE_AHEAD, vy + fy * HOSE_FIRE_AHEAD)
+    ints, _ = g.scm_outputs(S.op(START_SCRIPT_FIRE, S.f(fire_at[0]), S.f(fire_at[1]), S.f(-100.0), S.LOCAL0), 1)
+    handle = ints[0]
+    s.wait_sim(1.0)
+    record = None
+    for i in range(40):
+        raw = g.peek(FIRES + i * 0x40, 0x40)
+        px, py = struct.unpack_from("<2f", raw, 0x10)
+        if raw[0] and raw[1] and math.hypot(px - fire_at[0], py - fire_at[1]) < 2.0:
+            record = FIRES + i * 0x40
+    out = {"reach_m": reach}
+    if record is None:
+        out["error"] = "no fire"
+    else:
+        s.key("Ctrl", True)
+        t0 = s.clock()
+        while s.clock() - t0 < 10.0 and g.peek(record, 1)[0]:
+            time.sleep(0.01)
+        out_s = s.clock() - t0
+        s.key("Ctrl", False)
+        out["seconds_to_put_out"] = out_s if not g.peek(record, 1)[0] else 99.0
+    s.wait_sim(2.0)
+    leave_vehicle(s)
+    g.scm(S.op(REMOVE_SCRIPT_FIRE, S.i(handle)) + S.op(DELETE_CAR, S.i(car)))
+    return out
+
+
 OBJECT_POOL = 0x487AA4  # CPool of objects: 475 entries of 0x220 bytes (game-internals.md 12)
 FERRIS_CARRIAGE = 7069  # the model of the ferris wheel's 12 carriages, which turn in the plane x = 342.19
 FERRIS_SPOT = (342.0, -250.0)  # on the ground beside the wheel
@@ -783,6 +860,7 @@ SCENARIOS = {
     "brake": scenario_brake,
     "bikebrake": scenario_bikebrake,
     "rotor": scenario_rotor,
+    "hose": scenario_hose,
     "carwater": scenario_carwater,
     "bikewater": scenario_bikewater,
     "ferris": scenario_ferris,
@@ -794,14 +872,15 @@ SCENARIOS = {
 }
 
 
-def check_sites(port):
+def check_sites(port, only=None):
     """--sites: every per-frame meter instruction src/game/vcs_script_timing.cpp scales (its kSites) is where the table
     says, as the game decodes it: a game per listed mission with VCS_SCRIPT_TIMESTEP_CHECK=1, the mission launched, the
     log's "check: mission N +0x.. matches" lines counted against the table."""
     src = open(os.path.join(ROOT, "src", "game", "vcs_script_timing.cpp"), encoding="utf-8").read()
     table = {}
     for m, off in re.findall(r"^\s*\{(\d+), 0x([0-9A-Fa-f]+), 0x[0-9A-Fa-f]{4}, ", src, re.M):
-        table.setdefault(int(m), set()).add(int(off, 16))
+        if not only or int(m) in only:
+            table.setdefault(int(m), set()).add(int(off, 16))
     bad = 0
     for mission in sorted(table):
         g = rig.Game.start(save=rig.default_save(), name="sites_%d" % mission,
@@ -836,8 +915,8 @@ def main():
     ap.add_argument("--tolerance", type=float, default=0.05)
     ap.add_argument("--sites", action="store_true", help="only check the per-frame meter sites (check_sites)")
     a = ap.parse_args()
-    if a.sites:
-        sys.exit(0 if check_sites(47670) else 1)
+    if a.sites:  # --only: mission numbers here
+        sys.exit(0 if check_sites(47670, {int(m) for m in a.only.split(",") if m}) else 1)
     out = a.out or os.path.join(ROOT, "build", "audit", datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
     os.makedirs(out, exist_ok=True)
     steps = [int(x) for x in a.steps.split(",") if x]

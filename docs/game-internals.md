@@ -282,6 +282,35 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
     with `VCS_WATCH_STACK=1` (pc 0x137918, the caller at VehicleDamage's saved ra, sp + 0xB8), then the stores to
     +0x10C in the generated code (23 functions; the one in CVehicle's range) and `tools/eedecomp.py`. A rig `watch` on
     +0x10C itself only showed the clears.
+  - **The fire truck's water cannon** (found 2026-11-14 from GitHub issue 144: in Hose the Hoes the water never put
+    the brothel's fires out at 100 fps; issue 54 too, and players who capped at 60 got through only sometimes).
+    reVC's CWaterCannon, read in the decompile: **CWaterCannons::aCannons, 3 at `0x4E3A60`, 0x250 bytes each**: +0
+    the vehicle (the id; 0 = free), +4 s16 the newest point, +8 the time it was set up (ms), +0x10 16 positions and
+    +0x110 16 velocities (16 bytes each), +0x210 16 "in use" words. The fire truck's control (`FUN_001879D0`, from the
+    player's truck only, while Circle is held: turret yaw / pitch at +0x7DC / +0x7E0 turned by the step) calls
+    **UpdateOne `FUN_001877D0`** (find the cannon by vehicle, else Init `FUN_001869E8` a free one: setup time = now,
+    newest = 0) -> **Update_NewInput `FUN_00186CB8`** (newest point = the nozzle, velocity = the turret's unit
+    direction, i.e. 50 m/s; in use). Once a frame CGame's process (`FUN_003BA8D8`) calls **CWaterCannons::Update
+    `FUN_001878F0`** -> **Update_OncePerFrame `FUN_00186AA8`(cannon, index)**: if setup + 150 ms < now the newest moves
+    on one place (mod 16) and that place is freed; every point in use falls (vz -= 0.009 x step) and moves (v x step);
+    the first point in use within 4 m of a fire calls **CFireManager::ExtinguishPointWithWater `FUN_002BEAB8`**(radius
+    4, manager 0x51D7D0, point): the first burning fire within the radius loses 0.012 x step of +0x38 (+= 0.002 x step
+    while burning, at most 1; out below 0) and makes 3 steam puffs; on `(frame + index) & 3 == 0` **PushPeds
+    `FUN_00187250`** (peds within sqrt 5 of a point: speed averaged with 0.6 x the water's, capped 0.2, knocked down for
+    2 s, a lift of 2 x step); a cannon with no point in use is freed. Render: `FUN_00186D30` via `FUN_00187960`. So
+    the water lived 16 frames: **26.8 m of reach at 30 fps, 14.3 at 60, 7.0 at 144** (`framerate_audit.py --only
+    hose` with `VCS_PHYSICS_TIMESTEP=0`: a fire 18 m ahead went out in 2.4 s at 30 and never at 60 / 144). Fires are
+    0x40-byte records from 0x51D7E0 (40): +0 burning, +1 a script fire, +0x10 position, +0x20 the entity on fire,
+    +0x34 size, +0x38 strength; IS_SCRIPT_FIRE_EXTINGUISHED (opcode 0x01BD, `FUN_00182B90` -> `FUN_002BF020`) reads +0
+    of the handle's low 16 bits' record. **Fixed** (`vcs_physics_timing.cpp` 5.): the trail moves on once per 1/30 s of
+    game time (per cannon, the steps summed as the rotor blades' above) - between those frames the hook writes the
+    setup time (+8) as now, so the game's own 150 ms test holds it; on the others the real time, so the first 150 ms
+    still hold. The points still move every frame on the step, and putting out was already on the step (0.012 x step
+    every frame it hits). After: 26.8 m at 1/30 / 60 / 100 / 144 / 240, the fire out in 2.34 - 2.5 s at each. The 3 steam puffs a frame are
+    throttled with the other emitters (vcs_particle_timing.cpp: return addresses 0x2BEC8C / 0x2BECCC / 0x2BED80).
+    Left per frame: PushPeds on every 4th frame (pushes 4.8 times as often at 144, each lift step-sized, so the lift
+    per second is the same; the knock-down and the speed it sets are not) - not gated, since gating it would weaken
+    the lift.
   - **Braking audit** (`framerate_audit.py --only bikebrake,brake`, the airport runway: RUNWAY_SPOT, a PCJ-600 from 36
     m/s, a Sentinel from 24; before = `VCS_PHYSICS_TIMESTEP=0`):
 
@@ -2979,7 +3008,18 @@ which REN_C7, SRANGE, MAR_A5, LAN_C5 and DIA_C3 use for their meters. Some missi
   Each hit read in context: who calls the subroutine (a call-graph over CALL / GOSUB labels) and whether that loop
   waits 0, whether the change is per frame or per event (a hit, a pickup), and whether it is gameplay or looks.
 - **Per frame, gameplay** (scaled by `src/game/vcs_script_timing.cpp`, its table has each instruction):
-  - 59 LOU_B1 "Hose the Hoes": the girls' bar `$G1513` -0.04 / -0.03 / -0.01 a frame (by the fires left, +0x6E2..);
+  - 59 LOU_B1 "Hose the Hoes": the girls' bar `$G1513` -0.04 / -0.03 / -0.01 a frame with 0-1 / 2-4 / 5+ of the nine
+    fires out (`$G14F0` counts the fires out; an explosion of type 3 in one of the three rooms - the parked cars -
+    lights that room's fires again and takes them off the count) (+0x6E2..). Also (found 2026-11-14, GitHub issue 144)
+    `$G14F1 += TIMERA` every frame from when the truck comes within 120 m (`$G1506`, TIMERA reset; +0x172B): at
+    1,500,000 / 3,000,000 the two parked burning cars' health is set to 1 (`$G1504` / `$G1505`) - 10.0 / 14.1 s on
+    the PS2 (the sum is 15,000 t^2 at 30 fps), 4.6 / 6.5 s at 144; and the fire truck help's `$G14F4 += TIMERB`
+    (+0x165F, the next help after 140,000: 3 s, 1.4 at 144). Both scaled like the meters (opcode 0x0029
+    ADD_INT_VAR_TO_INT_VAR, handler 0x3B1248 as 0007; timers as operands: 0x0B / 0x0C). `tools/hose_check.py`: 1.20 a
+    second, 10.00 / 14.15 s at 1/144 (5.76, 4.58 / 6.48 before). The same `+= TIMERA / TIMERB` a frame (found by grepping
+    the listings for 0029 / 0007 / 0008 / 002A with a timer) is in 64 LAN_B5 (`$G1524 += TIMERB` against 300,000 at
+    +0x1AF1, `3L` against 100,000 at +0x379E) and 80 REN_C3 (`$G152C += TIMERA` against 300,000 at +0x160E, `16L`
+    against 100,000 at +0x33BE) - not read in context yet;
   - 67 UMB_B2 "Balls": havoc `$G14E9` +0.005 a frame per living Cholo (+0x24CF), the mission fails at 100;
   - 97 DIA_C2 "The Exchange": the snipers' TIME bar `$G154C` -0.04 a frame from 100 (+0x1E3F; 83 s at 30 fps);
   - 80 REN_C3 "Kill Phil": the Phil bar `$G152E` -0.25 a pass in the thugs state, a pass = two `WAIT 0`s (+0x27EC);

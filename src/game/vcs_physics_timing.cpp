@@ -33,8 +33,18 @@
 //    damage has a threshold, so the impulse cannot simply be scaled; instead the blades count on one frame in every
 //    1/30 s, as on the PS2: a per-vehicle sum of the frames' steps lets the multiplier through when it reaches a PS2
 //    frame and zeroes it otherwise (the sparks and the push stay every frame).
+// 5. The fire truck's water cannon (GitHub issue 144, Hose the Hoes). CWaterCannon (3 at 0x4E3A60, 0x250 bytes: +0 the
+//    vehicle, +4 s16 the newest of 16 points, +8 the time it was set up, +0x10 positions, +0x110 velocities, +0x210
+//    in use) is a trail of 16 points: the truck writes the nozzle's position and velocity into the newest every frame
+//    (FUN_00186CB8), and Update_OncePerFrame (FUN_00186AA8) moves them by the step, puts out fire within 4 m of the
+//    first point that reaches one (FUN_002BEAB8: -0.012 x step of the fire's strength) and - once 150 ms have passed
+//    since the set-up - starts a new point every frame, dropping the oldest. So the water lived 16 frames: 0.53 s and
+//    about 26 m of reach at 30 fps, 0.11 s and 5.6 m at 144. It fell short of the brothel's upper floor and the fires
+//    never went out. The hook lets the trail move on once per 1/30 s of game time (the steps summed per cannon, as the
+//    blades in 4.) by writing the set-up time (+8) as now on the frames in between, the real one otherwise; the rest
+//    (the points' motion, the fire, PushPeds every 4th frame) stays per frame, on the step.
 //
-// VCS_PHYSICS_TIMESTEP=0 keeps all four at the game's per-frame amounts.
+// VCS_PHYSICS_TIMESTEP=0 keeps all five at the game's per-frame amounts.
 #include "game/vcs_physics_timing.h"
 
 #include "game/vcs_framerate.h"
@@ -60,10 +70,13 @@ namespace vcs
         constexpr float kBrakeConstants[] = {0.54f, 0.09f, 0.9f, 0.18f}; // as the game loaded them (0x3F0A3D71 ...)
         constexpr uint32_t kTimeStep = 0x004CD110u;        // CTimer::ms_fTimeStep (1.0 = 1/50 s)
         constexpr uint32_t kFrameCounter = 0x004CD124u;    // CTimer::m_FrameCounter
+        constexpr uint32_t kTimeMs = 0x004CD104u;          // CTimer::m_snTimeInMilliseconds
+        constexpr uint32_t kCannonUpdate = 0x00186AA8u;    // CWaterCannon::Update_OncePerFrame(cannon a0, index a1) (5.)
+        constexpr uint32_t kCannons = 0x004E3A60u, kCannonSize = 0x250u, kCannonCount = 3u;
         constexpr float kPs2Step = 50.0f / 30.0f;          // a 30 fps frame
 
         PS2Runtime::RecompiledFunction g_origTurnForce = nullptr, g_origWheelCar = nullptr, g_origWheelBike = nullptr,
-                                       g_origBlade = nullptr;
+                                       g_origBlade = nullptr, g_origCannon = nullptr;
 
         bool enabled()
         {
@@ -196,6 +209,58 @@ namespace vcs
             g_origBlade(rdram, ctx, runtime);
         }
 
+        // 5.: per cannon, the steps since its trail last moved on, and the set-up time the game wrote (Init writes it
+        // anew when a cannon is taken again, which is how a new one is recognised). Game thread only.
+        struct CannonClock
+        {
+            bool known = false;
+            uint32_t vehicle = 0, setUp = 0, written = 0, frame = 0;
+            float sum = 0.0f;
+        };
+        CannonClock g_cannons[kCannonCount];
+
+        void wrU(uint8_t *rdram, uint32_t addr, uint32_t v) { std::memcpy(rdram + (addr & 0x1FFFFFFu), &v, 4); }
+
+        PS2_GUEST_CC void cannonUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t cannon = GPR_U32(ctx, 4);
+            const uint32_t n = (cannon - kCannons) / kCannonSize;
+            if (cannon >= kCannons && n < kCannonCount && (cannon - kCannons) % kCannonSize == 0u)
+            {
+                CannonClock &c = g_cannons[n];
+                const uint32_t vehicle = rdU(rdram, cannon), setUp = rdU(rdram, cannon + 8u);
+                const uint32_t frame = rdU(rdram, kFrameCounter);
+                if (!active())
+                {
+                    if (c.known && setUp == c.written) // switched off mid-trail: the game's own time back
+                        wrU(rdram, cannon + 8u, c.setUp);
+                    c.known = false;
+                }
+                else
+                {
+                    if (!c.known || c.vehicle != vehicle || setUp != c.written)
+                        c = {true, vehicle, setUp, setUp, frame - 1u, 0.0f};
+                    else if (frame - c.frame > 8u) // a gap (the game was elsewhere): the count starts again
+                        c.sum = 0.0f, c.frame = frame - 1u;
+                    if (c.frame != frame) // once a frame
+                    {
+                        const float step = rdF(rdram, kTimeStep);
+                        c.sum += step > 0.0f ? step : 0.0f;
+                        c.frame = frame;
+                        // as the blades in 4.: a frame about as long as the PS2's moves on by itself, shorter ones carry
+                        const bool moves = c.sum >= kPs2Step * 0.9f;
+                        if (moves)
+                            c.sum = std::clamp(c.sum - kPs2Step, -0.1f * kPs2Step, kPs2Step);
+                        // the game moves the trail on when set-up + 150 ms < now: the real time lets its own test
+                        // decide (nothing in the first 150 ms), now holds it
+                        c.written = moves ? c.setUp : rdU(rdram, kTimeMs);
+                        wrU(rdram, cannon + 8u, c.written);
+                    }
+                }
+            }
+            g_origCannon(rdram, ctx, runtime);
+        }
+
         void writeBrakeConstants(uint8_t *rdram)
         {
             const float scale = frameScale(rdram);
@@ -241,6 +306,11 @@ namespace vcs
             runtime.replaceFunction(kBladeCollision, &bladeCollision);
         else
             std::fprintf(stderr, "[physics-timing] the blade test 0x%x not found: rotor damage stays on the frame rate\n", kBladeCollision);
+        g_origCannon = runtime.lookupFunction(kCannonUpdate);
+        if (g_origCannon)
+            runtime.replaceFunction(kCannonUpdate, &cannonUpdate);
+        else
+            std::fprintf(stderr, "[physics-timing] the water cannon's update 0x%x not found: its reach stays on the frame rate\n", kCannonUpdate);
         // The patched ProcessWheels read their constants from kBrakeSlots, so these hooks are not optional.
         if (g_origWheelCar)
             runtime.replaceFunction(kProcessWheelCar, &processWheel<&g_origWheelCar>);

@@ -59,6 +59,7 @@ namespace vcs
                 Global,      // $G<index>
                 Local,       // <index>L, relative to the script's frame
                 GlobalArray, // $G<index>[<arrayIndex>L], <arraySize> entries
+                Timer,       // TIMERA (0) / TIMERB (1): the script's locals 0x68 / 0x69, not relative to its frame
                 Float,
                 Int,
             } kind = None;
@@ -74,7 +75,8 @@ namespace vcs
                 switch (kind)
                 {
                 case Global:
-                case Local: return index == o.index;
+                case Local:
+                case Timer: return index == o.index;
                 case GlobalArray: return index == o.index && arrayIndex == o.arrayIndex && arraySize == o.arraySize;
                 case Float: return f == o.f;
                 case Int: return i == o.i;
@@ -85,6 +87,7 @@ namespace vcs
         constexpr Operand G(uint16_t index) { return {Operand::Global, index}; }
         constexpr Operand L(uint16_t index) { return {Operand::Local, index}; }
         constexpr Operand GA(uint16_t index, uint8_t arrayIndex, uint8_t size) { return {Operand::GlobalArray, index, arrayIndex, size}; }
+        constexpr Operand TIMERA{Operand::Timer, 0}, TIMERB{Operand::Timer, 1};
         constexpr Operand F(float f) { return {Operand::Float, 0, 0, 0, f}; }
         constexpr Operand I(int32_t i) { return {Operand::Int, 0, 0, 0, 0.0f, i}; }
 
@@ -104,6 +107,8 @@ namespace vcs
             {59, 0x06E2, 0x000A, G(0x1513), F(0.04f), "LOU_B1 Hose the Hoes: girls -0.04"},
             {59, 0x06FF, 0x000A, G(0x1513), F(0.03f), "LOU_B1 Hose the Hoes: girls -0.03"},
             {59, 0x070F, 0x000A, G(0x1513), F(0.01f), "LOU_B1 Hose the Hoes: girls -0.01"},
+            {59, 0x172B, 0x0029, G(0x14F1), TIMERA, "LOU_B1 Hose the Hoes: the parked cars' fuse += TIMERA"},
+            {59, 0x165F, 0x0029, G(0x14F4), TIMERB, "LOU_B1 Hose the Hoes: the fire truck help's time += TIMERB"},
             {67, 0x24CF, 0x0008, G(0x14E9), F(0.005f), "UMB_B2 Balls: havoc +0.005 per Cholo"},
             {97, 0x1E3F, 0x000A, G(0x154C), F(0.04f), "DIA_C2 The Exchange: time -0.04"},
             {80, 0x27EC, 0x000A, G(0x152E), F(0.25f), "REN_C3 Kill Phil: Phil -0.25 (every other frame)"},
@@ -231,6 +236,12 @@ namespace vcs
                 o = I(static_cast<int16_t>(byte(ip + 1u) | (byte(ip + 2u) << 8)));
                 ip += 3;
             }
+            else if (t == 0x0B || t == 0x0C)
+            {
+                o = t == 0x0B ? TIMERA : TIMERB;
+                address = script + kScriptLocals + 4u * (0x68u + o.index);
+                ip += 1;
+            }
             else if (t >= 0x0D && t <= 0x6C)
             {
                 o = L(static_cast<uint16_t>(t - 0x0Du));
@@ -250,7 +261,7 @@ namespace vcs
                 address = i >= 0 && i < o.arraySize ? space + 4u * (o.index + static_cast<uint32_t>(i)) : kDummyVariable;
                 ip += 4;
             }
-            return o; // timers (0x0B / 0x0C), local arrays: None
+            return o; // local arrays: None
         }
 
         // VCS_SCRIPT_TIMESTEP_LOG=1: per site, every 2 s of game time, how often it ran and how much the game would

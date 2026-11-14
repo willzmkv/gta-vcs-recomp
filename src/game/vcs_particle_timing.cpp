@@ -124,6 +124,10 @@ namespace vcs
             0x001814C8u, // 23=TEARGAS
             0x00181508u, // 23=TEARGAS
             0x0018153Cu, // 23=TEARGAS
+            // 0x2beab8 CFireManager: water on a fire (the fire truck's cannon, once a frame while it hits)
+            0x002BEC8Cu, // 28=STEAM
+            0x002BECCCu, // 28=STEAM
+            0x002BED80u, // 28=STEAM
             // 0x19fda0 boat propeller
             0x001A21ACu, // 45=BOAT_SPLASH
             0x001A2228u, // 44=CAR_SPLASH

@@ -575,6 +575,20 @@ dropped on uploads (lazy render-target patching).
       `framerate_audit.py --only rotor` (new: a Maverick in an alley narrower than its rotor): 375 / 391 / 377 / 389 /
       395 a second at 1/30 / 60 / 100 / 144 / 240. Seen on the way: the health that falls is the vehicle's +0x27C, not
       the +0x278 the trainer's vehicle invincibility / repair and the F3 panel use - to look at.
+- [x] **Hose the Hoes above 30 fps** (2026-11-14, GitHub issues 144 and 54; game-internals.md 4 and 11f): the fire
+      truck's water cannon is a trail of 16 points that moved on one place every frame, so the water lived 16 frames
+      and reached 26.8 m at 30 fps, 14.3 at 60 and 7.0 at 144 - the brothel's fires were out of reach, and the girls'
+      bar ran down at its fastest rate (it drains faster while fewer fires are out). The trail now moves on once per
+      1/30 s of game time (`src/game/vcs_physics_timing.cpp` 5., `VCS_PHYSICS_TIMESTEP=0` off) and the steam from water
+      on a fire is throttled with the other emitters. `framerate_audit.py --only hose` (new: a fire truck, its reach,
+      then a fire 18 m ahead hosed until it is out): 26.8 m at 1/30 / 60 / 100 / 144 / 240, the fire out in 2.34 - 2.5 s
+      at all of them (2.40 - 2.50 between runs at 1/30; before: 14.3 / 7.0 m at 60 / 144, the fire never out). The mission also added TIMERA to a sum every frame that sets the two
+      parked burning cars' health to 1 (they blow up and can light the rooms again): scaled like the meters
+      (`vcs_script_timing.cpp`, timers as operands now), with the fire truck help's TIMERB sum. `tools/hose_check.py`
+      (new; the mission at a simulated frame rate): girls' bar 1.20 a second, the cars at 10.00 / 14.15 s at 1/144 and
+      1.20, 10.00 / 14.20 at 1/30 (before at 1/144: 5.76 without the 2026-10-27 fix, 4.58 / 6.48 s). `--sites --only
+      59`: 5 of 5. Not checked here: hosing the brothel's own fires in the mission (the rig can't aim the turret), and
+      issue 54's fire that isn't drawn (an AMD integrated GPU; a separate problem).
 - [x] **Purple Haze stuck on "Loading..." above 30 fps** (2026-11-10, GitHub issue 41; game-internals.md 11h): at 60
       fps the truck that rams the van in GON_C3's cutscene turns the van instead of pushing it, rolls on and runs over
       the first thug as he is created behind the faded-out screen; the audio monitor script frees his line's slot and the
@@ -1225,7 +1239,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_REFLECTIONS=0\|1\|2` | Car reflections for one run: Original, Smooth, Auto (Smooth above 1x; always used otherwise, no setting) - game-internals.md 6g |
 | `VCS_SCRIPT_TIMESTEP=0` | mission meters that count per frame stay on the frame rate (game-internals.md 11f; the reference) |
 | `VCS_SCRIPT_FIXES=0` | the mission script fixes off: the wait for an audio line never ends when its slot is freed, Purple Haze's truck is not parked early (game-internals.md 11h; the reference: sticks on "Loading..." at 60 fps) |
-| `VCS_PHYSICS_TIMESTEP=0` | the push of a body under a wheel, the rolling resistance and a bike's brake wobble stay per frame (game-internals.md 4; the reference) |
+| `VCS_PHYSICS_TIMESTEP=0` | the push of a body under a wheel, the rolling resistance, a bike's brake wobble, rotor blades against walls and the water cannon's reach stay per frame (game-internals.md 4; the reference) |
 | `VCS_MUSIC_TIMESTEP=0` | radio stations off the air advance a frame's worth per frame, as on the PS2 (game-internals.md 9; the reference) |
 | `VCS_PARTICLE_TIMING=0` | particles fade, grow and spawn once a frame (before 2026-11-14: smoke 1/4.8 as long at 144 fps, fires thin) |
 | `VCS_EFFECTS_TIMING=0` | lightning, sun glare, clouds, camera shake, the video overlay, the photo flash, the HUD bar flash, peds fading, streaks, rubbish, steam after rain, explosions (bursts, length, flicker) and the banknote spray step once a frame (before 2026-11-14) |
