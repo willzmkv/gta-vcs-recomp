@@ -369,16 +369,17 @@ namespace vcs::world_hd
         std::array<float, 0x8000> g_oscDist{};         // its centre's distance from the camera at the last build
         // VCS_HD_LATE: a detailed sector first drawn near the camera while it moves (a building that pops in close)
         const bool g_lateLog = std::getenv("VCS_HD_LATE") != nullptr;
-        // VCS_HD_PROBE=x,y,r: at a build (at most every 5 s, 20 times) every record whose sphere reaches within r of
-        // (x, y) - the game's and each extra cell's - with what the build did with it (a part of the map missing)
+        // VCS_HD_PROBE=x,y,r[,s]: at a build (at most every s seconds, 5 by default) every record whose sphere reaches
+        // within r of (x, y) - the game's and each extra cell's - with what the build did with it (a part of the map
+        // missing)
         struct Probe
         {
             bool on = false;
-            float x = 0.0f, y = 0.0f, r = 0.0f;
+            float x = 0.0f, y = 0.0f, r = 0.0f, every = 5.0f;
             Probe()
             {
                 if (const char *e = std::getenv("VCS_HD_PROBE"))
-                    on = std::sscanf(e, "%f,%f,%f", &x, &y, &r) == 3;
+                    on = std::sscanf(e, "%f,%f,%f,%f", &x, &y, &r, &every) >= 3;
             }
         } const g_probe;
         double g_probeAt = 0.0;
@@ -1248,13 +1249,17 @@ namespace vcs::world_hd
             // detail - the rule the lists were made by (9h: replaced where that list's detailed sectors lie inside it):
             // otherwise a neighbour's coarse sectors for the places it sees from afar cover the slot's detail.
             Grid hd; // every list's detailed sectors; tag 0 the slot's, i + 1 extra[i]'s
-            // A sector of the low-detail ids on the very sphere of a detailed one the game hides in the slot's list (the
-            // same centre's halves, x y z, the radius within 2 %) is no low detail but the same building's other version,
-            // which the game switches in with a mission and the detailed one out (Phil's warehouse in Boomshine Blowout:
-            // 3167 hidden, 6285 shown, both at -1210,-267, radius 29.05 / 29.02; its real low detail 5829 sits lower, r
-            // 28.9) - never replaced (the player's report, 2026-11-13: the warehouse gone near it). A detailed twin the
-            // game shows leaves its low-detail twin to the usual rule (9h: 19 of 138 such twins in a view, true LOD)
+            // A sector of the low-detail ids on the very sphere of a detailed one of the slot's list (the same centre's
+            // halves, x y z, the radius within 2 %) is no low detail but the same building's other version, which the game
+            // switches in with a mission: never replaced, the game's flags decide (Phil's warehouse in Boomshine Blowout:
+            // 3167 the shell, 6285 the building with its inside, both at -1210,-267, radius 29.05 / 29.02 - in free roam
+            // 3167 shown, in the mission 6285, in its cutscene both, whose camera is inside: with 6285 replaced the
+            // warehouse was gone around it - the player's reports, 2026-11-13 / 14). Its real low detail 5829 sits lower
+            // (another z half, r 28.9).
             std::unordered_map<uint64_t, float> twins;
+            static const bool twinLog = std::getenv("VCS_HD_TWINS") != nullptr;
+            uint32_t twinKept = 0; // (VCS_HD_TWINS: how many a build kept so, and which)
+            std::vector<uint32_t> twinKeptAt;
             auto centreKey = [&](uint32_t r) {
                 return uint64_t(rd16(r + 4u)) | uint64_t(rd16(r + 6u)) << 16 | uint64_t(rd16(r + 8u)) << 32;
             };
@@ -1266,8 +1271,7 @@ namespace vcs::world_hd
                 if (const uint16_t id = rd16(r) & 0x7FFFu; id >= 0x20u && id < kLodIds)
                 {
                     hd.add(half(rd16(r + 4u)), half(rd16(r + 6u)), 0);
-                    if (rd16(r) & 0x8000u)
-                        twins[centreKey(r)] = half(rd16(r + 0xAu));
+                    twins[centreKey(r)] = half(rd16(r + 0xAu));
                 }
             for (size_t i = 0; i < extra.size(); ++i)
                 for (const auto &p : extra[i]->hd)
@@ -1276,9 +1280,15 @@ namespace vcs::world_hd
             std::bitset<0x8000> replacedNow;
             uint32_t lodHeld = 0;
             auto replaced = [&](uint16_t id, uint32_t r) {
-                if (g_keepLod.test(id) || std::find(std::begin(kAlwaysKeepLod), std::end(kAlwaysKeepLod), id) != std::end(kAlwaysKeepLod) ||
-                    twin(r))
+                if (g_keepLod.test(id) || std::find(std::begin(kAlwaysKeepLod), std::end(kAlwaysKeepLod), id) != std::end(kAlwaysKeepLod))
                     return false;
+                if (twin(r))
+                {
+                    ++twinKept;
+                    if (twinLog && std::find(twinKeptAt.begin(), twinKeptAt.end(), r) == twinKeptAt.end())
+                        twinKeptAt.push_back(r);
+                    return false;
+                }
                 const float x = half(rd16(r + 4u)), y = half(rd16(r + 6u)), radius = half(rd16(r + 0xAu));
                 const bool is = hd.any(x, y, radius, [&](int tag) {
                     if (tag == 0)
@@ -1331,7 +1341,7 @@ namespace vcs::world_hd
             uint32_t hiddenLod = 0, added = 0, coarser = 0;
             std::bitset<0x8000> fading; // the sectors with a fade (or the night glow): the added ones, glowing low detail
             const bool glowNow = g_glow && hourWindow(20, 7);
-            const bool probing = g_probe.on && &b == &g_built[0] && t - g_probeAt > 5.0 && g_probeLogs < 400u;
+            const bool probing = g_probe.on && &b == &g_built[0] && t - g_probeAt > g_probe.every && g_probeLogs < 400u;
             auto probeNear = [&](uint32_t r) {
                 return std::hypot(half(rd16(r + 4u)) - g_probe.x, half(rd16(r + 6u)) - g_probe.y) - half(rd16(r + 0xAu)) < g_probe.r;
             };
@@ -1459,7 +1469,6 @@ namespace vcs::world_hd
             g_stats.coarser = coarser;
             // VCS_HD_TWINS=1 (once a minute): of the low-detail sectors left out as replaced, how many have a detailed
             // twin (a record of id < kLodIds at the very same centre and radius - the half floats equal) in the lists
-            static const bool twinLog = std::getenv("VCS_HD_TWINS") != nullptr;
             static double twinAt = 0.0;
             if (twinLog && &b == &g_built[0] && t - twinAt > 60.0)
             {
@@ -1491,7 +1500,23 @@ namespace vcs::world_hd
                                                  half(rd16(rec.from + 6u)), half(rd16(rec.from + 0xAu)));
                             }
                         }
-                std::fprintf(stderr, "[hdtwin] replaced low-detail sectors: %u with a detailed twin, %u without\n", twins, alone);
+                std::fprintf(stderr, "[hdtwin] replaced low-detail sectors: %u with a detailed twin, %u without; kept as another version: %u\n",
+                             twins, alone, twinKept);
+                for (const uint32_t r : twinKeptAt)
+                {
+                    uint32_t detail = 0;
+                    for (uint32_t q = b0; q < b8 && !detail; q += kRecord)
+                    {
+                        const uint16_t qid = rd16(q) & 0x7FFFu;
+                        if (qid >= 0x20u && qid < kLodIds && centreKey(q) == centreKey(r) &&
+                            std::fabs(half(rd16(q + 0xAu)) - half(rd16(r + 0xAu))) <= 0.02f * half(rd16(q + 0xAu)))
+                            detail = q;
+                    }
+                    std::fprintf(stderr, "[hdtwin]   kept %u (flag %u) gid %u at %.0f,%.0f r %.2f; its detailed twin %u (flag %u) gid %u r %.2f\n",
+                                 rd16(r) & 0x7FFFu, rd16(r) >> 15, rd16(r + 2u), half(rd16(r + 4u)), half(rd16(r + 6u)),
+                                 half(rd16(r + 0xAu)), detail ? rd16(detail) & 0x7FFFu : 0u, detail ? rd16(detail) >> 15 : 0u,
+                                 detail ? rd16(detail + 2u) : 0u, detail ? half(rd16(detail + 0xAu)) : 0.0f);
+                }
             }
 
             // write it: header (the game's, the buckets ours), records by bucket sorted by id (FUN_0023E748's merge)

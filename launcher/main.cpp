@@ -31,6 +31,8 @@
 // uses no CPU or GPU.
 #include "core/png.h"
 #include "model/disc_check.h"
+#include "model/scskiller.h"
+#include "model/sound.h"
 #include "model/system.h"
 #include "model/tasks.h"
 #include "platform/platform.h"
@@ -44,6 +46,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -177,6 +180,62 @@ namespace
             check(rendered, rendered ? "renderer: " + render::rendererStats.api + " (" + render::rendererStats.adapter +
                                            "), " + render::fontRasterizer()
                                      : "renderer: " + renderError);
+            const bool imgsLoaded = render::imagesInit(app.assetsFolder());
+            check(imgsLoaded && render::imageInfo(render::ImageId::Background).valid &&
+                      render::imageInfo(render::ImageId::GameLogo).valid &&
+                      render::imageInfo(render::ImageId::BrandLogo).valid &&
+                      render::imageInfo(render::ImageId::GameIcon).valid &&
+                      render::imageInfo(render::ImageId::SteamLogo).valid,
+                  "image atlas: loaded fundo.png, logo.png, minha_logo.png, icone.png, steam.png");
+
+            // GameConfig vcs.ini roundtrip, mod classifier, and Steam VDF generator tests
+            {
+                const fs::path tmpDir = app.build / "self_test_tmp";
+                std::error_code ec;
+                fs::create_directories(tmpDir, ec);
+                const fs::path tmpIni = tmpDir / "test_vcs.ini";
+                {
+                    std::ofstream out(tmpIni, std::ios::binary);
+                    out << "iso=D:\\Games\\VCS.iso\n"
+                        << "display.scale=2\n"
+                        << "custom.keep_me=42\n";
+                }
+                GameConfig cfg;
+                const bool loaded = cfg.loadIni(tmpIni);
+                cfg.displayScale = 4;
+                cfg.worldHdRadius = 2;
+                const bool saved = cfg.saveIni(tmpIni);
+                GameConfig cfg2;
+                cfg2.loadIni(tmpIni);
+                std::ifstream checkIn(tmpIni);
+                const std::string iniContent((std::istreambuf_iterator<char>(checkIn)), {});
+                check(loaded && saved && cfg2.displayScale == 4 && cfg2.worldHdRadius == 2 &&
+                          iniContent.find("iso=D:\\Games\\VCS.iso") != std::string::npos &&
+                          iniContent.find("custom.keep_me=42") != std::string::npos,
+                      "GameConfig: vcs.ini load/save roundtrip preserves unknown keys");
+
+                const fs::path modGood = tmpDir / "mod_good";
+                const fs::path modBad = tmpDir / "mod_bad";
+                fs::create_directories(modGood, ec);
+                fs::create_directories(modBad, ec);
+                std::ofstream(modGood / "vice_radar.png", std::ios::binary) << "png";
+                std::ofstream(modBad / "sa_hook.asi", std::ios::binary) << "asi";
+                const ModEntry eGood = GameConfig::classifyModFolder(modGood);
+                const ModEntry eBad = GameConfig::classifyModFolder(modBad);
+                check(eGood.compat == ModCompat::Compatible && eBad.compat == ModCompat::Incompatible,
+                      "GameConfig: mod compatibility classifier (.png compatible, .asi incompatible)");
+
+                const uint32_t appId = GameConfig::steamAppId("\"D:\\VCSLauncher.exe\"", "Grand Theft Auto: Vice City Stories");
+                const std::vector<uint8_t> vdf1 = GameConfig::upsertShortcutsVdf(
+                    {}, appId, "Grand Theft Auto: Vice City Stories", "\"D:\\VCSLauncher.exe\"", "\"D:\\\"", "D:\\icone.png");
+                const std::vector<uint8_t> vdf2 = GameConfig::upsertShortcutsVdf(
+                    vdf1, appId, "Grand Theft Auto: Vice City Stories", "\"D:\\VCSLauncher.exe\"", "\"D:\\\"", "D:\\icone.png");
+                check((appId & 0x80000000u) != 0 && vdf1.size() > 40 && vdf1 == vdf2,
+                      "GameConfig: Steam AppID CRC32 and shortcuts.vdf idempotent upsert");
+
+                fs::remove_all(tmpDir, ec);
+            }
+
             render::fontsShutdown();
             render::rendererShutdown();
             std::printf("%s\n", failed ? "self-test FAILED" : "self-test ok");
@@ -354,7 +413,7 @@ namespace
             if (!shots->iso.empty())
                 app.chooseDisc(pathFrom(shots->iso));
         }
-        else if (!platform::init("GTA: Vice City Stories - Launcher", kWidth, kHeight, kMinWidth, kMinHeight, error))
+        else if (!platform::init("VCS.rec Launcher - Grand Theft Auto: Vice City Stories", kWidth, kHeight, kMinWidth, kMinHeight, error))
         {
             platform::errorBox(error);
             return 1;
@@ -376,6 +435,8 @@ namespace
                 platform::errorBox(error);
             return 1;
         }
+        render::imagesInit(app.assetsFolder());
+        sound::init(app.assetsFolder());
         Process::setWakeHook(platform::wake);
         platform::setModalFrame(modalFrame);
         ui::state.scale = platform::window.dpiScale;
@@ -525,6 +586,7 @@ namespace
         const int code = shots && app.task && app.task->finished && !app.task->ok() ? 1 : 0;
         app.task.reset(); // a task cancelled on the way out: its job ends the tree
         Process::setWakeHook(nullptr);
+        sound::shutdown();
         render::fontsShutdown();
         render::rendererShutdown();
         if (!shots)
@@ -536,6 +598,15 @@ namespace
 int launcherMain(const std::vector<std::string> &argsIn)
 {
     std::vector<std::string> args = argsIn;
+    if (hasArg(args, "--scskiller"))
+    {
+        const std::string dirStr = argValue(args, "--scskiller");
+        const std::string msaaStr = argValue(args, "--msaa");
+        const std::string langStr = argValue(args, "--lang");
+        const int msaa = msaaStr.empty() ? 4 : std::atoi(msaaStr.c_str());
+        const bool isPt = langStr != "en";
+        return runScsKillerCli(dirStr.empty() ? fs::current_path() : pathFrom(dirStr), msaa, isPt);
+    }
     // started by the Restart button after an update (App::restart): the old launcher first ends, so its renamed exe
     // (VCSLauncher.exe.old) can go and an AppImage's old mount is gone; then the window as usual
     for (size_t i = 0; i + 1 < args.size(); ++i)

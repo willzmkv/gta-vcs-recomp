@@ -125,9 +125,10 @@ namespace render::icons
             void weight(float scale) { width = stroke * scale; }
 
             // only an axis-aligned stroke snaps: a diagonal one would be bent by it
-            void line(float x0, float y0, float x1, float y1)
+            void line(float x0, float y0, float x1, float y1, bool cut = false)
             {
                 Shape s(Shape::Segment);
+                s.cut = cut;
                 const bool vertical = std::fabs(x0 - x1) < 1e-3f, horizontal = std::fabs(y0 - y1) < 1e-3f;
                 const bool axis = vertical || horizontal; // its ends snap too, to meet the strokes they join
                 s.a = axis ? P(x0, y0) : V{raw(x0), raw(y0)};
@@ -286,6 +287,46 @@ namespace render::icons
             case 0xE768: // play
                 c.polyline({{7.5f, 4.5f}, {19.5f, 12}, {7.5f, 19.5f}}, true);
                 return true;
+            case 0xE769: // play filled (PLAY GAME mockup button)
+                c.polygon({{6.5f, 4.0f}, {20.0f, 12.0f}, {6.5f, 20.0f}});
+                return true;
+            case 0xE910: // crossed wrench and screwdriver (BUILD GAME mockup button)
+                // Screwdriver (top-left to bottom-right)
+                c.weight(1.6f);
+                c.line(5.0f, 5.0f, 14.0f, 14.0f);
+                c.weight(2.8f);
+                c.line(14.5f, 14.5f, 19.2f, 19.2f);
+                c.weight(1.3f);
+                c.line(4.0f, 6.0f, 6.0f, 4.0f);
+                // Wrench (bottom-left to top-right)
+                c.weight(2.0f);
+                c.line(5.2f, 18.8f, 14.6f, 9.4f);
+                c.weight(1.6f);
+                c.arc(17.0f, 7.0f, 3.3f, 25.0f, 260.0f);
+                c.disc(5.2f, 18.8f, 1.6f);
+                return true;
+            case 0xE911: // Steam logo (ADD TO STEAM mockup button)
+                // White filled outer circle with piston cutouts
+                c.disc(12.0f, 12.0f, 10.0f, false);
+                c.weight(2.2f);
+                c.line(2.2f, 13.0f, 9.6f, 15.6f, true);
+                c.weight(1.9f);
+                c.line(9.6f, 15.6f, 15.2f, 9.0f, true);
+                // Upper-right crank wheel
+                c.disc(15.2f, 9.0f, 3.3f, true);
+                c.disc(15.2f, 9.0f, 2.1f, false);
+                c.disc(15.2f, 9.0f, 1.1f, true);
+                // Lower-left pivot wheel
+                c.disc(9.6f, 15.6f, 2.5f, true);
+                c.disc(9.6f, 15.6f, 1.5f, false);
+                c.disc(9.6f, 15.6f, 0.7f, true);
+                return true;
+            case 0xEA86: // Mod package / puzzle icon
+                c.box(4.5f, 6.5f, 19.5f, 19.5f, 2.0f);
+                c.line(4.5f, 11.0f, 19.5f, 11.0f);
+                c.line(12.0f, 6.5f, 12.0f, 11.0f);
+                return true;
+
             case 0xE713: // settings: a cog
                 c.circle(12, 12, 3);
                 c.circle(12, 12, 7);
@@ -308,8 +349,8 @@ namespace render::icons
                 c.polyline({{7.5f, 19.5f}, {7.5f, 14}, {16.5f, 14}, {16.5f, 19.5f}});
                 return true;
             case 0xED25: // folder
+                c.weight(1.25f);
                 c.polyline({{3, 18.5f}, {3, 5.5f}, {9.5f, 5.5f}, {11.5f, 8}, {21, 8}, {21, 18.5f}}, true);
-                c.line(3, 11, 21, 11);
                 return true;
             case 0xE8E5: // open file: a page with an arrow up
                 c.polyline({{9, 20.5f}, {5.5f, 20.5f}, {5.5f, 3.5f}, {13.5f, 3.5f}, {18.5f, 8.5f}, {18.5f, 12}});

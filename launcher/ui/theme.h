@@ -220,5 +220,9 @@ namespace theme
         constexpr char32_t kList = 0xEA37;
         constexpr char32_t kGame = 0xE7FC;
         constexpr char32_t kStop = 0xE71A;
+        constexpr char32_t kPlayFilled = 0xE769;
+        constexpr char32_t kCrossedTools = 0xE910;
+        constexpr char32_t kSteam = 0xE911;
+        constexpr char32_t kMod = 0xEA86;
     }
 }

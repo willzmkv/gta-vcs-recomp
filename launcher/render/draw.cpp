@@ -1,10 +1,102 @@
 #include "draw.h"
 
+#include "core/png.h"
+
+#include <algorithm>
 #include <cstring>
 
 namespace render
 {
     DrawList draw;
+    ImageAtlas imageAtlas;
+
+    bool imagesInit(const std::filesystem::path &assetsDir)
+    {
+        constexpr int kAtlasW = 2048;
+        constexpr int kAtlasH = 4096;
+        imageAtlas.width = kAtlasW;
+        imageAtlas.height = kAtlasH;
+        imageAtlas.pixels.assign(static_cast<size_t>(kAtlasW) * static_cast<size_t>(kAtlasH) * 4, 0);
+
+        struct Slot
+        {
+            ImageId id;
+            const char *filename;
+            int dstX, dstY, dstW, dstH;
+        };
+        const Slot slots[] = {
+            {ImageId::Background, "fundo.png", 2, 2, 1920, 1326},
+            {ImageId::GameLogo, "logo.png", 2, 1332, 730, 712},
+            {ImageId::BrandLogo, "minha_logo.png", 738, 1332, 640, 280},
+            {ImageId::GameIcon, "icone.png", 1384, 1332, 256, 256},
+            {ImageId::SteamLogo, "steam.png", 1644, 1332, 256, 256},
+            {ImageId::ControllerPs2, "controllers/ps2.png", 2, 2050, 640, 480},
+            {ImageId::ControllerXbox, "controllers/xbox.png", 650, 2050, 640, 480},
+            {ImageId::ControllerPs4, "controllers/ps4.png", 1300, 2050, 640, 480},
+            {ImageId::ControllerPs5, "controllers/ps5.png", 2, 2540, 640, 480},
+            {ImageId::ControllerSwitch, "controllers/switch.png", 650, 2540, 640, 480},
+            {ImageId::ControllerKbMouse, "controllers/kb_mouse.png", 1300, 2540, 640, 480},
+        };
+
+        bool anyLoaded = false;
+        for (const Slot &s : slots)
+        {
+            int srcW = 0, srcH = 0;
+            std::vector<uint8_t> raw;
+            if (!core::readPng(assetsDir / s.filename, srcW, srcH, raw))
+                continue;
+            std::vector<uint8_t> resized(static_cast<size_t>(s.dstW) * static_cast<size_t>(s.dstH) * 4);
+            core::resizeRgba(raw.data(), srcW, srcH, resized.data(), s.dstW, s.dstH);
+
+            // Premultiply alpha for clean GPU linear filtering & premultiplied blending
+            for (size_t i = 0; i < resized.size(); i += 4)
+            {
+                const uint32_t a = resized[i + 3];
+                resized[i + 0] = static_cast<uint8_t>((resized[i + 0] * a + 127) / 255);
+                resized[i + 1] = static_cast<uint8_t>((resized[i + 1] * a + 127) / 255);
+                resized[i + 2] = static_cast<uint8_t>((resized[i + 2] * a + 127) / 255);
+            }
+
+            // Copy into atlas with 1px clamped edge padding
+            for (int y = -1; y <= s.dstH; ++y)
+            {
+                const int sy = std::clamp(y, 0, s.dstH - 1);
+                const int ay = s.dstY + y;
+                if (ay < 0 || ay >= kAtlasH)
+                    continue;
+                for (int x = -1; x <= s.dstW; ++x)
+                {
+                    const int sx = std::clamp(x, 0, s.dstW - 1);
+                    const int ax = s.dstX + x;
+                    if (ax < 0 || ax >= kAtlasW)
+                        continue;
+                    std::memcpy(&imageAtlas.pixels[(static_cast<size_t>(ay) * kAtlasW + ax) * 4],
+                                &resized[(static_cast<size_t>(sy) * s.dstW + sx) * 4], 4);
+                }
+            }
+
+            ImageEntry &e = imageAtlas.entries[static_cast<int>(s.id)];
+            e.uv[0] = (static_cast<float>(s.dstX) + 0.5f) / static_cast<float>(kAtlasW);
+            e.uv[1] = (static_cast<float>(s.dstY) + 0.5f) / static_cast<float>(kAtlasH);
+            e.uv[2] = (static_cast<float>(s.dstX + s.dstW) - 0.5f) / static_cast<float>(kAtlasW);
+            e.uv[3] = (static_cast<float>(s.dstY + s.dstH) - 0.5f) / static_cast<float>(kAtlasH);
+            e.width = srcW;
+            e.height = srcH;
+            e.aspect = srcH > 0 ? static_cast<float>(srcW) / static_cast<float>(srcH) : 1.0f;
+            e.valid = true;
+            anyLoaded = true;
+        }
+        ++imageAtlas.generation;
+        return anyLoaded;
+    }
+
+    const ImageEntry &imageInfo(ImageId id)
+    {
+        const int idx = static_cast<int>(id);
+        if (idx >= 0 && idx < static_cast<int>(ImageId::Count))
+            return imageAtlas.entries[idx];
+        return imageAtlas.entries[0];
+    }
 
     namespace
     {
@@ -230,5 +322,66 @@ namespace render
         std::memcpy(i->uv, uv, sizeof(i->uv));
         i->color0 = faded(color);
         i->params[1] = std::max(blur, 0.0f);
+    }
+
+    void image(Rect r, ImageId id, Corners radius, Color tint, Color border, float borderWidth)
+    {
+        if (r.w <= 0 || r.h <= 0)
+            return;
+        const ImageEntry &e = imageInfo(id);
+        if (!e.valid)
+            return;
+        Instance *i = add(kImage, r, 1);
+        if (!i)
+            return;
+        std::memcpy(i->uv, e.uv, sizeof(i->uv));
+        i->radii[0] = radius.tl;
+        i->radii[1] = radius.tr;
+        i->radii[2] = radius.br;
+        i->radii[3] = radius.bl;
+        i->color0 = faded(tint);
+        i->border = faded(border);
+        i->params[0] = borderWidth;
+    }
+
+    void imageCover(Rect r, ImageId id, Corners radius, Color tint)
+    {
+        if (r.w <= 0 || r.h <= 0)
+            return;
+        const ImageEntry &e = imageInfo(id);
+        if (!e.valid)
+            return;
+        Instance *i = add(kImage, r, 1);
+        if (!i)
+            return;
+        float u0 = e.uv[0], v0 = e.uv[1], u1 = e.uv[2], v1 = e.uv[3];
+        const float boxAspect = r.w / r.h;
+        if (boxAspect > e.aspect)
+        {
+            // Box is wider than image: crop top/bottom slightly
+            const float keep = e.aspect / boxAspect;
+            const float span = v1 - v0;
+            const float trim = span * (1.0f - keep) * 0.4f; // bias slightly towards top of image
+            v0 += trim;
+            v1 -= span * (1.0f - keep) - trim;
+        }
+        else if (boxAspect < e.aspect)
+        {
+            // Box is taller than image: crop left/right
+            const float keep = boxAspect / e.aspect;
+            const float span = u1 - u0;
+            const float trim = span * (1.0f - keep) * 0.5f;
+            u0 += trim;
+            u1 -= trim;
+        }
+        i->uv[0] = u0;
+        i->uv[1] = v0;
+        i->uv[2] = u1;
+        i->uv[3] = v1;
+        i->radii[0] = radius.tl;
+        i->radii[1] = radius.tr;
+        i->radii[2] = radius.br;
+        i->radii[3] = radius.bl;
+        i->color0 = faded(tint);
     }
 }

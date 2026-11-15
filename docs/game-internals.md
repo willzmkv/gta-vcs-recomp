@@ -2424,8 +2424,14 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   warehouse gone near it in Boomshine Blowout): detailed sector 3167 and sector 6285 share the centre (-1210,-267, the
   same x / y / z halves) and nearly the radius (29.05 / 29.02); free roam shows 3167 and hides 6285 (flag 0x8000), the
   mission the other way round. The build took 6285 for low detail covered by 3167's detail and hid it: neither drew.
-  Now a low-detail-id sector on the sphere of a detailed one **the game hides** is never replaced. (Its true low detail,
-  5829, sits lower: z and radius differ.) Found with `VCS_HD_PROBE` (it prints each record's raw halves now).
+  Now a low-detail-id sector on the sphere of a detailed one of the slot's list (same x / y / z halves, radius within
+  2 %) is never replaced: the game's flags decide. (Its true low detail, 5829, sits lower: z and radius differ.) The
+  first rule only covered a hidden detailed twin; the mission's **cutscene** shows both - 3167 the shell, 6285 the
+  building with its inside, the camera inside it - and with 6285 replaced the warehouse was gone around the camera (the
+  player's report, 2026-11-14, reproduced in a visible run the player drove: `[hdprobe]` during the cutscene, 3167
+  drawn, 6285 "HIDDEN (replaced)"). Measured at the police, Little Havana, avenue and warehouse spots
+  (`VCS_HD_TWINS=1`, which lists each sector the rule keeps and its twin): 3-5 kept per view, every one hidden by the
+  game itself (flag 0x8000) - nothing drawn twice. Found with `VCS_HD_PROBE` (it prints each record's raw halves).
 - **Conditional pieces follow the clock** (the player's downtown tower, 2026-11-12: lit from one spot, dark 130 m
   further): a cell list's conditional pieces (FUN_0023D600's {kind, value, piece} at +0x30) hold, among others, the
   buildings' lit windows at night (hour windows). They were chosen when an extra cell was read: a cell read in the

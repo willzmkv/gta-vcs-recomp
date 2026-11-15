@@ -1,236 +1,327 @@
-// Home: everything is ready. The name over the setting sun, one big button for the next thing to do (Play, Update the
-// build, Check again), what was built under it, and three quiet cards along the bottom: the setup, the saves, updates.
+// Home ("JOGO" / "GAME" tab): Rockstar Games Launcher layout for GTA: Vice City Stories (VCS.rec).
+// Features the Vice City Stories .REC logo over the background art, the animated PLAY GAME / JOGAR button, the 4
+// localized Rockstar glass action buttons on the right, the Build Confirmation bar, and the Vice City Commodore 64
+// live CMD terminal (Terminal.png style) in the bottom area.
 #include "shell.h"
 
+#include "model/os.h"
+#include "model/sound.h"
 #include "model/system.h"
 #include "platform/platform.h"
 
-#include <cctype>
 #include <cmath>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 namespace screens
 {
     using namespace render;
     using core::mix;
-    using core::withAlpha;
     using core::rgb;
+    using core::withAlpha;
     using ui::ButtonStyle;
-
-    namespace
-    {
-        // a translucent card over the backdrop; clicking it does `action`
-        bool glassCard(std::string_view idLabel, Rect r, char32_t icon, Color iconColor, std::string_view title, std::string_view line)
-        {
-            const ui::Interaction in = ui::interact(ui::id(idLabel), r, true);
-            ui::Widget &w = *in.w;
-            const Rect box = r.offset(0, -w.hover * px(2));
-            shadow(box.offset(0, px(10)), theme::shade(0.45f + 0.15f * w.hover), px(20), px(theme::kRadius));
-            rectEx(box, withAlpha(mix(theme::kSurface, theme::kSurfaceHi, w.hover), 0.78f), withAlpha(theme::kSurface, 0.70f),
-                   px(theme::kRadius), theme::ink(0.07f + 0.05f * w.hover), ui::hairline());
-            circle(box.x + px(34), box.y + px(36), px(16), withAlpha(iconColor, 0.14f));
-            drawIcon(kFontIcons, px(15), box.x + px(34), box.y + px(36), iconColor, icon);
-            ui::label(kFontSemibold, px(theme::kBody), {box.x + px(60), box.y + px(18), box.w - px(80), px(22)}, theme::kText, title);
-            ui::label(kFontBody, px(theme::kSmall), {box.x + px(60), box.y + px(40), box.w - px(80), px(20)}, theme::kDim, line);
-            drawIcon(kFontIcons, px(11), box.right() - px(22), box.y + px(36), withAlpha(theme::kDim, 0.4f + 0.6f * w.hover), theme::icon::kChevronRight);
-            if (w.focus > 0.01f)
-                outline(box.inset(-px(3)), withAlpha(theme::kPink, w.focus), px(2), px(theme::kRadius + 3));
-            return in.clicked;
-        }
-
-        // a playing indicator in place of the button and the time played. Still: the launcher draws once a second
-        // while the game plays, never continuously (the game wants the GPU)
-        void playing(App &app, Rect r)
-        {
-            rectEx(r, withAlpha(theme::kPink, 0.12f), withAlpha(theme::kPink, 0.08f), px(14), withAlpha(theme::kPink, 0.35f), ui::hairline());
-            const float cx = r.x + px(28), cy = r.cy();
-            shadow({cx - px(5), cy - px(5), px(10), px(10)}, withAlpha(theme::kPink, 0.6f), px(4), px(5));
-            circle(cx, cy, px(5), theme::kPink);
-            const double played = ui::state.wall - app.gameStart;
-            ui::label(kFontSemibold, px(17), {r.x + px(48), r.y, r.w - px(56), r.h}, theme::kText, "Playing  \xC2\xB7  " + duration(played));
-        }
-    }
 
     void drawHome(Rect r)
     {
         App &app = *shell.app;
         const double since = shell.mode == Mode::Home ? shell.modeSince : ui::state.time;
-        const float left = r.x + std::max(px(56), r.w * 0.07f);
-        const float colW = std::min(px(560), r.w * 0.55f);
-        float y = r.y + std::max(px(40), r.h * 0.17f);
+        const bool c64Active = shell.c64TerminalOpen ||
+                               (app.task && (app.task->kind == "build" || app.task->kind == "auto_update" ||
+                                             app.task->kind == "shader_cache"));
+
+        // 1. Left-center: Grand Theft Auto: Vice City Stories (.REC) Logo + PLAY GAME / JOGAR Button
+        const float leftX = r.x + std::max(px(64), r.w * 0.082f);
+        const float logoW = px(252);
+        const float logoH = px(246);
+        const float logoY = r.y + (c64Active ? px(6) : std::max(px(12), r.h * 0.025f));
+        const Rect logoRect{leftX, logoY, logoW, logoH};
 
         pushReveal(since, 0);
-        ui::eyebrow(left, y, theme::kPink, "GRAND THEFT AUTO");
-        popReveal();
-        y += px(24);
-        pushReveal(since, 1);
+        if (imageInfo(ImageId::GameLogo).valid)
         {
-            // the name in Pricedown when the player has it (kFontBrand), else in the display font
-            const float size = fontFound(kFontBrand) ? px(66) : px(58);
-            const FontMetrics m = metrics(kFontBrand, size);
-            // a soft glow under the name
-            shadow({left, y + m.ascent * 0.35f, measure(kFontBrand, size, "Vice City Stories"), m.ascent * 0.6f},
-                   withAlpha(theme::kPink, 0.16f), px(26), px(10));
-            drawText(kFontBrand, size, left - px(2), y + m.ascent, theme::kText, "Vice City Stories");
-            y += m.ascent + m.descent + px(4);
-        }
-        popReveal();
-        pushReveal(since, 2);
-        ui::label(kFontBody, px(16), {left, y, colW, px(26)}, theme::kDim, "The PS2 classic, recompiled for this PC.");
-        popReveal();
-        y += px(48);
-
-        // the one thing to do next
-        pushReveal(since, 3);
-        // --demo stale: the build out of date, as after a change to the source (screenshots)
-        const bool staleDemo = shell.options.demo == "stale" && app.doctorDone && !app.doctorCached;
-        const std::string next = staleDemo ? "build" : app.next();
-        const Rect big{left, y, px(232), px(56)};
-        // the big button's label is the other place for Pricedown
-        const float heroSize = fontFound(kFontBrand) ? px(31) : px(18); // Pricedown is small on its body
-        // as wide as its label needs (Pricedown at that size is wide), never narrower than the usual 232
-        auto fit = [&](std::string_view label, char32_t icon) {
-            return Rect{big.x, big.y, std::max(big.w, ui::buttonWidth(label, icon, heroSize, kFontBrand) + px(12)), big.h};
-        };
-        bool primary = false;
-        std::string below;
-        Color belowColor = theme::kFaint;
-        if (app.gameRunning)
-        {
-            playing(app, {big.x, big.y, px(300), big.h});
-            below = "The launcher comes back when the game ends.";
-        }
-        else if (!app.doctorDone || app.doctorCached)
-        {
-            // the last answer is on screen; this run's check is still out: nothing to press yet
-            const Rect b = fit("Play", theme::icon::kPlay);
-            ui::button("Play", b, ButtonStyle::Primary, theme::icon::kPlay, false, heroSize, kFontBrand);
-            ui::spinner(b.right() + px(26), b.cy(), px(8), theme::kDim, px(2));
-            ui::label(kFontBody, px(theme::kBody), {b.right() + px(44), b.y, px(200), b.h}, theme::kDim, "Checking");
-            below = app.doctorCached ? buildSummary(app) : "";
-        }
-        else if (app.doctorFailed())
-        {
-            const char *label = app.doctorRunning ? "Checking..." : "Check again";
-            primary = ui::button(label, fit(label, theme::icon::kRefresh), ButtonStyle::Primary, theme::icon::kRefresh,
-                                 !app.doctorRunning, heroSize, kFontBrand);
-            if (primary || (platform::input.key(platform::kKeyEnter) && !ui::state.focusVisible && ui::inputAllowed()))
-                app.refresh();
-            below = "The check of this PC gave no answer.";
-            belowColor = theme::kRed;
-        }
-        else if (next == "build")
-        {
-            // an update is offered, never forced: Play stays the big button (the game that is built still runs), the
-            // update a quieter one under it (the user's choice, 2026-11-01)
-            primary = ui::button("Play", fit("Play", theme::icon::kPlay), ButtonStyle::Primary, theme::icon::kPlay, true, heroSize, kFontBrand);
-            if (primary || (platform::input.key(platform::kKeyEnter) && !ui::state.focusVisible && ui::inputAllowed()))
-                play(app);
-            // the update says it is new with a badge; why, in its tooltip
-            y += big.h + px(14);
-            constexpr const char *kUpdate = "Update the build";
-            const Rect update{left, y, ui::buttonWidth(kUpdate, theme::icon::kRepair, 0, kFontSemibold, "NEW"), px(40)};
-            if (ui::button(kUpdate, update, ButtonStyle::Secondary, theme::icon::kRepair, !app.busy(), 0, kFontSemibold, "NEW"))
-                app.startBuild();
-            const launcher::Json &reasons = app.doctor["build"]["reasons"];
-            std::string why = staleDemo ? "the source changed since the last build" : reasons.size() ? reasons[0].str() : "";
-            if (!why.empty())
-                why[0] = char(std::toupper(static_cast<unsigned char>(why[0])));
-            ui::tooltip(ui::id(kUpdate), update, why.empty() ? "A newer build is ready to make." : why + ": updating builds the game again.");
-            y += px(40) - big.h; // the lines under it follow the smaller button
-            below = buildSummary(app);
-        }
-        else if (next == "play")
-        {
-            primary = ui::button("Play", fit("Play", theme::icon::kPlay), ButtonStyle::Primary, theme::icon::kPlay, true, heroSize, kFontBrand);
-            if (primary || (platform::input.key(platform::kKeyEnter) && !ui::state.focusVisible && ui::inputAllowed()))
-                play(app);
-            below = buildSummary(app);
+            image(logoRect, ImageId::GameLogo);
         }
         else
         {
-            if (ui::button("Continue setup", fit("Continue setup", theme::icon::kChevronRight), ButtonStyle::Primary, theme::icon::kChevronRight, true, heroSize, kFontBrand))
-                openSetup(-1);
+            const float size = fontFound(kFontBrand) ? px(56) : px(48);
+            drawText(kFontBrand, size, leftX, logoY + px(120), theme::kText, "Vice City Stories");
         }
-        y += big.h + px(16);
-        if (!below.empty())
-            ui::label(kFontBody, px(theme::kSmall), {left, y, colW, px(20)}, belowColor, below);
         popReveal();
-        y += px(40);
 
-        // the game ended with an error, or the check failed: say why, under the button
-        if (app.gameEnded && app.gameExit != 0 && !shell.gameErrorDismissed && !app.gameRunning)
-        {
-            pushReveal(since, 4);
-            const std::string text = app.gameExitText();
-            const float h = ui::paragraphHeight(kFontBody, px(theme::kBody), colW - px(40), text) + px(70);
-            const Rect box{left, y, colW, h};
-            ui::card(box, theme::kErrorFill, theme::kRed);
-            ui::paragraph(kFontBody, px(theme::kBody), {box.x + px(22), box.y + px(16), box.w - px(40), 0}, theme::kText, text);
-            float bx = box.x + px(16);
-            const float by = box.bottom() - px(44);
-            const float w1 = ui::buttonWidth("Open the log", theme::icon::kDocument);
-            if (ui::button("Open the log", {bx, by, w1, px(34)}, ButtonStyle::Ghost, theme::icon::kDocument))
-                launcher::openFile(app.gameLog);
-            bx += w1 + px(6);
-            if (ui::button("Dismiss", {bx, by, ui::buttonWidth("Dismiss"), px(34)}, ButtonStyle::Ghost))
-                shell.gameErrorDismissed = true;
-            popReveal();
-        }
-        else if (app.doctorFailed() && !app.doctorError.empty())
-        {
-            pushReveal(since, 4);
-            const float h = std::min(px(160), ui::paragraphHeight(kFontMono, px(12), colW - px(40), app.doctorError, 1.4f) + px(32));
-            const Rect box{left, y, colW, h};
-            ui::card(box, theme::kErrorFill, theme::kRed);
-            render::pushClip(box.inset(px(4)));
-            ui::paragraph(kFontMono, px(12), {box.x + px(22), box.y + px(16), box.w - px(40), 0}, theme::kDim, app.doctorError, 1.4f);
-            render::popClip();
-            popReveal();
-        }
-
-        // the cards along the bottom
-        const float cardsH = px(74);
-        const float gap = px(16);
-        Rect strip{left, r.bottom() - px(36) - cardsH, r.right() - left - std::max(px(56), r.w * 0.07f), cardsH};
-        if (strip.y < y + px(12))
-            return; // a short window: the cards make room for the essentials
-        const float cw = (strip.w - 2 * gap) / 3;
-        pushReveal(since, 5, 20);
-        {
-            const ui::Status status = gameStatus(app);
-            int good = 0;
-            for (int i = 0; i < kStepCount; ++i)
-                good += stepStatus(app, i) == ui::Status::Good ? 1 : 0;
-            const std::string line = good == kStepCount ? "Everything is ready" : std::to_string(good) + " of 4 steps ready  \xC2\xB7  " + gameLine(app);
-            if (glassCard("#card-setup", {strip.x, strip.y, cw, cardsH}, theme::icon::kRepair,
-                          status == ui::Status::Good ? theme::kTeal : theme::kAmber, "Setup", line))
-                openSetup(-1);
-        }
-        popReveal();
-        pushReveal(since, 6, 20);
-        {
-            std::string line = "Your memory card, backed up on demand";
-            if (app.backups.size())
-                line = "Last backup " + app.backups[0]["name"].str();
-            if (glassCard("#card-saves", {strip.x + cw + gap, strip.y, cw, cardsH}, theme::icon::kSave, theme::kPink, "Saves", line))
-                openSheet(Sheet::Saves);
-        }
-        popReveal();
-        pushReveal(since, 7, 20);
-        {
-            const bool newer = app.updateInfo["newer"].boolean();
-            const bool installed = !app.updatedTo.empty(); // put in place, the restart put off
-            const std::string line = installed ? "Version " + app.updatedTo + " is installed"
-                                     : newer   ? "Version " + app.updateInfo["latest"].str() + " is available"
-                                               : "Version " + app.sourceVersion;
-            if (glassCard("#card-updates", {strip.x + 2 * (cw + gap), strip.y, cw, cardsH},
-                          installed ? theme::icon::kRefresh : newer ? theme::icon::kDownload : theme::icon::kSync,
-                          installed ? theme::kTeal : newer ? theme::kPink : theme::kDim,
-                          installed ? "Restart to finish" : newer ? "Update available" : "Updates", line))
-                openSheet(Sheet::Settings);
-        }
-        popReveal();
+        // Primary CTA: JOGAR / PLAY GAME — placed cleanly below the logo (no overlap with .REC)
+        const Rect playRect{leftX + px(6), logoRect.bottom() + px(14), px(240), px(54)};
+        pushReveal(since, 1);
         if (app.gameRunning)
-            ui::wakeAt(std::floor(ui::state.wall) + 1.0); // the clock on the playing indicator
+        {
+            const double played = ui::state.wall - app.gameStart;
+            const std::string playText = std::string(tr("RODANDO • ", "RUNNING • ")) + duration(played);
+            ui::playGameButton(playText, playRect, theme::icon::kPlayFilled, false);
+            ui::wakeAt(std::floor(ui::state.wall) + 1.0);
+        }
+        else
+        {
+            const std::string playLabel = std::string(tr("JOGAR", "PLAY GAME")) + "##home-play";
+            if (shell.options.demo == "hoverplay")
+            {
+                ui::Widget &pw = ui::widget(ui::id(playLabel));
+                pw.hover = 1.0f;
+                pw.fresh = false;
+                ui::state.time = 0.42;
+            }
+            const bool clickedPlay = ui::playGameButton(playLabel, playRect, theme::icon::kPlayFilled, !app.busy());
+            const bool enterPressed = platform::input.key(platform::kKeyEnter) && !ui::state.focusVisible &&
+                                      ui::inputAllowed() && !shell.buildConfirmOpen;
+            if ((clickedPlay || enterPressed) && !app.busy())
+            {
+                std::error_code ec;
+                const bool hasExe = fs::is_regular_file(app.build / launcher::os::kGameExe, ec);
+                if (hasExe)
+                {
+                    play(app);
+                }
+                else if (!app.disc.ok)
+                {
+                    toast(tr("Selecione a ISO de GTA: Vice City Stories (SLUS-21590) primeiro.",
+                             "Select your GTA: Vice City Stories (SLUS-21590) ISO first."),
+                          theme::kAmber);
+                    chooseIso();
+                }
+                else
+                {
+                    chooseInstallDirForBuild();
+                }
+            }
+        }
+        popReveal();
+
+        // 2. Right-Side Vertical Stack of 6 Square Vice City Action Buttons (Localized PT-BR / EN):
+        const float btnW = px(218);
+        const float btnH = c64Active ? px(48) : px(52);
+        const float btnGap = c64Active ? px(7) : px(9);
+        const float btnX = r.right() - btnW - px(24);
+        const float stackH = btnH * 6 + btnGap * 5;
+        const float btnY0 = c64Active ? (r.y + px(12)) : std::max(r.y + px(22), r.y + (r.h - stackH) * 0.34f);
+
+        // Button 1: SELECT GAME / SELECIONAR JOGO
+        pushReveal(since, 2);
+        {
+            const Rect b1{btnX, btnY0, btnW, btnH};
+            if (ui::rockstarButton("#rockstar-select-game", b1, theme::icon::kFolder,
+                                   tr("SELECIONAR", "SELECT"), tr("JOGO", "GAME"), !app.busy()))
+            {
+                if (platform::input.shift)
+                    chooseBuildDir(app.build);
+                else
+                    chooseIso();
+            }
+            const std::string tip1 = app.disc.ok
+                                         ? std::string(tr("ISO atual: ", "Current ISO: ")) +
+                                               launcher::pathText(app.iso.filename())
+                                         : tr("Selecionar imagem de disco PS2 (.iso) de GTA: Vice City Stories",
+                                              "Select GTA: Vice City Stories PS2 disc image (.iso)");
+            ui::tooltip(ui::id("#rockstar-select-game"), b1, tip1);
+        }
+        popReveal();
+
+        // Button 2: BUILD GAME / COMPILAR JOGO
+        pushReveal(since, 3);
+        {
+            const Rect b2{btnX, btnY0 + (btnH + btnGap) * 1, btnW, btnH};
+            if (ui::rockstarButton("#rockstar-build-game", b2, theme::icon::kCrossedTools,
+                                   tr("COMPILAR", "BUILD"), tr("JOGO", "GAME"), !app.busy()))
+            {
+                if (!app.disc.ok)
+                {
+                    toast(tr("Selecione a ISO de GTA: Vice City Stories (SLUS-21590) antes de compilar.",
+                             "Select the GTA: Vice City Stories (SLUS-21590) ISO before building."),
+                          theme::kAmber);
+                    chooseIso();
+                }
+                else
+                {
+                    chooseInstallDirForBuild();
+                }
+            }
+            ui::tooltip(ui::id("#rockstar-build-game"), b2,
+                        tr("Escolher a pasta de instalação final e compilar o executável nativo (vcs.exe)",
+                           "Choose the final installation folder and build the native executable (vcs.exe)"));
+        }
+        popReveal();
+
+        // Button 3: UPDATE BUILD / ATUALIZAR BUILD (Auto Git/Release sync + rebuild)
+        pushReveal(since, 4);
+        {
+            const Rect b3{btnX, btnY0 + (btnH + btnGap) * 2, btnW, btnH};
+            if (ui::rockstarButton("#rockstar-update-build", b3, theme::icon::kSync,
+                                   tr("ATUALIZAR", "UPDATE"), tr("BUILD", "BUILD"), !app.busy()))
+            {
+                shell.buildConfirmOpen = false;
+                shell.c64TerminalOpen = true;
+                app.startAutoUpdateBuild();
+            }
+            ui::tooltip(ui::id("#rockstar-update-build"), b3,
+                        tr("Buscar atualizações no GitHub (willzmkv/gta-vcs-recomp) e atualizar a build automaticamente",
+                           "Check for updates on GitHub (willzmkv/gta-vcs-recomp) and automatically update the build"));
+        }
+        popReveal();
+
+        // Button 4: SHADER CACHE / CACHE DE SHADERS (SCSKiller PSO + Driver Cache Precompiler)
+        pushReveal(since, 5);
+        {
+            const Rect b4{btnX, btnY0 + (btnH + btnGap) * 3, btnW, btnH};
+            if (ui::rockstarButton("#rockstar-shader-cache", b4, theme::icon::kChip,
+                                   tr("CACHE DE", "SHADER"), tr("SHADERS", "CACHE"), !app.busy()))
+            {
+                shell.buildConfirmOpen = false;
+                shell.c64TerminalOpen = true;
+                app.startShaderCacheBuild();
+            }
+            ui::tooltip(ui::id("#rockstar-shader-cache"), b4,
+                        tr("Pré-compilar PSOs D3D12 e Shaders D3D11 no cache do driver da GPU (estilo SCSKiller)",
+                           "Pre-compile D3D12 PSOs and D3D11 Shaders into your GPU driver cache (SCSKiller architecture)"));
+        }
+        popReveal();
+
+        // Button 5: CONFIGURATION / CONFIGURAÇÕES
+        pushReveal(since, 6);
+        {
+            const Rect b5{btnX, btnY0 + (btnH + btnGap) * 4, btnW, btnH};
+            if (ui::rockstarButton("#rockstar-config", b5, theme::icon::kSettings,
+                                   tr("CONFIGURAÇÕES", "CONFIGURATION"), "", true))
+            {
+                shell.tab = Tab::Settings;
+                shell.tabSince = ui::state.time;
+            }
+            ui::tooltip(ui::id("#rockstar-config"), b5,
+                        tr("Abrir menu de opções gráficas, mundo, população e áudio",
+                           "Open graphics, world, population and audio options menu"));
+        }
+        popReveal();
+
+        // Button 6: ADD TO STEAM / ADICIONAR À STEAM
+        pushReveal(since, 7);
+        {
+            const Rect b6{btnX, btnY0 + (btnH + btnGap) * 5, btnW, btnH};
+            if (ui::rockstarButton("#rockstar-steam", b6, theme::icon::kSteam,
+                                   tr("ADICIONAR À", "ADD TO"), "STEAM", !app.busy()))
+            {
+                std::string msg;
+                const bool ok = app.addToSteam(msg);
+                toast(msg, ok ? theme::kTeal : theme::kRed);
+            }
+            ui::tooltip(ui::id("#rockstar-steam"), b6,
+                        tr("Adicionar o launcher à Steam com Grid, Hero, Logo e Ícone pré-configurados",
+                           "Add the launcher to Steam with pre-configured Grid, Hero, Logo and Icon artwork"));
+        }
+        popReveal();
+
+        // 3. Bottom Area: Build Confirmation Bar OR Vice City C64 Terminal OR Default Footer
+        if (c64Active)
+        {
+            const float termH = px(198);
+            const Rect termR{r.x + px(24), r.bottom() - termH - px(12), r.w - px(48), termH};
+
+            std::deque<std::string> emptyLog;
+            const std::deque<std::string> &logLines = (app.task && !app.task->log.empty()) ? app.task->log : emptyLog;
+
+            float prog = 0.0f;
+            std::string statusStr = tr("EXECUTANDO PIPELINE...", "RUNNING PIPELINE...");
+            bool finished = false;
+            if (app.task)
+            {
+                finished = app.task->finished;
+                if (app.task->total > 0)
+                {
+                    prog = float(app.task->done) / float(app.task->total);
+                    const int pct = std::clamp(int(std::round(prog * 100.0f)), 0, 100);
+                    statusStr = "[" + std::to_string(pct) + "%]";
+                }
+                else if (finished)
+                {
+                    prog = 1.0f;
+                    statusStr = app.task->ok() ? tr("[CONCLUÍDO]", "[COMPLETE]") : tr("[ERRO]", "[FAILED]");
+                }
+            }
+
+            bool closeClicked = false;
+            ui::c64TerminalView(ui::id("#home-c64-terminal"), termR, logLines, statusStr, prog, finished, &closeClicked);
+            if (closeClicked)
+            {
+                if (app.busy())
+                    app.cancelTask();
+                else
+                    app.dismissTask();
+                shell.c64TerminalOpen = false;
+            }
+        }
+        else if (shell.buildConfirmOpen)
+        {
+            const float barH = px(74);
+            const Rect barR{r.x + px(24), r.bottom() - barH - px(16), r.w - px(48), barH};
+            shadow(barR.offset(0, px(5)), rgb(0x002430, 165), px(16), px(2));
+            rectEx(barR, rgb(0xE8F8FC, 245), rgb(0xD2EEF5, 245), px(2), rgb(0x007A96, 210), px(1.5f));
+            rect({barR.x, barR.y, px(6), barR.h}, rgb(0xFE7FB4));
+
+            const fs::path targetDir = shell.stagedBuildDir.empty() ? app.build : shell.stagedBuildDir;
+            ui::label(kFontSemibold, px(11.5f), {barR.x + px(20), barR.y + px(12), barR.w * 0.55f, px(18)},
+                      rgb(0xD91E70), tr("PASTA DE INSTALAÇÃO FINAL DO JOGO", "FINAL GAME INSTALLATION FOLDER"));
+            ui::label(kFontMono, px(12.5f), {barR.x + px(20), barR.y + px(34), barR.w * 0.54f, px(24)},
+                      rgb(0x005266), launcher::pathText(targetDir));
+
+            const float cancelW = px(96);
+            const float confirmW = px(176);
+            const float changeW = px(126);
+            const float btnY = barR.cy() - px(19);
+            const Rect cancelR{barR.right() - px(16) - cancelW, btnY, cancelW, px(38)};
+            const Rect confirmR{cancelR.x - px(10) - confirmW, btnY, confirmW, px(38)};
+            const Rect changeR{confirmR.x - px(10) - changeW, btnY, changeW, px(38)};
+
+            if (ui::button(tr("Alterar pasta", "Change folder"), changeR, ButtonStyle::Secondary))
+            {
+                chooseInstallDirForBuild();
+            }
+            if (ui::button(tr("CONFIRMAR BUILD", "CONFIRM BUILD"), confirmR, ButtonStyle::Primary, theme::icon::kPlayFilled))
+            {
+                shell.buildConfirmOpen = false;
+                shell.c64TerminalOpen = true;
+                sound::play(sound::Sfx::Play);
+                app.startBuildTo(targetDir);
+            }
+            if (ui::button(tr("Cancelar", "Cancel"), cancelR, ButtonStyle::Ghost))
+            {
+                shell.buildConfirmOpen = false;
+                sound::play(sound::Sfx::Back);
+            }
+        }
+        else
+        {
+            pushReveal(since, 6);
+            const float infoY = r.bottom() - px(52);
+            const float iconCx = r.x + px(36);
+            const float iconCy = infoY + px(20);
+            const Rect infoHit{r.x + px(22), infoY, px(420), px(40)};
+            const ui::Interaction infoIn = ui::interact(ui::id("#home-info-footer"), infoHit, false);
+
+            drawIcon(kFontIcons, px(20), iconCx, iconCy, mix(rgb(0xFFFFFF), theme::kPinkHi, infoIn.w->hover),
+                     theme::icon::kInfo);
+
+            const float textX = r.x + px(54);
+            ui::label(kFontSemibold, px(13.5f), {textX, infoY + px(2), px(460), px(20)}, rgb(0xFFFFFF),
+                      "Grand Theft Auto: Vice City Stories (PC)");
+
+            std::string subLine = tr("Versão recompilada (VCS.rec)  •  Build 1.0.0",
+                                     "Recompiled Version (VCS.rec)  •  Build 1.0.0");
+            if (app.disc.ok)
+                subLine += tr("  •  ISO pronta", "  •  ISO ready");
+            ui::label(kFontBody, px(12.0f), {textX, infoY + px(21), px(540), px(18)}, rgb(0xCFC8DE), subLine);
+
+            if (infoIn.clicked)
+            {
+                shell.tab = Tab::About;
+                shell.tabSince = ui::state.time;
+            }
+            popReveal();
+        }
     }
 }

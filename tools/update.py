@@ -317,6 +317,93 @@ def apply(zip_path=None, appimage_path=None):
     tc.event(result="ok", version=new["version"], restart=True)  # the launcher offers Restart (its new exe)
 
 
+def sync_and_build(iso_path=None, opt_mode=None):
+    """Checks for updates via git (or GitHub release) and automatically updates & rebuilds the project."""
+    import subprocess
+    tc.stage("check_updates", "Checking for VCS.rec repository updates")
+    print("[update] ================================================================")
+    print("[update] VCS.rec Auto-Updater & Build Synchronizer")
+    print("[update] Repository: https://github.com/willzmkv/gta-vcs-recomp")
+    print("[update] ================================================================")
+    sys.stdout.flush()
+
+    git_dir = os.path.join(tc.ROOT, ".git")
+    updated_code = False
+    if os.path.exists(git_dir):
+        def run_git(*args):
+            return subprocess.run(["git", "-C", tc.ROOT] + list(args), capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+        cur_branch = run_git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "main"
+        cur_sha = run_git("rev-parse", "--short", "HEAD").stdout.strip()
+        print("[update] Local Git Branch : %s (commit %s)" % (cur_branch, cur_sha))
+        print("[update] Fetching remote origin (github.com/willzmkv/gta-vcs-recomp)...")
+        sys.stdout.flush()
+        fetch_res = run_git("fetch", "origin")
+        if fetch_res.returncode != 0:
+            print("[update] Warning: git fetch returned %d (%s)" % (fetch_res.returncode, fetch_res.stderr.strip()))
+        else:
+            target_ref = "origin/" + cur_branch
+            if run_git("rev-parse", "--verify", target_ref).returncode != 0:
+                target_ref = "origin/main"
+            rem_sha = run_git("rev-parse", "--short", target_ref).stdout.strip()
+            print("[update] Remote Reference : %s (commit %s)" % (target_ref, rem_sha))
+            behind_out = run_git("rev-list", "--count", "HEAD.." + target_ref).stdout.strip()
+            behind = int(behind_out) if behind_out.isdigit() else 0
+            if behind > 0:
+                print("[update] Found %d new commit(s) on %s! Pulling updates..." % (behind, target_ref))
+                sys.stdout.flush()
+                tc.stage("pull", "Pulling %d new commit(s) from GitHub" % behind)
+                status_dirty = bool(run_git("status", "--porcelain").stdout.strip())
+                if status_dirty:
+                    print("[update] Local working tree has custom changes; stashing before fast-forward pull...")
+                    run_git("stash", "push", "-u", "-m", "vcslauncher-auto-update")
+                pull_res = run_git("merge", "--ff-only", target_ref)
+                if pull_res.stdout.strip():
+                    print(pull_res.stdout.strip())
+                if status_dirty:
+                    run_git("stash", "pop")
+                if pull_res.returncode == 0:
+                    updated_code = True
+                    new_sha = run_git("rev-parse", "--short", "HEAD").stdout.strip()
+                    print("[update] Source updated: %s -> %s" % (cur_sha, new_sha))
+                else:
+                    print("[update] Fast-forward merge skipped: %s" % pull_res.stderr.strip())
+            else:
+                print("[update] Source tree is already up to date with %s (%s)." % (target_ref, cur_sha))
+    elif this_release():
+        mine = this_release()
+        repo = mine.get("repository") or "willzmkv/gta-vcs-recomp"
+        found = latest(repo)
+        if found and found.get("version") and version_key(found["version"]) > version_key(mine.get("version", "0")):
+            print("[update] New release %s found (current: %s). Applying..." % (found["version"], mine.get("version", "?")))
+            apply()
+            updated_code = True
+        else:
+            print("[update] Release files are already at the latest version (%s)." % mine.get("version", "1.0.0"))
+    else:
+        print("[update] Standalone workspace detected; proceeding to verify & update project build.")
+    sys.stdout.flush()
+
+    if iso_path and os.path.exists(iso_path):
+        print("[update] Launching incremental build verification (tools/build.py)...")
+        sys.stdout.flush()
+        cmd = [sys.executable, "-I", os.path.join(tc.ROOT, "tools", "build.py"),
+               "--recompile-if-needed", iso_path, "--progress", "json"]
+        if opt_mode:
+            cmd.extend(["--opt", opt_mode])
+        proc = subprocess.Popen(cmd, cwd=tc.ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace")
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        rc = proc.wait()
+        if rc != 0:
+            tc.fail("Build update exited with code %d" % rc, "build_failed")
+    else:
+        print("[update] Note: Select your PS2 ISO to compile vcs.exe when ready.")
+        tc.event(result="ok", updated=updated_code, message="Source synchronized.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -327,6 +414,9 @@ def main():
     p = sub.add_parser("install")
     p.add_argument("--from", dest="source", required=True, help="the release's files (an AppImage's)")
     p.add_argument("--to", dest="target", required=True, help="the install folder")
+    p = sub.add_parser("sync")
+    p.add_argument("--iso", default="", help="disc ISO path to rebuild automatically")
+    p.add_argument("--opt", default="", help="optimization mode")
     a = ap.parse_args()
     if a.cmd == "install":
         install(a.source, a.target)
@@ -334,6 +424,8 @@ def main():
     remove_set_aside()
     if a.cmd == "check":
         check()
+    elif a.cmd == "sync":
+        sync_and_build(a.iso, a.opt)
     else:
         apply(a.zip, a.appimage)
 

@@ -33,6 +33,9 @@ set(VCS_LAUNCHER_COMMON
     screens/overlays.cpp
     screens/gallery.cpp
     model/tasks.cpp
+    model/game_config.cpp
+    model/scskiller.cpp
+    model/sound.cpp
     model/process.cpp
     model/disc_check.cpp
     model/json.cpp
@@ -53,6 +56,45 @@ if(WIN32)
             VERBATIM)
     endforeach()
 
+    # Game DXBC shaders for SCSKiller Pipeline Precompiler (D3D12 PSO + D3D11 Shader Cache builder)
+    file(MAKE_DIRECTORY "${VCS_LAUNCHER_SHADERS}/dxbc")
+    set(VCS_GAME_DXBC_HEADERS "")
+    function(vcs_game_dxbc source entry profile name header)
+        set(src "${VCS_ROOT}/src/render/${source}")
+        set(out "${VCS_LAUNCHER_SHADERS}/dxbc/${header}")
+        set(defines "")
+        foreach(d IN LISTS ARGN)
+            list(APPEND defines -D ${d})
+        endforeach()
+        add_custom_command(
+            OUTPUT "${out}"
+            COMMAND "${Python3_EXECUTABLE}" -I "${VCS_ROOT}/tools/hlsl_dxbc.py" --profile ${profile}
+                    --entry ${entry} --name ${name} --out "${out}" ${defines} "${src}"
+            DEPENDS "${src}" "${VCS_ROOT}/tools/hlsl_dxbc.py"
+            COMMENT "hlsl_dxbc (scskiller) ${source} ${entry}"
+            VERBATIM)
+        list(APPEND VCS_GAME_DXBC_HEADERS "${out}")
+        set(VCS_GAME_DXBC_HEADERS ${VCS_GAME_DXBC_HEADERS} PARENT_SCOPE)
+    endfunction()
+    vcs_game_dxbc(shaders/present.hlsl vs_main vs_5_0 kPresentVS present_vs.h)
+    vcs_game_dxbc(shaders/present.hlsl ps_main ps_5_0 kPresentPS present_ps.h)
+    vcs_game_dxbc(shaders/gs_draw.hlsl vs_main vs_5_0 kGsDrawVS gs_draw_vs.h)
+    vcs_game_dxbc(shaders/gs_draw.hlsl vs_world vs_5_0 kGsWorldVS gs_world_vs.h)
+    vcs_game_dxbc(shaders/gs_draw.hlsl vs_lit vs_5_0 kGsLitVS gs_lit_vs.h)
+    vcs_game_dxbc(shaders/gs_draw.hlsl vs_lit_inst vs_5_0 kGsLitInstVS gs_lit_inst_vs.h)
+    foreach(mode RANGE 0 6)
+        vcs_game_dxbc(shaders/gs_draw.hlsl ps_main ps_5_0 kGsDrawPS${mode} gs_draw_ps${mode}.h DUAL_SOURCE=0 SAMPLE_MODE=${mode})
+        vcs_game_dxbc(shaders/gs_draw.hlsl ps_main ps_5_0 kGsDrawPS${mode}Dual gs_draw_ps${mode}_dual.h DUAL_SOURCE=1 SAMPLE_MODE=${mode})
+        vcs_game_dxbc(shaders/gs_draw.hlsl ps_main ps_5_0 kGsDrawPS${mode}NoZ gs_draw_ps${mode}_noz.h DUAL_SOURCE=0 SAMPLE_MODE=${mode} SHADER_DEPTH=0)
+        vcs_game_dxbc(shaders/gs_draw.hlsl ps_main ps_5_0 kGsDrawPS${mode}DualNoZ gs_draw_ps${mode}_dual_noz.h DUAL_SOURCE=1 SAMPLE_MODE=${mode} SHADER_DEPTH=0)
+    endforeach()
+    vcs_game_dxbc(shaders/gs_util.hlsl vs_main vs_5_0 kGsQuadVS gs_quad_vs.h)
+    vcs_game_dxbc(shaders/gs_util.hlsl ps_blit ps_5_0 kGsBlitPS gs_blit_ps.h)
+    vcs_game_dxbc(shaders/gs_util.hlsl ps_fill_color ps_5_0 kGsFillColorPS gs_fill_color_ps.h)
+    vcs_game_dxbc(shaders/gs_util.hlsl ps_fill_depth ps_5_0 kGsFillDepthPS gs_fill_depth_ps.h)
+    vcs_game_dxbc(shaders/ui.hlsl vs_main vs_5_0 kUiVS ui_vs.h)
+    vcs_game_dxbc(shaders/ui.hlsl ps_main ps_5_0 kUiPS ui_ps.h)
+
     add_executable(VCSLauncher WIN32
         ${VCS_LAUNCHER_COMMON}
         platform/platform_win32.cpp
@@ -62,6 +104,7 @@ if(WIN32)
         model/system_win32.cpp
         "${VCS_LAUNCHER_SHADERS}/ui_vs.h"
         "${VCS_LAUNCHER_SHADERS}/ui_ps.h"
+        ${VCS_GAME_DXBC_HEADERS}
         launcher.rc
     )
     # the resource compiler doesn't report the files it embeds: a redrawn icon would otherwise not rebuild

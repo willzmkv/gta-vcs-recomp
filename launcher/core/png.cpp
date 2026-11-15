@@ -1,11 +1,105 @@
 #include "png.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO
+#define STBI_MAX_DIMENSIONS 8192
+#include "../../third_party/stb/stb_image.h"
+
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <fstream>
 #include <vector>
 
 namespace core
 {
+    bool readPng(const std::filesystem::path &path, int &width, int &height, std::vector<uint8_t> &rgba)
+    {
+        std::ifstream in(path, std::ios::binary | std::ios::ate);
+        if (!in)
+            return false;
+        const auto size = in.tellg();
+        if (size <= 0 || size > 64 * 1024 * 1024)
+            return false;
+        std::vector<uint8_t> bytes(static_cast<size_t>(size));
+        in.seekg(0);
+        if (!in.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
+            return false;
+        int w = 0, h = 0, ch = 0;
+        uint8_t *decoded = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &ch, 4);
+        if (!decoded || w <= 0 || h <= 0)
+        {
+            if (decoded)
+                stbi_image_free(decoded);
+            return false;
+        }
+        width = w;
+        height = h;
+        rgba.assign(decoded, decoded + static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+        stbi_image_free(decoded);
+        return true;
+    }
+
+    void resizeRgba(const uint8_t *src, int srcW, int srcH, uint8_t *dst, int dstW, int dstH)
+    {
+        if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0)
+            return;
+        if (srcW == dstW && srcH == dstH)
+        {
+            std::memcpy(dst, src, static_cast<size_t>(dstW) * static_cast<size_t>(dstH) * 4);
+            return;
+        }
+        // Box-filter + bilinear area averaging so downscaling large artwork (e.g. 2172x1500 -> 1920x1326) is crisp
+        const float scaleX = static_cast<float>(srcW) / static_cast<float>(dstW);
+        const float scaleY = static_cast<float>(srcH) / static_cast<float>(dstH);
+        for (int y = 0; y < dstH; ++y)
+        {
+            const float sy0 = y * scaleY;
+            const float sy1 = std::min(static_cast<float>(srcH), (y + 1) * scaleY);
+            const int iy0 = std::clamp(static_cast<int>( std::floor(sy0)), 0, srcH - 1);
+            const int iy1 = std::clamp(static_cast<int>( std::ceil(sy1)) - 1, iy0, srcH - 1);
+            for (int x = 0; x < dstW; ++x)
+            {
+                const float sx0 = x * scaleX;
+                const float sx1 = std::min(static_cast<float>(srcW), (x + 1) * scaleX);
+                const int ix0 = std::clamp(static_cast<int>( std::floor(sx0)), 0, srcW - 1);
+                const int ix1 = std::clamp(static_cast<int>( std::ceil(sx1)) - 1, ix0, srcW - 1);
+                float r = 0, g = 0, b = 0, a = 0, wSum = 0;
+                for (int sy = iy0; sy <= iy1; ++sy)
+                {
+                    const float wy = std::min(sy + 1.0f, sy1) - std::max(static_cast<float>(sy), sy0);
+                    for (int sx = ix0; sx <= ix1; ++sx)
+                    {
+                        const float wx = std::min(sx + 1.0f, sx1) - std::max(static_cast<float>(sx), sx0);
+                        const float w = std::max(0.0001f, wx * wy);
+                        const uint8_t *p = src + (static_cast<size_t>(sy) * static_cast<size_t>(srcW) + static_cast<size_t>(sx)) * 4;
+                        // Premultiplied accumulation prevents dark fringes on transparent logos
+                        const float pa = (p[3] / 255.0f) * w;
+                        r += p[0] * pa;
+                        g += p[1] * pa;
+                        b += p[2] * pa;
+                        a += p[3] * w;
+                        wSum += w;
+                    }
+                }
+                uint8_t *out = dst + (static_cast<size_t>(y) * static_cast<size_t>(dstW) + static_cast<size_t>(x)) * 4;
+                const float finalA = wSum > 0 ? a / wSum : 0.0f;
+                const float totalPremulA = a / 255.0f;
+                if (totalPremulA > 1e-4f)
+                {
+                    out[0] = static_cast<uint8_t>(std::clamp(r / totalPremulA + 0.5f, 0.0f, 255.0f));
+                    out[1] = static_cast<uint8_t>(std::clamp(g / totalPremulA + 0.5f, 0.0f, 255.0f));
+                    out[2] = static_cast<uint8_t>(std::clamp(b / totalPremulA + 0.5f, 0.0f, 255.0f));
+                }
+                else
+                {
+                    out[0] = out[1] = out[2] = 0;
+                }
+                out[3] = static_cast<uint8_t>(std::clamp(finalA + 0.5f, 0.0f, 255.0f));
+            }
+        }
+    }
     namespace
     {
         uint32_t crc32(const uint8_t *data, size_t size, uint32_t crc = 0)

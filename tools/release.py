@@ -74,6 +74,12 @@ def copy_source(stage, ref, worktree):
     if worktree:
         names = git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
         for name in filter(None, (n.decode("utf-8") for n in names)):
+            if name in ("launcher.ini", ".vcs-build-dir") or name.startswith("docs/superpowers/"):
+                continue
+            if name.startswith("modloader/"):
+                sub = name[len("modloader/"):].split("/")[0]
+                if sub not in ("HD Hands", "HD Hud", "modloader.ini", "README.md"):
+                    continue
             src = os.path.join(tc.ROOT, name)
             if not os.path.isfile(src):
                 continue  # deleted in the working tree
@@ -379,6 +385,7 @@ def main():
     ap.add_argument("--out", default=DIST)
     ap.add_argument("--platform", choices=("windows", "linux"), default="windows" if tc.IS_WINDOWS else "linux")
     ap.add_argument("--allow-new-glibc", action="store_true", help="Linux: a launcher built on a newer system (tests)")
+    ap.add_argument("--standalone-exe", action="store_true", help="Windows: also emit a single self-extracting VCSLauncher .exe with the project embedded")
     a = ap.parse_args()
     if (a.platform == "windows") != tc.IS_WINDOWS:
         tc.fail("a %s release is made on %s (its launcher is built here)" % (a.platform, a.platform), "release_platform")
@@ -455,6 +462,22 @@ def main():
     with open(out + ".sha256", "w", encoding="utf-8") as f:
         f.write("%s  %s\n" % (digest, os.path.basename(out)))
     print("[release] ok: %s (%.0f MB, sha256 %s)" % (out, os.path.getsize(out) / (1 << 20), digest[:16]))
+    if a.standalone_exe:
+        sfx_out = os.path.join(a.out, "VCS.rec-Launcher-%s.exe" % version)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            for rel in files + ["RELEASE.json"]:
+                info = zipfile.ZipInfo.from_file(os.path.join(stage, rel), rel)
+                info.date_time = when
+                with open(os.path.join(stage, rel), "rb") as f:
+                    z.writestr(info, f.read(), zipfile.ZIP_DEFLATED, 9)
+        payload_bytes = buf.getvalue()
+        with open(launcher, "rb") as f_exe, open(sfx_out, "wb") as f_out:
+            f_out.write(f_exe.read())
+            f_out.write(payload_bytes)
+            f_out.write(len(payload_bytes).to_bytes(8, "little"))
+            f_out.write(b"VCSREC_ZIP_PAYLOAD")
+        print("[release] standalone exe ok: %s (%.1f MB)" % (sfx_out, os.path.getsize(sfx_out) / (1 << 20)))
     tc.event(result="ok", path=out, version=version)
 
 
