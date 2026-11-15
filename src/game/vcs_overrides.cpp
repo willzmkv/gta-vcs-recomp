@@ -25,6 +25,7 @@
 #include "game/vcs_sound.h"
 #include "game/vcs_stream.h"
 #include "game/vcs_aim.h"
+#include "game/vcs_combat.h"
 #include "game/vcs_anim.h"
 #include "game/vcs_distance.h"
 #include "game/vcs_distant.h"
@@ -1199,6 +1200,7 @@ namespace
         vcs::carcam::install(runtime);     // the mouse on the camera behind a vehicle (game/vcs_carcam.h)
         vcs::world::install(runtime);      // density and draw distance (game/vcs_world_detail.h)
         vcs::driveby::install(runtime);    // the NPC drive-by's fire rate (game/vcs_driveby.h)
+        vcs::combat::install(runtime);     // melee combat collision and near-ped scan fixes (game/vcs_combat.h)
         vcs::installFrameRateHooks(runtime); // 30 / 60 fps (game/vcs_framerate.h)
         vcs::installScriptTimingHooks(runtime); // per-frame mission meters on the time step (game/vcs_script_timing.h)
         vcs::installPhysicsTimingHooks(runtime); // per-frame vehicle pushes on the time step (game/vcs_physics_timing.h)
