@@ -84,7 +84,7 @@ namespace launcher
         int audioOutput = 0;            // 0 = Stereo, 1 = Mono, 2 = Pro Logic II
         int displaySkipIntro = 0;       // 0 = Off, 1 = On
         int gameBackground = 0;         // 0 = Pause, 1 = Mute, 2 = Play
-        int enhanceButtonPrompts = 0;   // 0 = Auto, 1 = PS2, 2 = PS4/PS5, 3 = Xbox, 4 = Switch
+        int enhanceButtonPrompts = 0;   // enhance.prompts, the game's: 0 Original (PS2), 1 Automatic, 2 PlayStation, 3 Xbox, 4 Keyboard
         int enhanceDrivebyRate = 0;     // 0 = Original PS2, 1 = Normal weapon rate
 
         // Gamepad & Controls

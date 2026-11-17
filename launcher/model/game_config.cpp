@@ -78,6 +78,7 @@ namespace launcher
     bool GameConfig::loadIni(const fs::path &iniPath)
     {
         graphicsConfigured = false;
+        bool promptsSeen = false; // enhance.prompts read: the old enhance.button_prompts no longer counts
         std::ifstream in(iniPath);
         if (!in)
             return false;
@@ -127,21 +128,32 @@ namespace launcher
             else if (key == "audio.output") audioOutput = std::clamp(parseInt(val, audioOutput), 0, 2);
             else if (key == "display.skip_intro") displaySkipIntro = std::clamp(parseInt(val, displaySkipIntro), 0, 1);
             else if (key == "game.background") gameBackground = std::clamp(parseInt(val, gameBackground), 0, 2);
-            else if (key == "enhance.button_prompts") enhanceButtonPrompts = std::clamp(parseInt(val, enhanceButtonPrompts), 0, 4);
+            else if (key == "enhance.prompts")
+            {
+                enhanceButtonPrompts = std::clamp(parseInt(val, enhanceButtonPrompts), 0, 4);
+                promptsSeen = true;
+            }
+            else if (key == "enhance.button_prompts" && !promptsSeen)
+            {
+                // the launcher's own key before 2026-11-17, numbered Auto / PS2 / PS4-PS5 / Xbox / Switch: the game's
+                // enhance.prompts (Original / Automatic / PlayStation / Xbox / Keyboard) wins when both are there
+                static const int kFromOld[] = {1, 0, 2, 3, 2};
+                enhanceButtonPrompts = kFromOld[std::clamp(parseInt(val, 1), 0, 4)];
+            }
             else if (key == "enhance.driveby_rate") enhanceDrivebyRate = std::clamp(parseInt(val, enhanceDrivebyRate), 0, 1);
             else if (key == "pad.preset") padPreset = std::clamp(parseInt(val, padPreset), 0, 2);
             else if (key == "pad.trigger_drive") padTriggerDrive = std::clamp(parseInt(val, padTriggerDrive), 0, 1);
             else if (key == "pad.trigger_shoot") padTriggerShoot = std::clamp(parseInt(val, padTriggerShoot), 0, 1);
             else if (key == "pad.free_aim") padFreeAim = std::clamp(parseInt(val, padFreeAim), 0, 1);
             else if (key == "pad.aim_assist") padAimAssist = std::clamp(parseInt(val, padAimAssist), 0, 1);
-            else if (key == "pad.deadzone") padDeadzone = std::clamp(parseInt(val, padDeadzone), 0, 40);
+            else if (key == "pad.deadzone_left" || key == "pad.deadzone") padDeadzone = std::clamp(parseInt(val, padDeadzone), 0, 40);
             else if (key == "pad.camera_speed") padCameraSpeed = std::clamp(parseInt(val, padCameraSpeed), 10, 400);
             else if (key == "pad.vibration") padVibration = std::clamp(parseInt(val, padVibration), 0, 200);
             else if (key == "pad.invert_y") padInvertY = std::clamp(parseInt(val, padInvertY), 0, 1);
-            else if (key == "dualsense.triggers") dualsenseTriggers = std::clamp(parseInt(val, dualsenseTriggers), 0, 1);
-            else if (key == "dualsense.lightbar") dualsenseLightbar = std::clamp(parseInt(val, dualsenseLightbar), 0, 2);
-            else if (key == "dualsense.police_flash") dualsensePoliceFlash = std::clamp(parseInt(val, dualsensePoliceFlash), 0, 1);
-            else if (key == "dualsense.speaker") dualsenseSpeaker = std::clamp(parseInt(val, dualsenseSpeaker), 0, 1);
+            else if (key == "pad.ds_triggers" || key == "dualsense.triggers") dualsenseTriggers = std::clamp(parseInt(val, dualsenseTriggers), 0, 1);
+            else if (key == "pad.ds_lightbar" || key == "dualsense.lightbar") dualsenseLightbar = std::clamp(parseInt(val, dualsenseLightbar), 0, 2);
+            else if (key == "pad.ds_police" || key == "dualsense.police_flash") dualsensePoliceFlash = std::clamp(parseInt(val, dualsensePoliceFlash), 0, 1);
+            else if (key == "pad.ds_speaker" || key == "dualsense.speaker") dualsenseSpeaker = std::clamp(parseInt(val, dualsenseSpeaker), 0, 1);
             else if (key == "mouse.camera") mouseCamera = std::clamp(parseInt(val, mouseCamera), 0, 1);
             else if (key == "mouse.sensitivity") mouseSensitivity = std::clamp(parseInt(val, mouseSensitivity), 10, 400);
             else if (key == "mouse.free_aim") mouseFreeAim = std::clamp(parseInt(val, mouseFreeAim), 0, 1);
@@ -193,21 +205,22 @@ namespace launcher
             {"audio.output", std::to_string(audioOutput)},
             {"display.skip_intro", std::to_string(displaySkipIntro)},
             {"game.background", std::to_string(gameBackground)},
-            {"enhance.button_prompts", std::to_string(enhanceButtonPrompts)},
+            {"enhance.prompts", std::to_string(enhanceButtonPrompts)},
             {"enhance.driveby_rate", std::to_string(enhanceDrivebyRate)},
             {"pad.preset", std::to_string(padPreset)},
             {"pad.trigger_drive", std::to_string(padTriggerDrive)},
             {"pad.trigger_shoot", std::to_string(padTriggerShoot)},
             {"pad.free_aim", std::to_string(padFreeAim)},
             {"pad.aim_assist", std::to_string(padAimAssist)},
-            {"pad.deadzone", std::to_string(padDeadzone)},
+            {"pad.deadzone_left", std::to_string(padDeadzone)},
+            {"pad.deadzone_right", std::to_string(padDeadzone)},
             {"pad.camera_speed", std::to_string(padCameraSpeed)},
             {"pad.vibration", std::to_string(padVibration)},
             {"pad.invert_y", std::to_string(padInvertY)},
-            {"dualsense.triggers", std::to_string(dualsenseTriggers)},
-            {"dualsense.lightbar", std::to_string(dualsenseLightbar)},
-            {"dualsense.police_flash", std::to_string(dualsensePoliceFlash)},
-            {"dualsense.speaker", std::to_string(dualsenseSpeaker)},
+            {"pad.ds_triggers", std::to_string(dualsenseTriggers)},
+            {"pad.ds_lightbar", std::to_string(dualsenseLightbar)},
+            {"pad.ds_police", std::to_string(dualsensePoliceFlash)},
+            {"pad.ds_speaker", std::to_string(dualsenseSpeaker)},
             {"mouse.camera", std::to_string(mouseCamera)},
             {"mouse.sensitivity", std::to_string(mouseSensitivity)},
             {"mouse.free_aim", std::to_string(mouseFreeAim)},

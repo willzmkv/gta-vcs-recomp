@@ -2092,7 +2092,8 @@ namespace screens
                 bool hov = false;
                 if (ui::vcCycleRow("#vc-aud-prompts", {tableR.x, y, tableR.w, rowH}, rowIdx++,
                                    tr("Ícones de Botões do Controle", "Controller Button Prompts"),
-                                   {tr("Automático", "Auto"), "PlayStation 2", "PS4 / PS5", "Xbox", "Nintendo Switch"},
+                                   {"Original (PS2)", tr("Automático", "Automatic"), "PlayStation", "Xbox",
+                                    tr("Teclado e mouse", "Keyboard & mouse")}, // the game's enhance.prompts, in its order
                                    cfg.enhanceButtonPrompts, &hov))
                     changed = true;
                 if (hov)
