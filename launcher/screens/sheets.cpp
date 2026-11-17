@@ -644,8 +644,15 @@ namespace screens
 
             const float colW = isKbMouse ? px(190) : px(210);
             const float badgeH = px(34);
-            const float leftX = diagramR.x + px(10);
-            const float rightX = diagramR.right() - colW - px(10);
+            float leftX = diagramR.x + px(10);
+            float rightX = diagramR.right() - colW - px(10);
+            if (shell.gameMenuControllerLayout)
+            {
+                // in the game menu's wide column: the callouts close to the model, a margin left (the player's look)
+                const float near = px(80);
+                leftX = std::max(leftX, ctrlR.x - near - colW);
+                rightX = std::min(rightX, ctrlR.right() + near);
+            }
             const float gapY = px(42);
             const float startY = diagramR.cy() - (gapY * 2.0f) - badgeH * 0.5f;
 

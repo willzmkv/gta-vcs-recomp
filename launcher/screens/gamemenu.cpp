@@ -99,7 +99,7 @@ namespace screens
         void toggle(float top, int i, std::string_view label, bool on)
         {
             const Rect r = row(top, i, label);
-            const float s = controlScale(), w = px(52) * s, h = px(26) * s;
+            const float s = controlScale() * 0.85f, w = px(52) * s, h = px(26) * s; // a little smaller (the player's look)
             ui::vcToggleSwitch({ux(1792) - w, std::floor(r.y + (r.h - h) * 0.5f), w, h}, on ? 1.0f : 0.0f, 0.0f, s);
         }
 
