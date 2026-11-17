@@ -258,7 +258,7 @@ namespace
                 {
                     std::ofstream out(tmpIni, std::ios::binary | std::ios::trunc);
                     out << "dualsense.triggers=0\ndualsense.lightbar=1\ndualsense.police_flash=0\ndualsense.speaker=1\n"
-                        << "enhance.button_prompts=3\npad.deadzone=20\n";
+                        << "enhance.button_prompts=4\npad.deadzone=20\n";
                 }
                 GameConfig old;
                 old.loadIni(tmpIni);
@@ -267,7 +267,7 @@ namespace
                 const std::string migrated((std::istreambuf_iterator<char>(migratedIn)), {});
                 auto has = [&](const char *line) { return migrated.find(line) != std::string::npos; };
                 check(has("pad.ds_triggers=0") && has("pad.ds_lightbar=1") && has("pad.ds_police=0") && has("pad.ds_speaker=1") &&
-                          has("enhance.prompts=3") && has("pad.deadzone_left=20") && has("pad.deadzone_right=20"),
+                          has("enhance.prompts=5") && has("pad.deadzone_left=20") && has("pad.deadzone_right=20"),
                       "GameConfig: the DualSense, prompt and deadzone settings under the game's own keys");
 
                 const fs::path modGood = tmpDir / "mod_good";

@@ -130,14 +130,14 @@ namespace launcher
             else if (key == "game.background") gameBackground = std::clamp(parseInt(val, gameBackground), 0, 2);
             else if (key == "enhance.prompts")
             {
-                enhanceButtonPrompts = std::clamp(parseInt(val, enhanceButtonPrompts), 0, 4);
+                enhanceButtonPrompts = std::clamp(parseInt(val, enhanceButtonPrompts), 0, 5);
                 promptsSeen = true;
             }
             else if (key == "enhance.button_prompts" && !promptsSeen)
             {
                 // the launcher's own key before 2026-11-17, numbered Auto / PS2 / PS4-PS5 / Xbox / Switch: the game's
                 // enhance.prompts (Original / Automatic / PlayStation / Xbox / Keyboard) wins when both are there
-                static const int kFromOld[] = {1, 0, 2, 3, 2};
+                static const int kFromOld[] = {1, 0, 2, 3, 5};
                 enhanceButtonPrompts = kFromOld[std::clamp(parseInt(val, 1), 0, 4)];
             }
             else if (key == "enhance.driveby_rate") enhanceDrivebyRate = std::clamp(parseInt(val, enhanceDrivebyRate), 0, 1);

@@ -76,11 +76,19 @@ def main():
             "VEHB": "{R1@vehicle}",
         }
         got = {a: g.cmd("prompts expand " + a) for a in expected}
-        ok("expand", all(got[a] == e for a, e in expected.items()), got)
 
-        # sets: Xbox (from the start), PlayStation, Keyboard & mouse
+        def same(text, want):
+            # a translated disc: the controls from its English or French text, joined in the language shown ("ou",
+            # "und"...), the French order where it differs ("R2 + L2")
+            words = text.split(" ")
+            joins = {"ou": "or", "oder": "or", "o": "or", "e": "and", "et": "and", "und": "and", "y": "and"}
+            text = " ".join(joins.get(w, w) for w in words)
+            return text == want or sorted(text.split(" ")) == sorted(want.split(" "))
+        ok("expand", all(same(got[a], e) for a, e in expected.items()), got)
+
+        # sets: Xbox (from the start), PlayStation, Nintendo Switch, Keyboard & mouse
         sets_ok, detail = True, {}
-        for value, name in ((3, "xbox"), (2, "ps"), (4, "keyboard")):
+        for value, name in ((3, "xbox"), (2, "ps"), (5, "switch"), (4, "keyboard")):
             g.cmd("setting enhance.prompts %d" % value)
             frames(10)
             help_text("CLOTHA")

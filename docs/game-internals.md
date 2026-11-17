@@ -1756,8 +1756,19 @@ search of the generated code for a function comparing with both `~` (0x7E) and `
 through the rig (font objects, the menu's help-bar items, and every `C<n><ACTION>` text out of the running game's table:
 `vcs.exe`'s `prompts text <KEY>` command). **`build/analysis/text/american.txt` is not the PS2's text**: 26 of the 244
 control texts differ from the game's table in RAM (C*VEWE2 is "~S~ + ~X~" there and "R1 button" in the game, C*DOARM
-"L1 and R1" / "L2 and R2", C*FLUP "left analog stick up" / "up directional button" ...) - read text from the game. A
-prompt reaches the screen by one of three paths:
+"L1 and R1" / "L2 and R2", C*FLUP "left analog stick up" / "up directional button" ...) - read text from the game.
+
+**Translated text (2026-11-17).** The English the game shows is the disc's `ENGLISH.GXT` (its control texts agree with
+the official French, German, Italian and Spanish ones on every key read: C0FLUP the d-pad's up in all five);
+`AMERICAN.GXT` is the other text above. A disc with a fan translation written over `ENGLISH.GXT` (the user's: Portuguese,
+`TABL` / MAIN at 1052 / `TKEY` 12-byte entries {u32 offset, key[8]} / `TDAT` UTF-16, Latin-1 accents) names the controls
+in its own words and not always the same controls: C0FLUP "analógico direito para cima" (right stick, for the d-pad's
+up), C0VEWE2 "botão R1" (for ~S~ + ~X~), C3DOARM "L2 e R2" (for L1 and R1). So the expander takes the controls from the
+key's text in the disc's ENGLISH.GXT, or its FRENCH.GXT when the English is translated (`[prompts] 244 control names
+from the disc's FRENCH.GXT` in the log; a French phrase table beside the English one), and from the language shown only
+the words joining them: and / or as e / ou, et / ou, und / oder, e / o, y / o. `prompts unknown` lists the
+configuration's keys the table leaves words in (none in all four configurations). A prompt reaches the screen by one of
+three paths:
 
 **1. Text: `~k~ ~ACTION~` -> the controller configuration's text.** GXT strings name a control by action, never by
 button: `Press~h~ ~k~ ~TGSUB~ ~w~to ...` (149 uses). **`FUN_003aff20`** (re3's InsertPlayerControlKeysInString; a

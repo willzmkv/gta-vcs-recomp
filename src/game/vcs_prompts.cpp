@@ -33,6 +33,7 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_hw.h"
 #include "runtime/ps2_control.h"
+#include "runtime/ps2_disc_image.h"
 #include "runtime/ps2_render_worker.h"
 #include "settings/settings.h"
 
@@ -104,6 +105,7 @@ namespace vcs::prompts
             PlayStation = 2,
             Xbox = 3,
             Keyboard = 4,
+            NintendoSwitch = 5, // after Keyboard: the values already in players' vcs.ini keep their meaning
         };
 
         uint8_t *g_rdram = nullptr;
@@ -268,6 +270,7 @@ namespace vcs::prompts
             {
             case PlayStation: return padSpec("ps", ctl);
             case Xbox: return padSpec("xbox", ctl);
+            case NintendoSwitch: return padSpec("switch", ctl);
             default: return keyboardSpec(ctx, ctl);
             }
         }
@@ -280,7 +283,12 @@ namespace vcs::prompts
                 return s;
             if (input::lastDevice() == input::Device::Keyboard)
                 return Keyboard;
-            return platform::gamepadFamily() == platform::GamepadFamily::PlayStation ? PlayStation : Xbox;
+            switch (platform::gamepadFamily())
+            {
+            case platform::GamepadFamily::PlayStation: return PlayStation;
+            case platform::GamepadFamily::Nintendo: return NintendoSwitch;
+            default: return Xbox;
+            }
         }
 
         // ---- the atlas ----------------------------------------------------------------------------------------------
@@ -471,9 +479,80 @@ namespace vcs::prompts
         // ---- the expander: phrases into tokens ----------------------------------------------------------------------
         struct Phrase
         {
-            std::string pattern, replacement;
-            bool exact; // case matters (the ~X~ tokens; ~t~ is a colour)
+            std::string pattern, replacement; // UTF-8
+            bool exact;                       // case matters (the ~X~ tokens; ~t~ is a colour)
+            std::u16string text = {};         // the pattern as the game's text has it
         };
+        void prepare(std::vector<Phrase> &v)
+        {
+            for (Phrase &p : v)
+                for (size_t i = 0; i < p.pattern.size();) // UTF-8 (Latin-1's letters at most: two bytes)
+                {
+                    const unsigned char c = static_cast<unsigned char>(p.pattern[i]);
+                    if (c >= 0xC0 && i + 1 < p.pattern.size())
+                    {
+                        p.text.push_back(static_cast<char16_t>(((c & 0x1F) << 6) | (p.pattern[i + 1] & 0x3F)));
+                        i += 2;
+                    }
+                    else
+                        p.text.push_back(c), ++i;
+                }
+            std::stable_sort(v.begin(), v.end(), [](const Phrase &a, const Phrase &b) { return a.text.size() > b.text.size(); });
+        }
+        // the official French text's control names (the reference when the disc's English text is translated): the
+        // same tokens, joined by the English "and" / "or" (fromReference puts the language shown's in)
+        const std::vector<Phrase> &frenchPhrases()
+        {
+            static const std::vector<Phrase> p = [] {
+                std::vector<Phrase> v = {
+                    {"joystick analogique gauche à gauche et à droite", "{LSLR}", false},
+                    {"joystick analogique gauche en haut et en bas", "{LSUD}", false},
+                    {"joystick analogique gauche, ou touches directionnelles", "{LS} or {DPAD}", false},
+                    {"joystick analogique gauche ou touches directionnelles", "{LS} or {DPAD}", false},
+                    {"joystick analogique gauche", "{LS}", false},
+                    {"joystick analogique droit", "{RS}", false},
+                    {"pad analogique en haut et pad analogique en bas", "{LSU} and {LSD}", false},
+                    {"pad analogique à gauche et pad analogique à droite", "{LSL} and {LSR}", false},
+                    {"pad analogique en haut", "{LSU}", false},
+                    {"pad analogique en bas", "{LSD}", false},
+                    {"pad analogique à gauche", "{LSL}", false},
+                    {"pad analogique à droite", "{LSR}", false},
+                    {"pad analogique", "{LS}", false},
+                    {"touches directionnelles haut et bas", "{DPADUD}", false},
+                    {"touches directionnelles gauche et droite", "{DPADLR}", false},
+                    {"touches directionnelles", "{DPAD}", false},
+                    {"touche directionnelle haut", "{DU}", false},
+                    {"touche directionnelle bas", "{DD}", false},
+                    {"touche directionnelle gauche", "{DL}", false},
+                    {"touche directionnelle droite", "{DR}", false},
+                    {"touche haut et touche bas", "{DU} and {DD}", false},
+                    {"touche gauche et touche droite", "{DL} and {DR}", false},
+                    {"touche haut", "{DU}", false},
+                    {"touche bas", "{DD}", false},
+                    {"touche gauche", "{DL}", false},
+                    {"touche droite", "{DR}", false},
+                    {"touche L2 et touche R2", "{L2} and {R2}", false},
+                    {"touche R2 + touche L2", "{R2} + {L2}", false},
+                    {"touche L1", "{L1}", false},
+                    {"touche R1", "{R1}", false},
+                    {"touche L2", "{L2}", false},
+                    {"touche R2", "{R2}", false},
+                    {"touche L3", "{L3}", false},
+                    {"touche R3", "{R3}", false},
+                    {"touche SELECT", "{SELECT}", false},
+                    {"touche START", "{START}", false},
+                    {"touche L", "{L1}", false}, // the PSP's names, as in the English text
+                    {"touche R", "{R1}", false},
+                    {"~X~", "{X}", true},
+                    {"~O~", "{O}", true},
+                    {"~T~", "{T}", true},
+                    {"~S~", "{S}", true},
+                };
+                prepare(v);
+                return v;
+            }();
+            return p;
+        }
         const std::vector<Phrase> &phrases()
         {
             static const std::vector<Phrase> p = [] {
@@ -528,7 +607,7 @@ namespace vcs::prompts
                     {"~T~", "{T}", true},
                     {"~S~", "{S}", true},
                 };
-                std::stable_sort(v.begin(), v.end(), [](const Phrase &a, const Phrase &b) { return a.pattern.size() > b.pattern.size(); });
+                prepare(v);
                 return v;
             }();
             return p;
@@ -551,7 +630,7 @@ namespace vcs::prompts
             return Foot;
         }
 
-        std::u16string translate(const std::u16string &text, int ctx)
+        std::u16string translate(const std::u16string &text, int ctx, const std::vector<Phrase> &table = phrases())
         {
             std::u16string out;
             auto lower = [](char16_t c) { return c >= u'A' && c <= u'Z' ? static_cast<char16_t>(c + 32) : c; };
@@ -560,14 +639,14 @@ namespace vcs::prompts
                 const Phrase *hit = nullptr;
                 // a phrase starts a word ("pickup button" is no "up button")
                 const bool wordStart = i == 0 || !((text[i - 1] >= u'a' && text[i - 1] <= u'z') || (text[i - 1] >= u'A' && text[i - 1] <= u'Z'));
-                for (const Phrase &p : phrases())
+                for (const Phrase &p : table)
                 {
-                    if (i + p.pattern.size() > text.size() || (!p.exact && !wordStart))
+                    if (i + p.text.size() > text.size() || (!p.exact && !wordStart))
                         continue;
                     bool same = true;
-                    for (size_t k = 0; k < p.pattern.size() && same; ++k)
+                    for (size_t k = 0; k < p.text.size() && same; ++k)
                     {
-                        const char16_t a = text[i + k], b = static_cast<char16_t>(p.pattern[k]);
+                        const char16_t a = text[i + k], b = p.text[k];
                         same = p.exact ? a == b : lower(a) == lower(b);
                     }
                     if (same)
@@ -581,7 +660,7 @@ namespace vcs::prompts
                     out.push_back(text[i++]);
                     continue;
                 }
-                i += hit->pattern.size();
+                i += hit->text.size();
                 const std::string &r = hit->replacement;
                 for (size_t k = 0; k < r.size();)
                 {
@@ -637,6 +716,149 @@ namespace vcs::prompts
             return {};
         }
 
+        // ---- the reference: each control text in a language the phrase tables read ------------------------------------
+        // A translated game names the same controls in its own words, and not always the same controls (game-internals.md
+        // 6n: a Portuguese fan translation written over ENGLISH.GXT has "right stick up" for C0FLUP's d-pad up, R1 for
+        // C0VEWE2's square + cross). So the tokens come from the key's text in the disc's own ENGLISH.GXT, or its
+        // FRENCH.GXT when that one is translated (the player's disc; nothing of it is in this source), and only the words
+        // joining them ("and", "or") from the language shown. Not AMERICAN.GXT: its control texts are other ones (C0FLUP
+        // "left analog stick up", where the English and all four translations say the d-pad).
+        std::unordered_map<std::string, std::u16string> g_reference; // "C0TGSUB" -> "R3 button"
+        const std::vector<Phrase> *g_referencePhrases = nullptr;
+        std::once_flag g_referenceOnce;
+
+        bool loadReferenceFrom(const char *file, const std::vector<Phrase> &table, const char16_t *marker)
+        {
+            g_reference.clear();
+            IPS2DiscImage *disc = ps2_disc::image();
+            uint32_t lsn = 0, size = 0;
+            bool dir = false;
+            if (!disc || !disc->findFile(std::string("cdrom0:\\") + file + ";1", lsn, size, dir) || dir || size < 64 || size > (8u << 20))
+                return false;
+            std::vector<uint8_t> d(size);
+            if (!disc->readBytes(static_cast<uint64_t>(lsn) * 2048u, size, d.data()))
+                return false;
+            auto u32 = [&](size_t o) {
+                uint32_t v = 0;
+                if (o + 4 <= d.size())
+                    std::memcpy(&v, d.data() + o, 4);
+                return v;
+            };
+            // "TABL" size {name[8], offset}...: MAIN first; its table "TKEY" size {u32 text, key[8]}... "TDAT" size data
+            if (std::memcmp(d.data(), "TABL", 4) != 0 || std::memcmp(d.data() + 8, "MAIN", 5) != 0)
+                return false;
+            const size_t keys = u32(16);
+            if (keys + 8 > d.size() || std::memcmp(d.data() + keys, "TKEY", 4) != 0)
+                return false;
+            const size_t keyBytes = u32(keys + 4), data = keys + 8 + keyBytes + 8;
+            if (data > d.size() || std::memcmp(d.data() + data - 8, "TDAT", 4) != 0)
+                return false;
+            for (size_t e = keys + 8; e + 12 <= keys + 8 + keyBytes; e += 12)
+            {
+                char key[9] = {};
+                std::memcpy(key, d.data() + e + 4, 8);
+                if (key[0] != 'C' || key[1] < '0' || key[1] > '9')
+                    continue;
+                std::u16string s;
+                for (size_t p = data + u32(e); p + 2 <= d.size() && s.size() < 255; p += 2)
+                {
+                    const char16_t ch = static_cast<char16_t>(d[p] | (d[p + 1] << 8));
+                    if (!ch)
+                        break;
+                    s.push_back(ch);
+                }
+                g_reference[key] = s;
+            }
+            // in the language the table reads: its word for a button in the R3 button's text
+            const auto r3 = g_reference.find("C0TGSUB");
+            if (r3 == g_reference.end() || r3->second.find(marker) == std::u16string::npos)
+            {
+                g_reference.clear();
+                return false;
+            }
+            g_referencePhrases = &table;
+            std::fprintf(stderr, "[prompts] %zu control names from the disc's %s\n", g_reference.size(), file);
+            return true;
+        }
+
+        void loadReference()
+        {
+            if (!loadReferenceFrom("ENGLISH.GXT", phrases(), u"button") && !loadReferenceFrom("FRENCH.GXT", frenchPhrases(), u"touche"))
+                std::fprintf(stderr, "[prompts] no English or French text on the disc: control names read in the language shown\n");
+        }
+
+        // the language of a control text, by its words: the joining words to use
+        struct Joins
+        {
+            const char16_t *andWord, *orWord;
+        };
+        Joins joinsOf(const std::u16string &text)
+        {
+            std::u16string t;
+            for (char16_t c : text)
+                t.push_back(c >= u'A' && c <= u'Z' ? static_cast<char16_t>(c + 32) : c);
+            auto has = [&](const char16_t *w) { return t.find(w) != std::u16string::npos; };
+            if (has(u"touche") || has(u"analogique"))
+                return {u"et", u"ou"};
+            if (has(u"taste") || has(u"analog-"))
+                return {u"und", u"oder"};
+            if (has(u"tasto") || has(u"tasti") || has(u"levetta") || has(u"analogico"))
+                return {u"e", u"o"};
+            if (has(u"botón") || has(u"botones") || has(u"joystick") || has(u"pad analógico"))
+                return {u"y", u"o"};
+            if (has(u"botão") || has(u"botões") || has(u"analógico") || has(u"direcionais"))
+                return {u"e", u"ou"};
+            return {u"and", u"or"};
+        }
+
+        // the American text's tokens with its "and" / "or" in the language shown; empty when words other than those are
+        // left (a text this table does not know: the language's own text is read instead)
+        std::u16string fromReference(const std::u16string &tokens, const std::u16string &shown)
+        {
+            const Joins j = joinsOf(shown);
+            std::u16string out;
+            for (size_t i = 0; i < tokens.size();)
+            {
+                if (tokens[i] == u'~') // a token: ~<char>~
+                {
+                    const size_t end = tokens.find(u'~', i + 1);
+                    if (end == std::u16string::npos)
+                        return {};
+                    out.append(tokens, i, end + 1 - i);
+                    i = end + 1;
+                    continue;
+                }
+                size_t w = i;
+                while (w < tokens.size() && ((tokens[w] >= u'a' && tokens[w] <= u'z') || (tokens[w] >= u'A' && tokens[w] <= u'Z')))
+                    ++w;
+                if (w == i)
+                {
+                    out.push_back(tokens[i++]);
+                    continue;
+                }
+                const std::u16string word = tokens.substr(i, w - i);
+                if (word == u"and")
+                    out += j.andWord;
+                else if (word == u"or")
+                    out += j.orWord;
+                else
+                    return {};
+                i = w;
+            }
+            return out;
+        }
+
+        // the control text of C<mode><ACTION> with its controls as tokens: from the American text when the disc has it
+        std::u16string controlText(uint16_t mode, const std::string &action, const std::u16string &shown)
+        {
+            std::call_once(g_referenceOnce, loadReference);
+            const auto ref = g_reference.find("C" + std::to_string(mode) + action);
+            std::u16string t;
+            if (ref != g_reference.end())
+                t = fromReference(translate(ref->second, actionContext(action), *g_referencePhrases), shown);
+            return t.empty() ? translate(shown, actionContext(action)) : t;
+        }
+
         std::atomic<uint32_t> g_expanded{0};
 
         // FUN_003afd78(src, out): src points past "~k~ " at "~ACTION~"; the text of C<configuration><ACTION> goes into
@@ -659,7 +881,7 @@ namespace vcs::prompts
                                                                                          : std::u16string();
             if (text.empty())
                 return g_origExpand(rdram, ctx, runtime);
-            const std::u16string t = translate(text, actionContext(action));
+            const std::u16string t = controlText(mode, action, text);
             const size_t n = std::min<size_t>(t.size(), 255);
             for (size_t i = 0; i < n; ++i)
                 wr16(out + static_cast<uint32_t>(i) * 2u, static_cast<uint16_t>(t[i]));
@@ -911,7 +1133,7 @@ namespace vcs::prompts
         std::vector<std::string> allSpecs()
         {
             std::vector<std::string> specs;
-            for (int set : {PlayStation, Xbox, Keyboard})
+            for (int set : {PlayStation, Xbox, NintendoSwitch, Keyboard})
                 for (int ctx = 0; ctx < kCtxCount; ++ctx)
                     for (int ctl = 0; ctl < kCtlCount; ++ctl)
                         specs.push_back(specFor(set, ctx, ctl));
@@ -940,13 +1162,14 @@ namespace vcs::prompts
         s.section = "Button prompts";
         s.label = "Button prompts";
         s.help = "The buttons the game's help text and pause menu show. Automatic follows what you last played with: the "
-                 "keys and mouse buttons you bound, or your gamepad's own buttons (Xbox or PlayStation). Original: the "
+                 "keys and mouse buttons you bound, or your gamepad's own buttons (Xbox, PlayStation or Nintendo Switch). Original: the "
                  "PS2's text as it is.";
         s.type = settings::Type::Choice;
         s.choices = {{"Original (PS2)", Original},
                      {"Automatic", Automatic},
                      {"PlayStation", PlayStation},
                      {"Xbox", Xbox},
+                     {"Nintendo Switch", NintendoSwitch},
                      {"Keyboard & mouse", Keyboard}};
         s.defaultValue = Original;
         s.env = "VCS_PROMPTS";
@@ -1063,7 +1286,7 @@ namespace vcs::prompts
         {
             resolve(set, menuOpen);
             if (set != g_appliedSet)
-                std::fprintf(stderr, "[prompts] %s\n", set == PlayStation ? "PlayStation buttons" : set == Xbox ? "Xbox buttons" : "keyboard and mouse");
+                std::fprintf(stderr, "[prompts] %s\n", set == PlayStation ? "PlayStation buttons" : set == Xbox ? "Xbox buttons" : set == NintendoSwitch ? "Nintendo Switch buttons" : "keyboard and mouse");
             g_appliedSet = set;
             g_appliedAtlas = g_atlas;
             g_appliedMenu = menuOpen;
@@ -1107,11 +1330,22 @@ namespace vcs::prompts
                     s += c < 128 ? static_cast<char>(c) : '?';
                 return reply("ok " + s);
             }
+            // prompts unknown -> ok <the configuration's actions whose American text the phrase table leaves words in>
+            if (args == "unknown")
+            {
+                std::call_once(g_referenceOnce, loadReference);
+                const std::string prefix = "C" + std::to_string(rd16(kPad0Mode));
+                std::string s;
+                for (const auto &[key, text] : g_reference)
+                    if (key.rfind(prefix, 0) == 0 && fromReference(translate(text, actionContext(key.substr(2)), *g_referencePhrases), text).empty())
+                        s += " " + key;
+                return reply("ok references=" + std::to_string(g_reference.size()) + s);
+            }
             if (args.rfind("expand ", 0) == 0)
             {
                 const std::string action = args.substr(7);
                 const uint16_t mode = rd16(kPad0Mode);
-                const std::u16string text = translate(gameText("C" + std::to_string(mode) + action), actionContext(action));
+                const std::u16string text = controlText(mode, action, gameText("C" + std::to_string(mode) + action));
                 std::string s;
                 for (char16_t c : text)
                     if (c >= kTokenBase && c < kTokenBase + kCtxCount * 0x40)
@@ -1131,7 +1365,7 @@ namespace vcs::prompts
             const int shown = g_shownSet.load(std::memory_order_relaxed);
             char buf[320];
             std::snprintf(buf, sizeof(buf), "ok setting=%d shown=%s device=%s pad=%d expanded=%u glyphs=%u buttons=%u drawn=%llu",
-                          g_setting.load(), shown == PlayStation ? "ps" : shown == Xbox ? "xbox" : shown == Keyboard ? "keyboard" : "original",
+                          g_setting.load(), shown == PlayStation ? "ps" : shown == Xbox ? "xbox" : shown == NintendoSwitch ? "switch" : shown == Keyboard ? "keyboard" : "original",
                           input::lastDevice() == input::Device::Keyboard ? "keyboard" : "gamepad",
                           static_cast<int>(platform::gamepadFamily()), g_expanded.load(), g_lastFrameGlyphs.load(),
                           g_lastFrameButtons.load(), static_cast<unsigned long long>(gsHwGlyphDraws()));

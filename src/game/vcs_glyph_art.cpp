@@ -280,6 +280,12 @@ namespace vcs::glyphart
                 return 1.0f;
             disc(c, 0.5f);
             constexpr float sw = 0.042f;
+            if (family == "switch")
+            {
+                const char *letter = button == "south" ? "B" : button == "east" ? "A" : button == "west" ? "Y" : "X";
+                drawTextCentred(c, letter, 0.5f, 0.5f, 0.42f, kWhite);
+                return 1.0f;
+            }
             if (family == "xbox")
             {
                 const char *letter = button == "south" ? "A" : button == "east" ? "B" : button == "west" ? "X" : "Y";
@@ -353,7 +359,7 @@ namespace vcs::glyphart
             if (click)
             {
                 c->fill(0.15f, 0.15f, 0.85f, 0.85f, kInner, 1.0f, [&](float x, float y) { return sdCircle(x, y, 0.5f, 0.5f, 0.31f); });
-                drawTextCentred(c, xbox ? (left ? "LS" : "RS") : (left ? "L3" : "R3"), 0.5f, 0.5f, 0.22f, kWhite);
+                drawTextCentred(c, xbox || family == "switch" ? (left ? "LS" : "RS") : (left ? "L3" : "R3"), 0.5f, 0.5f, 0.22f, kWhite);
                 return 1.0f;
             }
             c->fill(0.15f, 0.15f, 0.85f, 0.85f, kGrey, 1.0f,
@@ -368,6 +374,19 @@ namespace vcs::glyphart
                 drawArrow(c, 0.5f - d, 0.5f, 2, s, kWhite);
             if (dirs & 8)
                 drawArrow(c, 0.5f + d, 0.5f, 3, s, kWhite);
+            return 1.0f;
+        }
+
+        // the Switch's - (back) and + (start): the sign in a disc
+        float switchSign(Canvas *c, bool plus)
+        {
+            if (!c)
+                return 1.0f;
+            disc(c, 0.5f);
+            c->fill(0.2f, 0.2f, 0.8f, 0.8f, kWhite, 1.0f, [&](float x, float y) {
+                const float h = sdSegment(x, y, 0.36f, 0.5f, 0.64f, 0.5f);
+                return (plus ? std::min(h, sdSegment(x, y, 0.5f, 0.36f, 0.5f, 0.64f)) : h) - 0.04f;
+            });
             return 1.0f;
         }
 
@@ -555,17 +574,19 @@ namespace vcs::glyphart
                 return keys(c, "0");
             const size_t b = rest.find(':');
             const std::string family = rest.substr(0, b), button = b == std::string::npos ? "" : rest.substr(b + 1);
-            const bool xbox = family == "xbox";
+            const bool xbox = family == "xbox", nintendo = family == "switch";
             if (button == "south" || button == "east" || button == "west" || button == "north")
                 return faceButton(c, family, button);
             if (button == "back")
-                return xbox ? xboxView(c, false) : pill(c, "SELECT", 0.24f, 1.4f, false);
+                return xbox ? xboxView(c, false) : nintendo ? switchSign(c, false) : pill(c, "SELECT", 0.24f, 1.4f, false);
             if (button == "start")
-                return xbox ? xboxView(c, true) : pill(c, "START", 0.24f, 1.4f, false);
+                return xbox ? xboxView(c, true) : nintendo ? switchSign(c, true) : pill(c, "START", 0.24f, 1.4f, false);
             if (button == "lb" || button == "rb")
-                return pill(c, xbox ? (button == "lb" ? "LB" : "RB") : (button == "lb" ? "L1" : "R1"), 0.3f, 1.3f, false);
+                return pill(c, xbox ? (button == "lb" ? "LB" : "RB") : nintendo ? (button == "lb" ? "L" : "R") : (button == "lb" ? "L1" : "R1"),
+                            0.3f, 1.3f, false);
             if (button == "lt" || button == "rt")
-                return pill(c, xbox ? (button == "lt" ? "LT" : "RT") : (button == "lt" ? "L2" : "R2"), 0.3f, 1.2f, true);
+                return pill(c, xbox ? (button == "lt" ? "LT" : "RT") : nintendo ? (button == "lt" ? "ZL" : "ZR") : (button == "lt" ? "L2" : "R2"),
+                            0.3f, 1.2f, true);
             if (button == "ls" || button == "rs")
                 return stick(c, family, button == "ls", 0, true);
             auto dirs = [](const std::string &suffix) {

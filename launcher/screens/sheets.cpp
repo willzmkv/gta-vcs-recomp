@@ -2090,12 +2090,18 @@ namespace screens
             }
             {
                 bool hov = false;
+                // the game's enhance.prompts values in the order shown (Nintendo Switch is the game's 5, after Keyboard)
+                static const int kPromptValues[] = {0, 1, 2, 3, 5, 4};
+                int promptIdx = indexInList(cfg.enhanceButtonPrompts, kPromptValues, 6, 0);
                 if (ui::vcCycleRow("#vc-aud-prompts", {tableR.x, y, tableR.w, rowH}, rowIdx++,
                                    tr("Ícones de Botões do Controle", "Controller Button Prompts"),
-                                   {"Original (PS2)", tr("Automático", "Automatic"), "PlayStation", "Xbox",
-                                    tr("Teclado e mouse", "Keyboard & mouse")}, // the game's enhance.prompts, in its order
-                                   cfg.enhanceButtonPrompts, &hov))
+                                   {"Original (PS2)", tr("Automático", "Automatic"), "PlayStation", "Xbox", "Nintendo Switch",
+                                    tr("Teclado e mouse", "Keyboard & mouse")},
+                                   promptIdx, &hov))
+                {
+                    cfg.enhanceButtonPrompts = kPromptValues[promptIdx];
                     changed = true;
+                }
                 if (hov)
                 {
                     inspector.title = tr("ÍCONES DE BOTÕES NA TELA", "ON-SCREEN CONTROLLER PROMPTS");

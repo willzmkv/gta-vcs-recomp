@@ -1,6 +1,6 @@
 // Button prompt glyphs drawn by code (game/vcs_prompts.h): gamepad buttons, keycaps and the mouse, from shapes and a
 // small stroke font - no image files. A glyph is named by a spec string:
-//   pad:<family>:<button>  family ps | xbox; button south east west north back start lb rb lt rt ls rs (stick clicks)
+//   pad:<family>:<button>  family ps | xbox | switch; button south east west north back start lb rb lt rt ls rs (stick clicks)
 //                          dpad dpad_u dpad_d dpad_l dpad_r dpad_ud dpad_lr, lstick[_u|_d|_l|_r|_ud|_lr], rstick[...]
 //   keys:<k>,<k>,...       keycaps in a row (platform::Key codes; mouse buttons and the wheel drawn as the mouse)
 //   mouse:move             the mouse with arrows (the mouse camera)
