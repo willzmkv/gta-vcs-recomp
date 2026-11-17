@@ -1817,3 +1817,13 @@ turned stick (the pull-in toward the player), through the game's own switch for 
   Effects), settings presets and platform work that rewrites our renderer / launcher (macOS) - no.
 - **MAJOR.MINOR.PATCH**: PATCH (1.0.x) for minor fixes; MINOR (1.x.0) for a merge of a new upstream build; MAJOR
   (x.0.0) for a complete improvement of our own. `VERSION` and the tag follow it (AGENTS.md, Release notes).
+
+## 2026-11-17 - HD Hands and HD Hud ship with every release (the user's decision)
+
+- **The two mods come with the game.** Raised before deciding: HD Hands is Vic's own model (`plr2.mdl` / `.xtx`)
+  changed, so a release carries a piece derived from the game's data, and HD Hud's licence is not known. The user's
+  answer: they belong with the release.
+- **Still not in the repository** (the rule above every other: no game code or data in git). They live in the fork's
+  `mods-pack` release as `VCS-Recomp-mods.zip`; `tools/release.py --mods FOLDER` copies `modloader/HD Hands` and
+  `modloader/HD Hud` into the release (`BUNDLED_MODS`), and the Windows CI job downloads the pack before the zip.
+  Checked 2026-11-17: a release made that way, 102 MB, both mods in `modloader/`, its launcher's self-test ok.
