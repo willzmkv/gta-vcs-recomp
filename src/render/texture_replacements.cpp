@@ -55,9 +55,11 @@ namespace render
             n.bits &= ~(1u << 14); // old PCSX2 TCC flag; modern PCSX2 ignores it too
             return true;
         }
+        // VCS_TEXTURE_CACHE_MB, else 512 MiB until the card's memory is known (setVideoMemory)
+        const char *cacheOverride() { return std::getenv("VCS_TEXTURE_CACHE_MB"); }
         size_t memoryBudget()
         {
-            const char *e = std::getenv("VCS_TEXTURE_CACHE_MB");
+            const char *e = cacheOverride();
             return size_t(e ? std::clamp(std::atoi(e), 64, 4096) : 512) * 1024 * 1024;
         }
         uint32_t le32(const std::vector<uint8_t> &b, size_t at)
@@ -219,7 +221,8 @@ namespace render
         std::vector<size_t> perSource; // names each source supplies (after priorities)
         std::unordered_map<Name, uint32_t, NameHash> names;
         std::unordered_set<uint32_t> shapes;
-        size_t gpuBudget = memoryBudget(), readyBytes = 0;
+        std::atomic<size_t> gpuBudget{memoryBudget()};
+        size_t readyBytes = 0;
         std::mutex mutex;
         std::condition_variable cv;
         std::deque<uint32_t> queue;
@@ -346,7 +349,7 @@ namespace render
             dds += m->files[i].dds;
         }
         std::fprintf(stderr, "[textures] indexed %zu replacements (%zu DDS, %zu PNG) from %zu source(s) (%u unsupported names, %u duplicates); cache %zu MiB%s\n",
-                     m->names.size(), dds, m->names.size() - dds, sources.size(), rejected, duplicates, m->gpuBudget >> 20,
+                     m->names.size(), dds, m->names.size() - dds, sources.size(), rejected, duplicates, m->gpuBudget.load() >> 20,
                      scanFailed ? "; a directory scan failed" : "");
         for (size_t s = 0; s < sources.size(); ++s)
             std::fprintf(stderr, "[textures]   %s (priority %d): %zu in use, %s\n", sources[s].name.c_str(), sources[s].priority,
@@ -412,6 +415,20 @@ namespace render
         m->cv.notify_all();
         return result;
     }
-    size_t TextureReplacements::budget() const { return m->gpuBudget; }
+    size_t TextureReplacements::budget() const { return m->gpuBudget.load(std::memory_order_relaxed); }
+    void TextureReplacements::setVideoMemory(uint64_t bytes)
+    {
+        // A pack's textures are large (2048 x 2048 BC7 with its levels: 5.3 MiB): 512 MiB held about a hundred, less than
+        // a busy street shows with the HD texture pack, so the cache dropped and read them again all the time - surfaces
+        // switching between the pack's texture and the game's (the player's flickering pavement, 2026-11-17)
+        if (cacheOverride() || bytes == 0)
+            return;
+        const size_t mb = std::clamp<uint64_t>(bytes * 35 / 100 >> 20, 512, 4096);
+        if (mb << 20 != m->gpuBudget.load())
+        {
+            m->gpuBudget.store(mb << 20);
+            std::fprintf(stderr, "[textures] cache %zu MiB (35%% of the card's %llu MiB)\n", mb, static_cast<unsigned long long>(bytes >> 20));
+        }
+    }
     void TextureReplacements::setBlockCompression(bool supported) { m->blockCompression.store(supported, std::memory_order_relaxed); }
 }

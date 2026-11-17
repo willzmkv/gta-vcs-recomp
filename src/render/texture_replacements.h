@@ -52,6 +52,9 @@ namespace render
         // Whether the device can make block-compressed textures (rhi::Device::blockCompression): set before the first
         // request; without it a block-compressed DDS keeps the original texture.
         void setBlockCompression(bool supported);
+        // The card's memory (rhi::Device::videoMemory): the cache becomes 35 % of it, 512 MiB to 4 GiB (VCS_TEXTURE_CACHE_MB
+        // wins; 0: unknown, kept)
+        void setVideoMemory(uint64_t bytes);
         // per source (in the order given): the names it supplies, after priorities
         const std::vector<size_t> &perSource() const;
         static constexpr uint64_t key(uint32_t id) { return 0xFFFF545800000000ull | id; }

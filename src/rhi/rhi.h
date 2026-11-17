@@ -316,6 +316,9 @@ namespace rhi
         virtual std::unique_ptr<Texture> createTextureLevels(const TextureDesc &desc, const void *const *levels, uint32_t levelCount) = 0;
         // Whether block-compressed textures can be made (D3D11: always, feature level 11; Vulkan: textureCompressionBC).
         virtual bool blockCompression() const { return true; }
+        // The card's own memory in bytes (DXGI's dedicated video memory; Vulkan's device-local heaps), 0 when unknown:
+        // what the texture packs' cache is sized by (render/texture_replacements.h).
+        virtual uint64_t videoMemory() const { return 0; }
         // True when createTexture (one level, with data, not a target) and createTextureLevels may be called from any
         // thread while the owner draws (D3D11: device creation calls are free-threaded; Vulkan: the image is made there
         // and its first contents staged, then recorded into the set-up commands at the owner's next submit).

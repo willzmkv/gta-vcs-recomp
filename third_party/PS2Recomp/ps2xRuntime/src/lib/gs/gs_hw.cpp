@@ -4405,6 +4405,7 @@ namespace
             m_replacements = pack ? std::move(pack)
                                   : std::make_shared<render::TextureReplacements>(std::vector<render::TextureReplacements::Source>{});
             m_replacements->setBlockCompression(m_blockCompression);
+            m_replacements->setVideoMemory(m_videoMemory);
             std::fprintf(stderr, "[textures] pack switched: %zu replacement textures dropped\n", dropped);
         }
 
@@ -4439,7 +4440,7 @@ namespace
                 ++m_texStateVersion; ++m_texEvictions;
                 m_bindCacheValid = false;
             }
-            if (m_replacementBytes > m_replacements->budget()) evictTextures();
+            if (m_replacementBytes > m_replacements->budget()) evictReplacements(); // [gta-recomp] over the packs' budget: their oldest only
             Frame &f = *m_frame;
             std::memcpy(f.privRegs, privRegs, sizeof(f.privRegs));
             static const bool debug = std::getenv("PS2X_HW_DEBUG") != nullptr;
@@ -4796,6 +4797,8 @@ namespace
                 return false;
             m_blockCompression = device.blockCompression(); // [gta-recomp] texture packs' block-compressed DDS
             m_replacements->setBlockCompression(m_blockCompression);
+            m_videoMemory = device.videoMemory(); // [gta-recomp] the packs' cache sized by the card's memory
+            m_replacements->setVideoMemory(m_videoMemory);
             // [gta-recomp] Texture helper threads: PS2X_HW_TEXTURE_HELPERS=N or PS2X_HW_EARLY_TEXTURES
             // Unset: auto-scaled to machine hardware concurrency (half of CPU cores, clamped to 2..8 on D3D11/D3D12)
             static const uint32_t helperCount = computeTextureHelpers(device.backend());
@@ -5452,7 +5455,7 @@ namespace
             f.cmds.push_back({CmdType::TexCreate, static_cast<uint32_t>(f.textures.size())});
             f.textures.push_back(std::move(tc));
             m_texLru[key] = m_frameIndex;
-            if (m_texLru.size() > kMaxTextures)
+            if (m_texLru.size() - m_replacementSizes.size() > kMaxTextures) // [gta-recomp] the game's own, by count (a pack's: by bytes)
                 evictTextures();
             return true;
         }
@@ -5590,21 +5593,54 @@ namespace
             Frame &f = *m_frame;
             // [gta-recomp] Evict by bytes as well as count. At 30 fps alternate VBlanks have no draws: protect the
             // two previous frames too, or a small budget evicts the entire active HUD on each empty VBlank.
-            for (size_t i = 0; i < byAge.size() &&
-                 (i < byAge.size() / 4 || m_replacementBytes > m_replacements->budget()); ++i)
+            // (a pack's textures are left to evictReplacements, by their bytes: dropped here by count, they were read
+            // from disk again at once - ~2.2 reads a texture over the cruise route whatever the pack's budget)
+            for (size_t i = 0, dropped = 0; i < byAge.size() && dropped < byAge.size() / 4; ++i)
             {
                 if (byAge[i].second + 2u >= m_frameIndex)
                     break;
-                f.cmds.push_back({CmdType::TexDelete, static_cast<uint32_t>(f.texDeletes.size())});
-                f.texDeletes.push_back(byAge[i].first);
-                ++m_texStateVersion;
-                m_texLru.erase(byAge[i].first);
-                if (auto size = m_replacementSizes.find(byAge[i].first); size != m_replacementSizes.end())
-                {
-                    m_replacementBytes -= size->second;
-                    m_replacementSizes.erase(size);
-                }
-                m_replacementAliases.erase(byAge[i].first);
+                if (m_replacementSizes.count(byAge[i].first))
+                    continue;
+                dropTexture(f, byAge[i].first);
+                ++dropped;
+            }
+        }
+
+        void dropTexture(Frame &f, uint64_t key)
+        {
+            f.cmds.push_back({CmdType::TexDelete, static_cast<uint32_t>(f.texDeletes.size())});
+            f.texDeletes.push_back(key);
+            ++m_texStateVersion;
+            m_texLru.erase(key);
+            if (auto size = m_replacementSizes.find(key); size != m_replacementSizes.end())
+            {
+                m_replacementBytes -= size->second;
+                m_replacementSizes.erase(size);
+            }
+            m_replacementAliases.erase(key);
+        }
+
+        // [gta-recomp] Over the packs' budget: their least recently drawn textures only, down to 90 % of it. It evicted a
+        // quarter of every texture (the game's own too) each time instead, and with a pack larger than its cache that
+        // was every frame on a busy street: the pack's textures dropped and read again, the surfaces switching between
+        // them and the game's (the player's flickering pavement and the frame rate there, 2026-11-17). The last two
+        // frames' are kept, as evictTextures keeps them.
+        void evictReplacements()
+        {
+            ++m_texEvictions;
+            std::vector<std::pair<uint64_t, uint64_t>> byAge;
+            byAge.reserve(m_replacementSizes.size());
+            for (const auto &[key, bytes] : m_replacementSizes)
+                if (auto lru = m_texLru.find(key); lru != m_texLru.end())
+                    byAge.push_back({key, lru->second});
+            std::sort(byAge.begin(), byAge.end(), [](auto &a, auto &b) { return a.second < b.second; });
+            const size_t target = m_replacements->budget() / 10u * 9u;
+            Frame &f = *m_frame;
+            for (size_t i = 0; i < byAge.size() && m_replacementBytes > target; ++i)
+            {
+                if (byAge[i].second + 2u >= m_frameIndex)
+                    break;
+                dropTexture(f, byAge[i].first);
             }
         }
 
@@ -5894,6 +5930,7 @@ namespace
             std::make_shared<render::TextureReplacements>(std::vector<render::TextureReplacements::Source>{});
         uint64_t m_packGeneration = 0;
         bool m_blockCompression = true; // the device's, for every pack
+        uint64_t m_videoMemory = 0;     // [gta-recomp] the device's memory (the packs' cache)
         uint8_t *m_textureVram = nullptr;
         std::vector<uint8_t> m_replacementHashBytes;
         std::vector<uint32_t> m_replacementScratch;

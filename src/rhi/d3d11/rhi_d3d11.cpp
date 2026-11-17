@@ -358,6 +358,7 @@ namespace rhi
                 DXGI_ADAPTER_DESC adapterDesc{};
                 adapter->GetDesc(&adapterDesc);
                 m_adapterName = narrow(adapterDesc.Description);
+                m_videoMemory = adapterDesc.DedicatedVideoMemory;
                 if (FAILED(adapter->GetParent(IID_PPV_ARGS(&factory))))
                 {
                     error = "no IDXGIFactory2";
@@ -404,6 +405,7 @@ namespace rhi
 
             Backend backend() const override { return Backend::D3D11; }
             const std::string &adapterName() const override { return m_adapterName; }
+            uint64_t videoMemory() const override { return m_videoMemory; }
 
             // ---- resources ----------------------------------------------------------------------------------------
             std::unique_ptr<Texture> createTexture(const TextureDesc &desc, const void *data, uint32_t rowPitch) override
@@ -1115,6 +1117,7 @@ namespace rhi
             UINT m_swapFlags = 0;
             uint32_t m_width = 0, m_height = 0;
             std::string m_adapterName;
+            uint64_t m_videoMemory = 0;
             D3DPipeline *m_pipeline = nullptr;
             float m_blendConstant[4] = {0, 0, 0, 0};
             // The state last given to the context: a draw's pipeline, buffers, textures and constants reach the driver only
