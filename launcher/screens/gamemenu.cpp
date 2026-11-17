@@ -3,7 +3,7 @@
 // launcher, with sample data, for the player to approve (--screenshot ... --screen gamemenu:N[S], S an Options tab).
 //
 // The look is GTA: Vice City - The Definitive Edition's options menu (the player's reference, 2026-11-17): the logo top
-// left, the pages as a column of words bottom left with a slanted pink bar under the one shown, a row of tabs top
+// left, the pages as a column of capitals bottom left with a slanted pink bar under the one shown, a row of tabs top
 // right and the rows under them, pastel and alternating, with chevrons and ring-knob sliders. Measured on a 1920x1080
 // picture of it and laid out in those units (u()), centred on wider windows. The launcher's fonts (the player's
 // choice: no Pricedown). Behind: the game's frame the player paused on, blurred and tinted cyan (in the game the real
@@ -48,7 +48,7 @@ namespace screens
                 const Rect r{ux(kColX + float(i) * (w + gap)), u(kTabY), u(w), u(kTabH)};
                 const bool on = int(i) == active;
                 rect(r, on ? rgb(kPink) : rgb(0xF0FBFC, 232));
-                text(kFontDisplay, 32, r, on ? 0xFFFFFF : kTeal, names[i], ui::Align::Centre);
+                text(kFontDisplay, 28, r, on ? 0xFFFFFF : kTeal, names[i], ui::Align::Centre);
             }
         }
 
@@ -182,7 +182,7 @@ namespace screens
 
         void pageGame()
         {
-            tabs({tr("salvar", "save"), tr("carregar", "load")}, 0);
+            tabs({tr("SALVAR", "SAVE"), tr("CARREGAR", "LOAD")}, 0);
             struct Slot
             {
                 const char *name, *when;
@@ -204,9 +204,9 @@ namespace screens
         void pageOptions()
         {
             launcher::GameConfig &cfg = shell.app->gameConfig;
-            const std::vector<std::string> names = {tr("controles", "controls"), tr("tela", "display"),
-                                                    tr("gráficos", "graphics"), tr("mundo", "world"),
-                                                    tr("população", "people"), tr("áudio", "audio")};
+            const std::vector<std::string> names = {tr("CONTROLES", "CONTROLS"), tr("TELA", "DISPLAY"),
+                                                    tr("GRÁFICOS", "GRAPHICS"), tr("MUNDO", "WORLD"),
+                                                    tr("POPULAÇÃO", "PEOPLE"), tr("ÁUDIO", "AUDIO")};
             const int sub = std::clamp(shell.configSubTab, 0, 5);
             tabs(names, sub);
             const char *yes = tr("Sim", "On"), *no = tr("Não", "Off");
@@ -305,9 +305,9 @@ namespace screens
         // the left column: the pages as words, the one shown on a slanted pink bar (the reference's 105..420 wide)
         void menuColumn(int active)
         {
-            const char *items[] = {tr("continuar", "resume"), tr("mapa", "map"),   tr("missão", "brief"),
-                                   tr("estatísticas", "stats"), tr("jogo", "game"), tr("opções", "options"),
-                                   "mods",                       "trainer"};
+            const char *items[] = {tr("CONTINUAR", "RESUME"), tr("MAPA", "MAP"),   tr("MISSÃO", "BRIEF"),
+                                   tr("ESTATÍSTICAS", "STATS"), tr("JOGO", "GAME"), tr("OPÇÕES", "OPTIONS"),
+                                   "MODS",                       "TRAINER"};
             const int n = 8;
             const float step = 62, last = 991, cx = 263;
             for (int i = 0; i < n; ++i)
@@ -322,8 +322,8 @@ namespace screens
                     quad(bar, rgb(kPink));
                 }
                 const Rect r{ux(cx - 170), u(cy - 26), u(340), u(52)};
-                text(kFontDisplay, 36, r.offset(u(2), u(2)), 0x0B6C80, items[i], ui::Align::Centre);
-                text(kFontDisplay, 36, r, 0xFFFFFF, items[i], ui::Align::Centre);
+                text(kFontDisplay, 33, r.offset(u(2), u(2)), 0x0B6C80, items[i], ui::Align::Centre);
+                text(kFontDisplay, 33, r, 0xFFFFFF, items[i], ui::Align::Centre);
             }
         }
     }
@@ -344,7 +344,7 @@ namespace screens
         if (imageInfo(ImageId::GameLogo).valid)
         {
             const float h = u(380), w = h * imageInfo(ImageId::GameLogo).aspect;
-            image({ux(263) - w * 0.5f, u(60), w, h}, ImageId::GameLogo);
+            image({ux(263) - w * 0.5f, u(100), w, h}, ImageId::GameLogo);
         }
 
         // where the story stands, above the tabs
