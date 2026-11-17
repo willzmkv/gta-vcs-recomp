@@ -152,9 +152,11 @@ class Check:
         for weapon, want in ((19, "25140006"), (21, "25440007"), (27, "25240004"), (30, "25440007"), (32, "25840007")):
             self.give(weapon)
             g.wait_frames(5)
-            walls[weapon] = ds().get("r2")
+            state = ds()
+            walls[weapon] = state.get("r2")
             if walls[weapon] != want:
-                walls[weapon] += "!=" + want
+                # why: the whole state (in a vehicle, out of the game, another weapon in hand...)
+                walls[weapon] = "%s!=%s (%s)" % (walls[weapon], want, " ".join("%s=%s" % kv for kv in state.items()))
         self.ok("trigger walls by gun: pistol, shotgun, SMG, sniper, rocket launcher", all("!" not in w for w in walls.values()),
                 str(walls))
         self.give(19)
