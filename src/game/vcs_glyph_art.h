@@ -16,4 +16,7 @@ namespace vcs::glyphart
     // Draws it into w x h pixels at dst (RGBA8, R in the low byte, `stride` pixels a row; straight alpha 0..255, the
     // colour of transparent pixels bled from their neighbours so filtering keeps no dark fringe).
     void render(const std::string &spec, int w, int h, uint32_t *dst, int stride);
+    // 0: Kenney's Input Prompts (CC0, embedded) where there is an icon; 1: everything drawn here (the classic look)
+    void setStyle(int style);
+    int style();
 }

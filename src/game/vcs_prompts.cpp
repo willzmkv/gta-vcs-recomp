@@ -1209,6 +1209,20 @@ namespace vcs::prompts
         s.env = "VCS_PROMPTS";
         s.onChange = [](int v) { g_setting.store(v, std::memory_order_relaxed); };
         settings::add(s);
+
+        s = {};
+        s.key = "enhance.prompt_style";
+        s.page = "Enhancements";
+        s.section = "Button prompts";
+        s.label = "Icon style";
+        s.help = "How the buttons look in the help text and the pause menu. Kenney: Kenney's Input Prompts, clean icons for "
+                 "every controller and key. Classic: the buttons drawn in the game's own style.";
+        s.type = settings::Type::Choice;
+        s.choices = {{"Kenney", 0}, {"Classic", 1}};
+        s.defaultValue = 0;
+        s.env = "VCS_PROMPT_STYLE";
+        s.onChange = [](int v) { glyphart::setStyle(v); };
+        settings::add(s);
     }
 
     void onHostFrame()
@@ -1218,7 +1232,7 @@ namespace vcs::prompts
             return;
         const int cellH = cellHeight();
         std::vector<std::string> specs = allSpecs();
-        std::string signature = std::to_string(cellH);
+        std::string signature = std::to_string(cellH) + "/" + std::to_string(glyphart::style()); // (a new style: a new atlas)
         for (const std::string &s : specs)
             signature += "|" + s;
         if (signature == g_requested)
