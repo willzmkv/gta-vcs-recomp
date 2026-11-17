@@ -226,7 +226,11 @@ namespace screens
                     // the launcher's controller page as it is (the real controllers, their callouts, the schemes)
                     const Rect area{ux(kColX), u(kRowY), u(kColR - kColX), u(1015 - kRowY)};
                     rect(area, rgb(0xDDF1F7));
-                    drawControls(area.inset(-px(38), -px(10)));
+                    // everything on it 15% larger than in the launcher (the player's look): the UI scale for this page
+                    const float scale = ui::state.scale;
+                    ui::state.scale = scale * 1.15f;
+                    drawControls(area.inset(-px(38), -px(10))); // its own margins, at the new scale: flush with the column
+                    ui::state.scale = scale;
                     return;
                 }
                 row(kRowY, i++, tr("Ajustar o layout do controle", "Adjust Control Layout"));
