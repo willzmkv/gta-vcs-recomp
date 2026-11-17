@@ -1022,7 +1022,11 @@ namespace launcher
             }
         };
         readIniFile(root / "launcher.ini");
-        settings.autoPresetDone = false; // the build folder's alone: the source folder's launcher.ini ships in releases
+        // the first-run choices are the build folder's alone: the source folder's launcher.ini ships in releases, and
+        // a language or an auto preset there would skip the language prompt and the hardware's preset for everyone
+        settings.autoPresetDone = false;
+        settings.languageChosen = false;
+        settings.language = Settings{}.language;
         readIniFile(build / "launcher.ini");
     }
 
@@ -1038,8 +1042,9 @@ namespace launcher
                 << "check_updates=" << (settings.checkUpdates ? 1 : 0) << "\n"
                 << "theme=" << settings.theme << "\n"
                 << "reduce_motion=" << (settings.reduceMotion ? 1 : 0) << "\n";
-            if (buildOnly) // the source folder's launcher.ini ships in releases: a first install must not read it as done
-                out << "auto_preset=" << (settings.autoPresetDone ? 1 : 0) << "\n";
+            if (!buildOnly) // the source folder's launcher.ini ships in releases: no first-run choice in it
+                return;
+            out << "auto_preset=" << (settings.autoPresetDone ? 1 : 0) << "\n";
             if (settings.languageChosen)
                 out << "language=" << settings.language << "\n";
         };
