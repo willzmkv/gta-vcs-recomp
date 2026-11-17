@@ -133,6 +133,8 @@ python tools/carmod_verify.py FOLDER [--native]               # converted VC veh
 python tools/weaponmod_check.py [OUT] [--folder DIR]          # a PC weapon mod in the game: each weapon in Vic's hand (front, side), the HUD icon
 python tools/weaponfit.py --vc VC/models/gta3.img [--check]   # where VCS holds each weapon against VC: the converters' WEAPON_PLACES
 python tools/fire_check.py [OUT] [--variant NAME=ENV=VAL]      # fire on screen: a burning car, the flame-thrower, a molotov (fire pixels counted)
+python tools/melee_check.py [OUT] [--spot police] [--variant NAME=ENV=VAL]   # Vic punches the street's own peds: hits, and
+                                                              # each ped in his near-ped list (slots from 70 up; game-internals 12h)
 python tools/menu_check.py [OUT]                              # the pause menu: Escape / Enter, the mouse (hover, click, sliders,
                                                               # map drag), the gamepad as before
 python tools/prompts_check.py [OUT]                           # button prompts: each glyph set in help text and the menu, the
@@ -283,6 +285,9 @@ itself ("GTA Vice City Stories Launcher vX"), so the file has no heading. Follow
   game streams the same model in at another address, so such keys never stop coming. The RSL recordings were one
   (bounded since 2026-11-10, `VCS_RSL_RECORDINGS_MB`); `VCS_RSL_WORLD_LOG=1` prints what they hold, `tools/memcheck.py`
   is the check (PERFORMANCE.md 31).
+- Peds that fists, bats and knives pass through while bullets and cars hurt them: melee only tries the attacker's
+  near peds (+0x6F8), and a ped the game's pointer check calls invalid is dropped from them every frame - the PS2's 70
+  slots compiled into it were the cause once (game-internals.md 12h, `VCS_PED_VALID`); `tools/melee_check.py` shows it.
 - First things to grep in a log: `[ee] thread N -> dormant`, `[guest-branch:unlisted-resume]`.
 
 ## Working style for long autonomous runs

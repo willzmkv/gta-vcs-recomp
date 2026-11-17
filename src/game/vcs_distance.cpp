@@ -1267,6 +1267,46 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             g_pedGetAt(rdram, ctx, runtime);
         }
 
+        // CPed::IsPedPointerValid_NotInWorld (FUN_0020C3C8) and CPed::IsPedPointerValid (FUN_0020C400) take GetHandle's
+        // slot (FUN_004701B8: (ped - entries) / 0xD20 by its multiply, -1 outside the pool) and compare it with the PS2's
+        // pool size compiled in (sltiu 0x47 / 0x46): every ped in a slot from 70 up was "not valid". IsPedPointerValid is
+        // what CPed::ScanForEntities' every-frame pass (FUN_001EEEB8) drops near peds by, and CWeapon::FireMelee
+        // (FUN_002C1D80) only tries the attacker's near peds (+0x6F8), so with the larger pool most of the street's peds
+        // could not be punched, clubbed or knifed - bullets and cars, which go through the world's collision, still hurt
+        // them (the player's report, 2026-11-15; game-internals.md 9h / 12h). Both done here against the pool's own size:
+        // GetHandle already gives -1 past it, so for the PS2's 70 slots the answers are the game's. VCS_PED_VALID=0: the
+        // original functions (A / B).
+        constexpr uint32_t kPedValidNotInWorld = 0x0020C3C8u, kPedValid = 0x0020C400u;
+        constexpr uint32_t kPlayers = 0x004E4910u, kPlayerInFocus = 0x004CD128u; // CWorld::Players (0x190 each), byte
+        std::atomic<uint64_t> g_pedValidCalls{0}, g_pedValidHigh{0}; // "pedvalid": calls, true answers for slots >= 70
+        bool pedSlotValid(uint32_t ped)
+        {
+            const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
+            const uint32_t slot = (ped - static_cast<uint32_t>(rd32(pool))) * 0xD8FD8FD9u >> 5;
+            const bool valid = slot < static_cast<uint32_t>(rd32(pool + 8u));
+            g_pedValidCalls.fetch_add(1, std::memory_order_relaxed);
+            if (valid && slot >= 70u)
+                g_pedValidHigh.fetch_add(1, std::memory_order_relaxed);
+            return valid;
+        }
+        PS2_GUEST_CC void pedValidNotInWorld(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+        {
+            g_rdram = rdram;
+            const uint32_t ped = GPR_U32(ctx, 4);
+            SET_GPR_U32(ctx, 2, ped != 0u && pedSlotValid(ped) ? 1u : 0u);
+            ctx->pc = GPR_U32(ctx, 31);
+        }
+        PS2_GUEST_CC void pedValid(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+        {
+            g_rdram = rdram;
+            const uint32_t ped = GPR_U32(ctx, 4);
+            // in the world (an entry list at +0xE4), or the player in focus (FindPlayerPed, FUN_0024A430)
+            const bool valid = ped != 0u && pedSlotValid(ped) &&
+                               (rd32(ped + 0xE4u) != 0 || static_cast<int32_t>(ped) == rd32(kPlayers + rd8(kPlayerInFocus) * 0x190u));
+            SET_GPR_U32(ctx, 2, valid ? 1u : 0u);
+            ctx->pc = GPR_U32(ctx, 31);
+        }
+
         // the pools' constructors, from CPools::Initialise only: larger pools when the main heap has the room.
         // VCS_POOLS=peds,vehicles sets the sizes for a test (0 or missing: the game's).
         bool largePools() { return true; }
@@ -2038,6 +2078,19 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             runtime.replaceFunction(kCarPoolCtor, &carPoolCtor);
         if ((g_pedGetAt = runtime.lookupFunction(kPedGetAt)))
             runtime.replaceFunction(kPedGetAt, &pedGetAt);
+        if (!(std::getenv("VCS_PED_VALID") && std::getenv("VCS_PED_VALID")[0] == '0'))
+        {
+            runtime.replaceFunction(kPedValidNotInWorld, &pedValidNotInWorld);
+            runtime.replaceFunction(kPedValid, &pedValid);
+        }
+        // pedvalid -> ok calls=N high=N: the ped pointer checks so far and their true answers for slots from 70 up
+        ps2control::addCommand("pedvalid", [](const std::string &, ps2control::Reply reply) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "ok calls=%llu high=%llu",
+                          static_cast<unsigned long long>(g_pedValidCalls.load(std::memory_order_relaxed)),
+                          static_cast<unsigned long long>(g_pedValidHigh.load(std::memory_order_relaxed)));
+            reply(text);
+        });
         if ((g_spotFinder = runtime.lookupFunction(kSpotFinder)))
             runtime.replaceFunction(kSpotFinder, &spotFinder);
         if ((g_pedSpotFinder = runtime.lookupFunction(kPedSpotFinder)))

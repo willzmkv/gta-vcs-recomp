@@ -1790,3 +1790,21 @@ turned stick (the pull-in toward the player), through the game's own switch for 
   real band never shrunk (T2_POPULATION_AND_DISTANT_LIFE_PLAN.md rules 1-2) were made because walkers met real peds
   with no handover. With the handover the meeting is the design. Cars keep the T2 rules. Off by default
   (`VCS_CROWD_BANDS`) until the handover is checked in pictures.
+
+## 2026-11-17 - Melee against the street's peds: the ped pointer checks follow the pool (the user's request; the choices are Claude's)
+
+- **A fix of the port's own enlargement, not an option.** The two ped pointer checks compared a slot with the PS2's 70
+  compiled in, so with the larger pool the peds from slot 70 up dropped out of every near-ped list and could not be hit
+  in melee (game-internals.md 12h). They check the pool's real size now; with 70 slots that is the game's answer, so
+  nothing to switch in the menu. `VCS_PED_VALID=0` brings the originals back for A / B.
+- **Host replacements of two leaf functions, no recompile.** Patching the `sltiu` immediates in overrides.toml would
+  need a full recompile on every player's machine and a fixed number; the replacements read the size the pool was
+  built with (240, or `VCS_POOLS`).
+- **The first attempt (2026-11-15) was dropped whole**, not repaired: it rested on claims the decompiled code does not
+  support (a limit of 4 living peds in the scan, bit 9 clear on the street's peds), forced bUsesCollision on any ped near
+  the player, moved the strike onto the nearest ped (hitting peds behind Vic), wrote CTimer::m_FrameCounter around a
+  hooked call (rule 2 of AGENTS.md) and edited `generated/` by hand. Its reverts left the working tree and the
+  generated files changed; both were put back (the two generated files match the main checkout's recompile byte for
+  byte, and the recompiler has not changed since).
+- **Checked with a rig of its own**, `tools/melee_check.py`: the street's own peds punched one by one at the police
+  spot, the player's card and settings, A / B in one run.

@@ -1205,6 +1205,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_POPIN_LOG=1` | every new car / ped within 120 m, in view or not (`worlddetail` popin= counts the ones in view) |
 | `VCS_POOLS=peds,vehicles` | the ped / vehicle pool sizes for a test (default 280 / 200 with Streaming memory above PS2, else 70 / 40) |
 | `VCS_CROWD_LOD=0` | no crowd LOD (far random peds processed every frame; A / B measures) |
+| `VCS_PED_VALID=0` | the game's own ped pointer checks (slots from 70 up "not valid": intangible to melee; game-internals.md 12h) |
 | `VCS_DISTANT_TRAFFIC=0..100` | Graphics > Distant traffic for one run (DISTANT_LIFE.md: decorative cars beyond the simulated traffic) |
 | `VCS_DISTANT_BAND=lo,hi` | debug: the distant traffic's band in metres (`40,200` brings the proxies near, to look at them) |
 | `VCS_DISTANT_TINT=1` | debug: the proxies (cars and walkers) lit red alone (told apart from the real ones in pictures) |

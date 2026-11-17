@@ -151,7 +151,8 @@ class Game:
                                 cwd=ROOT, env=e, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=not tc.IS_WINDOWS)
         gamectl.wait(port=port, timeout=90)
-        return cls(proc, os.path.join(ROOT, "build", "run", name + ".log"), port)
+        # where run.py writes it: the build folder's run/ (tools/build_dir.py may have moved it out of build/)
+        return cls(proc, os.path.join(tc.BUILD, "run", name + ".log"), port)
 
     def alive(self):
         return self.proc is None or self.proc.poll() is None

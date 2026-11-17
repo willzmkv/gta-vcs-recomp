@@ -2177,8 +2177,9 @@ its lists; `pokef` of the scale below with screenshots).
   that is not there gets "deleted". Found by elimination: not the heap (7 MB free), not slot use (a host CPool::New that
   never hands out slots >= 128 still froze), not the size readers (VCS_RWATCH on the pool's size: 23 sites); a new game
   never clears. The port gives that call (return `0x18F870`) an invalid handle for i >= 128 and builds 280 peds / 200
-  vehicles. No vehicle-size reader calls GetAt with an index. Two checks of the index elsewhere: `FUN_0020c3c8` (< 71)
-  and `FUN_0020c400` (< 70) answer false for higher slots.
+  vehicles. No vehicle-size reader calls GetAt with an index. Two checks of the index elsewhere: `FUN_0020c3c8` (< 71,
+  CPed::IsPedPointerValid_NotInWorld) and `FUN_0020c400` (< 70, CPed::IsPedPointerValid) answered false for higher
+  slots - which made the peds there intangible to melee (12h); both check against the pool's own size since 2026-11-17.
 - **Sector entries** (found by an Open Limit Adjuster style audit, `build/analysis/t2_agents/limits.md`): two CPools
   from the game image (GAME.DTZ, handed out by `FUN_003321f0`), not CPools::Initialise - **EntryInfoNode `*0x487A90`**
   (5200 x 0x14 {list, ptr node, sector, prev, next}, chained at an entity's +0xE4; New `FUN_00478bf0`, Delete
@@ -3669,6 +3670,49 @@ model keys: CRC32 of the upper-case name, xor 0xFFFFFFFF) and the disc's sectors
   hinge). Vic holds the Beretta through all of UMBB1 with both his finger joints at 43 degrees (his rest pose in the
   model: 0 / 20); relaxed hands spend most of the cutscenes at 20-25. Read by `build/analysis/hdped/work/mocap.py`
   (analysis; the game's data stays out of git).
+
+### 12h. Melee: the near peds, and the peds it could not hit (2026-11-17)
+
+The player's report (2026-11-15): many of the street's peds are intangible to fists, bats and knives while bullets and
+cars hurt them. Decompiled with `tools/eedecomp.py` (`build/analysis/decomp/melee.c`, `melee2.c`, `pedvalid.c`) and
+measured with `tools/melee_check.py`.
+
+- **CWeapon::FireMelee `FUN_002c1d80`**(weapon, attacker, strike position) tries **only the attacker's near peds**
+  (+0x6F8, 10, count +0x77A) and its near objects (+0x720, count +0x778) - no world scan, which is why bullets
+  (ProcessLineOfSight) and cars (collision) still hurt the same peds. A candidate is skipped when its entity flags'
+  **bit 9** (+0x48; bits 1-3 the type, 4-8 the status, so bit 9 is the first flag: bUsesCollision as in VC) is clear,
+  unless it is dead (0x3A) or driving (0x37); then a coarse test (strike position to the ped's position within the
+  weapon's radius, weapon info +0x20, plus the model's bounding radius) and the spheres of the shared ped collision
+  model (`*0x486560 + 0x60`, offsets not rotated) - or the bone spheres (`FUN_003291b8`) for a fallen / dying ped.
+- **CPed::ScanForEntities `FUN_001eeeb8`** fills the near peds one frame in 16 per ped (`(+0x48 >> 54) + frame & 15`):
+  every ped of the 80 m world cells around it (cell list +0x24, `FUN_00472698`) within 30 m x the short at `0x4883AE`
+  (1), sorted by distance (`FUN_001ef6c0`), the 10 nearest kept. Only **dead** peds are limited (4); peds in a vehicle
+  only when its +0x354 is 6 (FireMelee knocks riders off for 6 and 2: the bikes, as read). Every frame it then drops near peds farther than that or for which
+  **CPed::IsPedPointerValid `FUN_0020c400`** answers false.
+- **The cause**: IsPedPointerValid (and IsPedPointerValid_NotInWorld `FUN_0020c3c8`) took GetHandle's slot and
+  compared it with the PS2's 70 compiled in (`sltiu 0x46` / `0x47`). With the port's larger pool (9h) every ped in a slot
+  from 70 up was dropped from every near list each frame: never a melee target, and invalid wherever else the game asks
+  (AI targets, events). GetHandle `FUN_004701b8` already returns -1 past the pool's size, so both are done in
+  `vcs_distance.cpp` against the pool's own size (for 70 slots the answers are the game's); `VCS_PED_VALID=0` puts the
+  originals back. Their other callers (`build/analysis/decomp/pedvalid_callers.c`) each forget a ped the check calls
+  invalid, so they forgot the high slots' peds too: the tables at `0x4E1B74` (`FUN_00179b58`) and
+  `0x4E3464` (`FUN_00181208`), `0x70F324` (`FUN_003c1348`), another walk over a ped's near peds (`FUN_00307550`), and
+  `FUN_0020c348` (NotInWorld, then in a vehicle). Measured (`melee_check.py --targets 25 --variant fixed=
+  --variant original=VCS_PED_VALID=0`, the police spot, the player's card and settings): before, peds from slot 70 up
+  0 / 5 hit and in Vic's near list at 0 / 9 blows - in the world and in their cell's list, 0.8-1.2 m from him; after,
+  8 / 11 hit and listed at 14 / 14 (all slots 13 / 18; the misses are peds walking or turning out of the blow, below
+  slot 70 as often). The population is unchanged (police spot, 3 minutes: 99-115 peds either way, the bands' near /
+  middle counts alike).
+- A ped out of the world (+0xE4 empty) is no target either - on the PS2 too. Standing at the police spot 0-7 of ~115
+  are, each for under 8 s, all 42 m or more away: the population taking them out (bit 32, the bands past 100-200 m) or
+  just making them. Only a teleport puts the player next to one (melee_check does not count those).
+- A teleport moves a ped faster than the list follows: right after one the list is empty until the ped's next scan
+  frame (up to 16 frames). `melee_check.py` waits for it; the player never notices (walking 30 m takes seconds).
+- Not the cause (the first attempt's claims, 2026-11-15, checked and wrong): no limit of 4 living peds in the scan, the
+  16-frame scan is the PS2's own (and twice as frequent at 60 fps), and bit 9 is set on the street's peds (every target
+  measured had it). That attempt hooked ScanForEntities and FireMelee, wrote CTimer::m_FrameCounter around the call,
+  set bit 9 on any ped near the player and moved the strike onto the nearest ped - and edited `generated/` by hand
+  (never do: the reverts of its commits left those files changed until restored).
 
 ## 13. Open questions / next research targets
 
