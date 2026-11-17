@@ -36,6 +36,7 @@ namespace render
             {ImageId::ControllerPs5, "controllers/ps5.png", 2, 2540, 640, 480},
             {ImageId::ControllerSwitch, "controllers/switch.png", 650, 2540, 640, 480},
             {ImageId::ControllerKbMouse, "controllers/kb_mouse.png", 1300, 2540, 640, 480},
+            {ImageId::MenuBackdrop, "menu_backdrop.png", 2, 3030, 1600, 900},
         };
 
         bool anyLoaded = false;

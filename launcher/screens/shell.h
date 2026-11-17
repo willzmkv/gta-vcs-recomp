@@ -99,7 +99,7 @@ namespace screens
         int configSubTab = 0; // 0=Display, 1=Graphics, 2=World, 3=Population, 4=Audio & Game
         int modsSubTab = 0;   // 0=All, 1=Compatible, 2=Incompatible, 3=ModLoader
         int controlsSubTab = 0; // 0=PS2, 1=Xbox, 2=DS4, 3=DualSense, 4=Switch, 5=KB+Mouse, 6=Settings
-        int gameMenuTab = 0;    // the game menu's page (gamemenu.cpp): 0 Map .. 7 Trainer
+        int gameMenuTab = 0;    // the game menu's page (gamemenu.cpp): 0 Map .. 6 Trainer
         int gameMenuSlot = 0;   // its Game page's selected save slot
         int aboutSubTab = 0;  // 0=Project, 1=Disc & Install, 2=Memory Card
         bool buildConfirmOpen = false;

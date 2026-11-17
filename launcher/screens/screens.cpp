@@ -694,8 +694,11 @@ namespace screens
         else if (kind == "gamemenu")
         {
             g_forcedMode = 200; // the in-game menu's screens (gamemenu.cpp), full window
-            if (!which.empty() && which[0] >= '0' && which[0] <= '7')
+            if (!which.empty() && which[0] >= '0' && which[0] <= '6')
                 shell.gameMenuTab = which[0] - '0';
+            if (which.size() > 1 && which[1] >= '0' && which[1] <= '5')
+                shell.configSubTab = which[1] - '0'; // the Options page's tab
+
         }
     }
 

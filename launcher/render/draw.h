@@ -47,7 +47,8 @@ namespace render
         ControllerPs5 = 9,    // controllers/ps5.png
         ControllerSwitch = 10,// controllers/switch.png
         ControllerKbMouse = 11,// controllers/kb_mouse.png
-        Count = 12
+        MenuBackdrop = 12,     // menu_backdrop.png: a game frame for the game menu's mockups only (never shipped, .gitignore)
+        Count = 13
     };
 
     struct ImageEntry
