@@ -1812,7 +1812,8 @@ turned stick (the pull-in toward the player), through the game's own switch for 
 ## 2026-11-17 - Version numbers of this fork (the user's decision)
 
 - **1.0.0 is the first release of this fork**: our work plus the upstream (gothamor) changes that strictly improve the
-  game without changing ours (mission and frame-rate fixes, yes; upstream's settings presets or platform work that
-  rewrites our renderer / launcher, not unless chosen).
+  game without changing ours: bug fixes and what brings back the PS2's behaviour (missions, effects and timing above
+  30 fps, the recompiler) - yes; taste changes (0.3.0's weaker motion blur), new options (Reduce Post Processing
+  Effects), settings presets and platform work that rewrites our renderer / launcher (macOS) - no.
 - **MAJOR.MINOR.PATCH**: PATCH (1.0.x) for minor fixes; MINOR (1.x.0) for a merge of a new upstream build; MAJOR
   (x.0.0) for a complete improvement of our own. `VERSION` and the tag follow it (AGENTS.md, Release notes).
