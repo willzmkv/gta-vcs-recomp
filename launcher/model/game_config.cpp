@@ -153,7 +153,7 @@ namespace launcher
             else if (key == "pad.ds_triggers" || key == "dualsense.triggers") dualsenseTriggers = std::clamp(parseInt(val, dualsenseTriggers), 0, 1);
             else if (key == "pad.ds_lightbar" || key == "dualsense.lightbar") dualsenseLightbar = std::clamp(parseInt(val, dualsenseLightbar), 0, 2);
             else if (key == "pad.ds_police" || key == "dualsense.police_flash") dualsensePoliceFlash = std::clamp(parseInt(val, dualsensePoliceFlash), 0, 1);
-            else if (key == "pad.ds_speaker" || key == "dualsense.speaker") dualsenseSpeaker = std::clamp(parseInt(val, dualsenseSpeaker), 0, 1);
+            else if (key == "pad.ds_speaker" || key == "dualsense.speaker") dualsenseSpeaker = std::clamp(parseInt(val, dualsenseSpeaker), 0, 2);
             else if (key == "mouse.camera") mouseCamera = std::clamp(parseInt(val, mouseCamera), 0, 1);
             else if (key == "mouse.sensitivity") mouseSensitivity = std::clamp(parseInt(val, mouseSensitivity), 10, 400);
             else if (key == "mouse.free_aim") mouseFreeAim = std::clamp(parseInt(val, mouseFreeAim), 0, 1);

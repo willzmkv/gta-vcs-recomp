@@ -52,6 +52,9 @@ namespace platform
         uint32_t g_audioRate = 0, g_audioBufferFrames = 0; // the last audioOpen's, so it can reopen on another device
         std::string g_audioDeviceWant;                     // a playback device name to prefer (empty = the system default)
         std::string g_audioDeviceName;                     // the device the stream is on now
+        SDL_AudioStream *g_auxAudio = nullptr;             // audioOpenAux's second stream
+        AudioFill g_auxFill = nullptr;
+        std::vector<int16_t> g_auxScratch;
 
         // window placement (setStartPlacement / onPlacementChanged); main thread
         WindowPlacement g_startPlacement;
@@ -332,6 +335,16 @@ namespace platform
             g_audioScratch.resize(frames * 2u);
             g_audioFill(g_audioScratch.data(), frames);
             SDL_PutAudioStreamData(stream, g_audioScratch.data(), static_cast<int>(frames * 4u));
+        }
+
+        void SDLCALL auxAudioCallback(void *, SDL_AudioStream *stream, int additional, int)
+        {
+            const uint32_t frames = static_cast<uint32_t>(additional) / 4u;
+            if (!frames || !g_auxFill)
+                return;
+            g_auxScratch.resize(frames * 2u);
+            g_auxFill(g_auxScratch.data(), frames);
+            SDL_PutAudioStreamData(stream, g_auxScratch.data(), static_cast<int>(frames * 4u));
         }
 
         // ---- PNG ----------------------------------------------------------------------------------------------
@@ -990,6 +1003,51 @@ namespace platform
     }
 
     const char *audioDeviceName() { return g_audioDeviceName.c_str(); }
+
+    bool audioOpenAux(const char *nameSubstr, uint32_t rate, uint32_t bufferFrames, AudioFill fill)
+    {
+        audioCloseAux();
+        if (!audioAvailable() || !fill || !nameSubstr || !*nameSubstr)
+            return false;
+        auto lower = [](std::string s) { for (char &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; };
+        const std::string want = lower(nameSubstr);
+        SDL_AudioDeviceID device = 0;
+        std::string name;
+        int count = 0;
+        if (SDL_AudioDeviceID *ids = SDL_GetAudioPlaybackDevices(&count))
+        {
+            for (int i = 0; i < count && !device; ++i)
+                if (const char *n = SDL_GetAudioDeviceName(ids[i]); n && lower(n).find(want) != std::string::npos)
+                {
+                    device = ids[i];
+                    name = n;
+                }
+            SDL_free(ids);
+        }
+        if (!device)
+            return false;
+        (void)bufferFrames; // (the game's stream set the frames hint already)
+        SDL_AudioSpec spec{SDL_AUDIO_S16, 2, static_cast<int>(rate)};
+        g_auxFill = fill;
+        g_auxAudio = SDL_OpenAudioDeviceStream(device, &spec, auxAudioCallback, nullptr);
+        if (!g_auxAudio)
+        {
+            std::fprintf(stderr, "[platform] second audio output on %s: %s\n", name.c_str(), SDL_GetError());
+            g_auxFill = nullptr;
+            return false;
+        }
+        SDL_ResumeAudioStreamDevice(g_auxAudio);
+        std::fprintf(stderr, "[platform] second audio output -> %s\n", name.c_str());
+        return true;
+    }
+
+    void audioCloseAux()
+    {
+        if (g_auxAudio)
+            SDL_DestroyAudioStream(g_auxAudio);
+        g_auxAudio = nullptr;
+        g_auxFill = nullptr;
+    }
 
     bool writePng(const char *path, const uint8_t *rgb, int width, int height)
     {

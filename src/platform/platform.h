@@ -258,6 +258,10 @@ namespace platform
     // audioOpen). Returns whether sound is playing somewhere after the call.
     bool audioUseDevice(const char *nameSubstr);
     const char *audioDeviceName(); // the output device the stream is on ("" = none / the default)
+    // A second output, beside the game's (the police radio on a DualSense's speaker): a stream of its own on the
+    // playback device whose name contains `nameSubstr` - never the default device (false when none matches). Main thread.
+    bool audioOpenAux(const char *nameSubstr, uint32_t rate, uint32_t bufferFrames, AudioFill fill);
+    void audioCloseAux();
 
     // PNG (8-bit RGB, rows top-down) - screenshots.
     bool writePng(const char *path, const uint8_t *rgb, int width, int height);

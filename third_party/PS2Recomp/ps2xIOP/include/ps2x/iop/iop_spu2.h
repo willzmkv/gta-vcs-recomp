@@ -42,6 +42,11 @@ namespace ps2x::iop::detail
             return irq;
         }
         void setSampleSink(SampleSink sink) { m_sink = std::move(sink); }
+        // [gta-recomp] Aux voices: the voices of a core in `mask` leave the mix (dry, wet and reverb) and go, at their own
+        // volume times their core's main volume (and core 1's for core 0's), to the aux sink - a second output (the
+        // police radio on a DualSense's speaker, game/vcs_dualsense.cpp). No sink or no mask: the mix as it was.
+        void setAuxSink(SampleSink sink) { m_auxSink = std::move(sink); }
+        void setAuxVoices(uint32_t core, uint32_t mask) { m_auxMask[core & 1u] = mask & 0xFFFFFFu; }
 
     private:
         struct Sweep // a volume register's current level and its sweep envelope counter
@@ -117,6 +122,10 @@ namespace ps2x::iop::detail
         uint64_t m_nextSampleCycle = 0;
         SampleSink m_sink;
         std::vector<int16_t> m_outBuffer;
+        SampleSink m_auxSink;          // [gta-recomp] setAuxSink / setAuxVoices
+        uint32_t m_auxMask[2] = {0, 0};
+        std::vector<int16_t> m_auxBuffer;
+        int32_t m_auxL = 0, m_auxR = 0; // mixOne's aux output for the sample
         struct Stats // PS2X_TRACE_SPU2=1
         {
             uint64_t keyOns = 0, dmaBytes = 0, admaSamples = 0, irqs = 0, frames = 0;

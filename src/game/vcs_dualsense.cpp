@@ -11,8 +11,10 @@
 // of the trigger's ten zones. SDL never writes them, so this is the only place they are built.
 #include "game/vcs_dualsense.h"
 
+#include "game/vcs_sound.h"
 #include "platform/platform.h"
 #include "ps2_runtime.h"
+#include "runtime/ps2_audio_out.h"
 #include "runtime/ps2_control.h"
 #include "settings/settings.h"
 
@@ -25,6 +27,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
+#include <string>
+#include <vector>
 
 namespace vcs::dualsense
 {
@@ -187,7 +192,7 @@ namespace vcs::dualsense
             bool triggerDrive = false; // R2 / L2 are the throttle / brake (pad.trigger_drive): live resistance
             bool triggerShoot = false; // R2 fires on foot (pad.trigger_shoot): the gun's trigger feel
             bool driveFeel = false;    // the triggers resist while driving too (pad.ds_drive_feel; off: shooting only)
-            bool speaker = false;      // route the game's sound to the DualSense's speaker
+            int speaker = 0;           // pad.ds_speaker: 0 off, 1 all the game's sound, 2 the police radio only
             float brightness = 1.0f;   // 0..1
         };
         Config g_cfg;
@@ -201,7 +206,7 @@ namespace vcs::dualsense
             g_cfg.triggerDrive = settings::value("pad.trigger_drive") != 0;
             g_cfg.triggerShoot = settings::value("pad.trigger_shoot") != 0;
             g_cfg.driveFeel = settings::value("pad.ds_drive_feel") != 0;
-            g_cfg.speaker = settings::value("pad.ds_speaker") != 0;
+            g_cfg.speaker = std::clamp(settings::value("pad.ds_speaker"), 0, 2);
             g_cfg.brightness = std::clamp(settings::value("pad.ds_brightness") / 100.0f, 0.1f, 1.0f);
             applySpeaker();
         }
@@ -512,12 +517,42 @@ namespace vcs::dualsense
             }
         }
 
-        // Route the game's sound to the DualSense's speaker when the option is on and one is connected, else back to the
-        // system default. The DualSense's speaker is a playback device named "Wireless Controller" on Windows.
+        // The police radio's voices (the second output, game/vcs_sound.h): the sounds the scanner plays while the police
+        // are after you. VCS_DS_RADIO_SOUNDS=lo-hi[,lo-hi...] (hex sound ids) picks others, for finding them
+        // (VCS_SOUND_VOICES=1 logs every key-on).
+        std::atomic<int> g_wantedNow{0}; // the stars, for the pick (EE thread)
+        struct SoundRange
+        {
+            int lo, hi;
+        };
+        std::vector<SoundRange> g_radioSounds;
+
+        bool policeRadioPick(int sound, int, unsigned)
+        {
+            if (g_wantedNow.load(std::memory_order_relaxed) <= 0)
+                return false;
+            for (const SoundRange &r : g_radioSounds)
+                if (sound >= r.lo && sound <= r.hi)
+                    return true;
+            return false;
+        }
+
+        // The DualSense's speaker (a playback device named "Wireless Controller" on Windows), while one is connected:
+        // all the game's sound moved there (1), or only the police radio, on a second output beside the game's (2).
         void applySpeaker()
         {
-            const bool on = g_cfg.speaker && dsPadFamily() == GAMEPAD_FAMILY_PS5;
-            audioUseDevice(on ? "Wireless Controller" : nullptr);
+            const bool ds = dsPadFamily() == GAMEPAD_FAMILY_PS5;
+            audioUseDevice(ds && g_cfg.speaker == 1 ? "Wireless Controller" : nullptr);
+            if (ds && g_cfg.speaker == 2)
+            {
+                if (!ps2AudioAuxActive() && ps2AudioAuxOpen("Wireless Controller"))
+                    vcs::setSecondOutput(&policeRadioPick);
+            }
+            else if (ps2AudioAuxActive())
+            {
+                vcs::setSecondOutput(nullptr);
+                ps2AudioAuxClose();
+            }
         }
 
         bool g_released = true; // true after reset(): nothing on the pad
@@ -608,10 +643,13 @@ namespace vcs::dualsense
         s.page = "Gamepad";
         s.section = "DualSense";
         s.label = "Sound through the controller";
-        s.help = "Play the game's sound - the radio, the police scanner, everything - through the DualSense's built-in "
-                 "speaker instead of your speakers or headphones. The controller's speaker is small, so it sounds "
-                 "thinner. Needs the DualSense connected; turns itself off when it is unplugged.";
-        s.type = Type::Toggle;
+        s.help = "Play the game's sound through the DualSense's built-in speaker instead of your speakers or headphones. "
+                 "The controller's speaker is small, so it sounds thinner. Needs the DualSense connected; turns itself "
+                 "off when it is unplugged.";
+        s.type = Type::Choice;
+        // (1 was the toggle's on: saved values keep it. 2, the police radio alone on the controller, waits for a
+        // radio: VCS has none - the second output is ready, VCS_DS_RADIO_SOUNDS picks its voices; DECISIONS.md)
+        s.choices = {{"Off", 0}, {"All sound", 1}};
         s.defaultValue = 0;
         s.onChange = onChange;
         settings::add(s);
@@ -620,6 +658,19 @@ namespace vcs::dualsense
     void install(PS2Runtime &runtime)
     {
         g_rdram = runtime.memory().getRDRAM();
+        if (const char *env = std::getenv("VCS_DS_RADIO_SOUNDS"))
+        {
+            g_radioSounds.clear();
+            std::stringstream ss(env);
+            std::string item;
+            while (std::getline(ss, item, ','))
+            {
+                const size_t dash = item.find('-');
+                const int lo = static_cast<int>(std::strtol(item.c_str(), nullptr, 16));
+                const int hi = dash == std::string::npos ? lo : static_cast<int>(std::strtol(item.c_str() + dash + 1, nullptr, 16));
+                g_radioSounds.push_back({lo, hi});
+            }
+        }
         if (const char *env = std::getenv("VCS_WANTED_OFF"))
         {
             const uint32_t off = static_cast<uint32_t>(std::strtoul(env, nullptr, 0));
@@ -689,6 +740,9 @@ namespace vcs::dualsense
 
         const GameState game = gameState();
         noteShot(game); // (also in hidden runs: the `dualsense` command counts the shots)
+        const int wantedNow = game.inGame ? game.wanted : 0;
+        if (g_wantedNow.exchange(wantedNow, std::memory_order_relaxed) != wantedNow && std::getenv("VCS_SOUND_VOICES"))
+            std::fprintf(stderr, "[sound-wanted] %d stars\n", wantedNow); // (finding the police radio's sounds)
 
         const bool canLED = gamepadHasLED();
         const bool canTriggers = gamepadHasTriggerEffects();

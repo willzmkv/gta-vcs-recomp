@@ -100,7 +100,7 @@ namespace launcher
         int dualsenseTriggers = 1;      // Adaptive triggers
         int dualsenseLightbar = 2;      // 0 = Off, 1 = Health, 2 = Vice Pink
         int dualsensePoliceFlash = 1;   // 0 = Off, 1 = On
-        int dualsenseSpeaker = 0;       // 0 = Off, 1 = On
+        int dualsenseSpeaker = 0;       // pad.ds_speaker: 0 = Off, 1 = All sound, 2 = Police radio
         int mouseCamera = 1;            // 0 = Off, 1 = On
         int mouseSensitivity = 100;     // 10..400%
         int mouseFreeAim = 0;           // 0 = Off, 1 = On

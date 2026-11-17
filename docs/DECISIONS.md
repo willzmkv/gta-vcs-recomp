@@ -1830,3 +1830,12 @@ turned stick (the pull-in toward the player), through the game's own switch for 
   `mods-pack` release as `VCS-Recomp-mods.zip`; `tools/release.py --mods FOLDER` copies `modloader/HD Hands` and
   `modloader/HD Hud` into the release (`BUNDLED_MODS`), and the Windows CI job downloads the pack before the zip.
   Checked 2026-11-17: a release made that way, 102 MB, both mods in `modloader/`, its launcher's self-test ok.
+
+## 2026-11-17: the police radio on the DualSense's speaker waits for a radio
+
+The player asked for the police radio alone on the controller's speaker while chased (the rest of the game on the
+speakers). The second output is built and kept (the SPU2's aux voices, `ps2AudioAux*`, `vcs::setSecondOutput`; pad.ds_speaker
+value 2), but VCS has no police scanner: two sessions of the player's play with every voice and stream logged
+(`VCS_SOUND_VOICES=1`) showed no radio sound or stream. The choice is hidden until there is one. Next, after 1.0.0: VC's
+police radio read from the player's own Vice City PC install (never shipped) and put together as VC does (crime, area,
+vehicle phrases) - the player's idea.

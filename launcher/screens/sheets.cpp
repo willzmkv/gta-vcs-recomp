@@ -1307,10 +1307,16 @@ namespace screens
             }
             {
                 bool hov = false;
+                // the game's pad.ds_speaker values in the order shown (2, the police radio, waits for one: VCS has none)
+                static const int kSpeakerValues[] = {0, 1};
+                int speakerIdx = indexInList(cfg.dualsenseSpeaker, kSpeakerValues, 2, 0);
                 if (ui::vcCycleRow("#ctrl-opt-ds-spk", {tableR.x, y, tableR.w, rowH}, rowIdx++,
                                    tr("Áudio no Alto-Falante do Controle", "Controller Speaker Audio"),
-                                   {tr("Desligado", "Off"), tr("Ligado", "On")}, cfg.dualsenseSpeaker, &hov))
+                                   {tr("Desligado", "Off"), tr("Todo o som", "All sound")}, speakerIdx, &hov))
+                {
+                    cfg.dualsenseSpeaker = kSpeakerValues[speakerIdx];
                     changed = true;
+                }
                 if (hov)
                 {
                     inspector.title = tr("ALTO-FALANTE DO CONTROLE", "CONTROLLER SPEAKER");

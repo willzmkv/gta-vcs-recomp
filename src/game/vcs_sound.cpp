@@ -389,6 +389,8 @@ namespace vcs
                     const int32_t id = blockWord(9 + v), bank = blockWord(9 + kVoices + v);
                     if (id != -1 && bank != -1)
                     {
+                        m_voiceSound[v] = id;
+                        m_voiceBank[v] = bank;
                         if (bank < 0 || bank >= static_cast<int32_t>(kBanks) || m_bankLoaded[bank] != 1)
                         {
                             blocked[core] |= 1u << index;
@@ -448,7 +450,45 @@ namespace vcs
                         m_sd.setSwitch(core | 0x1500, on);
                     }
                 }
+                // (ours) VCS_SOUND_VOICES=1: every sound a voice is given, with its bank (finding a sound's id: play it)
+                static const bool voiceLog = std::getenv("VCS_SOUND_VOICES") != nullptr;
+                if (voiceLog)
+                    for (uint32_t v = 0; v < kVoices; ++v)
+                        if (blockWord(9 + v) != -1 && blockWord(9 + kVoices + v) != -1)
+                            std::fprintf(stderr, "[sound-voice] voice %u sound 0x%x bank 0x%x volume %d pan %d\n", v, m_voiceSound[v],
+                                         m_voiceBank[v], blockWord(9 + 6 * kVoices + v), blockWord(9 + 5 * kVoices + v));
+                pickAux();
             }
+
+            // the second output's voices (setSecondOutput): asked at every voice block
+            void pickAux()
+            {
+                uint32_t mask[2] = {0, 0};
+                if (m_pick)
+                    for (uint32_t v = 0; v < kVoices; ++v)
+                        if (m_voiceSound[v] != -1 && m_pick(m_voiceSound[v], m_voiceBank[v], v))
+                        {
+                            uint32_t core, index;
+                            voiceOf(v, core, index);
+                            mask[core] |= 1u << index;
+                        }
+                m_spu.setAuxVoices(0, mask[0]);
+                m_spu.setAuxVoices(1, mask[1]);
+            }
+
+        public:
+            void setPick(VoicePick pick)
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_pick = pick;
+                if (pick)
+                    m_spu.setAuxSink([](const int16_t *stereo, uint32_t frames) { ps2AudioAuxPush(stereo, frames); });
+                else
+                    m_spu.setAuxSink(nullptr);
+                pickAux();
+            }
+
+        private:
 
             // 0x4524: bank `bank` wanted (mode 0xFF loads it). Level banks 3-0x27 share one SPU2 area, building banks
             // 0x28-0x3C two slots (the quieter one is replaced), 0x3D-0x42 one area.
@@ -773,6 +813,9 @@ namespace vcs
             {
                 if (m_state != 0 || file < 0 || positionMs < 0)
                     return false;
+                static const bool voiceLog = std::getenv("VCS_SOUND_VOICES") != nullptr; // (ours: with the voices)
+                if (voiceLog && file < static_cast<int32_t>(kMusicFiles))
+                    std::fprintf(stderr, "[sound-stream] open %d %s at %d ms\n", file, m_module.string(0x6410 + file * 0x28).c_str(), positionMs);
                 m_state = 0x80200;
                 m_file = file;
                 m_startMs = static_cast<uint32_t>(positionMs);
@@ -1313,6 +1356,10 @@ namespace vcs
             std::array<uint32_t, 5> m_slotAddr{};        // 0x9FA0
             std::array<int32_t, 5> m_slotSound{};        // 0xA120
             std::array<uint8_t, kBlockBytes> m_block{};  // 0x8360: the last voice block
+            // (ours) each voice's sound and bank since its last key-on: the second output's choice (setSecondOutput)
+            std::array<int32_t, kVoices> m_voiceSound = [] { std::array<int32_t, kVoices> a; a.fill(-1); return a; }();
+            std::array<int32_t, kVoices> m_voiceBank = m_voiceSound;
+            VoicePick m_pick = nullptr;
 
             // music
             struct StreamBuffer
@@ -1470,6 +1517,12 @@ namespace vcs
             std::fflush(stderr);
             std::_Exit(0);
         }
+    }
+
+    void setSecondOutput(VoicePick pick)
+    {
+        if (g_engine)
+            g_engine->setPick(pick);
     }
 
     bool installSoundHooks(PS2Runtime &)

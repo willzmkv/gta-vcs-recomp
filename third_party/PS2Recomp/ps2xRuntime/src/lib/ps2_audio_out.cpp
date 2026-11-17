@@ -241,12 +241,92 @@ void ps2AudioShutdown()
 {
     if (!g_started)
         return;
+    ps2AudioAuxClose();
     platform::audioClose();
     g_started = false;
 }
 
 float ps2AudioQueuedMs() { return g_queuedMs.load(std::memory_order_relaxed); }
 uint64_t ps2AudioUnderrunCount() { return g_underrunsTotal.load(std::memory_order_relaxed); }
+
+// [gta-recomp] The second output: a ring of its own, no drift resampling (a speaker's few voices: a held sample or a
+// dropped one is not heard); it starts playing at 60 ms queued and keeps at most 250 ms. The player's volume and mute
+// apply to it too.
+namespace
+{
+    std::mutex g_auxMutex;
+    std::vector<int16_t> g_auxRing(kCapacityFrames * 2u);
+    size_t g_auxRead = 0, g_auxWrite = 0, g_auxQueued = 0;
+    bool g_auxPrimed = false;
+    std::atomic<bool> g_auxOpen{false};
+
+    void auxCallback(int16_t *out, uint32_t frames)
+    {
+        std::lock_guard<std::mutex> lock(g_auxMutex);
+        if (!g_auxPrimed && g_auxQueued >= kRate * 6u / 100u)
+            g_auxPrimed = true;
+        const int gain = g_muted.load(std::memory_order_relaxed) ? 0 : g_masterGain.load(std::memory_order_relaxed);
+        for (uint32_t i = 0; i < frames; ++i)
+        {
+            if (!g_auxPrimed || !g_auxQueued)
+            {
+                g_auxPrimed = false;
+                out[i * 2u] = out[i * 2u + 1u] = 0;
+                continue;
+            }
+            for (int c = 0; c < 2; ++c)
+                out[i * 2u + c] = static_cast<int16_t>((static_cast<int64_t>(g_auxRing[g_auxRead * 2u + c]) * gain) >> 16);
+            g_auxRead = (g_auxRead + 1u) % kCapacityFrames;
+            --g_auxQueued;
+        }
+    }
+}
+
+bool ps2AudioAuxOpen(const char *deviceSubstr)
+{
+    ps2AudioAuxClose();
+    if (!g_started)
+        return false;
+    {
+        std::lock_guard<std::mutex> lock(g_auxMutex);
+        g_auxRead = g_auxWrite = g_auxQueued = 0;
+        g_auxPrimed = false;
+    }
+    const bool ok = platform::audioOpenAux(deviceSubstr, kRate, 1024, &auxCallback);
+    g_auxOpen.store(ok, std::memory_order_relaxed);
+    return ok;
+}
+
+void ps2AudioAuxClose()
+{
+    if (!g_auxOpen.exchange(false, std::memory_order_relaxed))
+        return;
+    platform::audioCloseAux();
+}
+
+bool ps2AudioAuxActive() { return g_auxOpen.load(std::memory_order_relaxed); }
+
+void ps2AudioAuxPush(const int16_t *stereo, uint32_t frames)
+{
+    if (!g_auxOpen.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> lock(g_auxMutex);
+    for (uint32_t i = 0; i < frames; ++i)
+    {
+        g_auxRing[g_auxWrite * 2u] = stereo[i * 2u];
+        g_auxRing[g_auxWrite * 2u + 1u] = stereo[i * 2u + 1u];
+        g_auxWrite = (g_auxWrite + 1u) % kCapacityFrames;
+        if (g_auxQueued < kCapacityFrames)
+            ++g_auxQueued;
+        else
+            g_auxRead = (g_auxRead + 1u) % kCapacityFrames;
+    }
+    while (g_auxQueued > kRate / 4u) // 250 ms at most
+    {
+        g_auxRead = (g_auxRead + 1u) % kCapacityFrames;
+        --g_auxQueued;
+    }
+}
 
 bool ps2AudioMovieActive() { return g_started; }
 
