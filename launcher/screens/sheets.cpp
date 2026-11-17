@@ -221,6 +221,16 @@ namespace screens
         }
     }
 
+    // the Vice City sub-tab bar and table stripes for other screens (the game menu, gamemenu.cpp)
+    void vcCategoryBar(Rect barR, const char *const *labels, int count, int &activeTab)
+    {
+        drawVcCategoryBar(barR, labels, count, activeTab);
+    }
+    void vcFillStripes(Rect tableR, float currentY, float rowH, int &rowIdx)
+    {
+        fillRemainingVcStripes(tableR, currentY, rowH, rowIdx);
+    }
+
     // =================================================================================================================
     // TAB 2: MODS — Classic 1980s GTA: Vice City Menu Style
     // Layout requested by user: [BOTÃO DE LIGA/DESLIGA] - [NOME DO MOD] - [SLIDER ROSA] on the same page

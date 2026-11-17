@@ -691,6 +691,12 @@ namespace screens
         }
         else if (kind == "gallery")
             g_forcedMode = 100;
+        else if (kind == "gamemenu")
+        {
+            g_forcedMode = 200; // the in-game menu's screens (gamemenu.cpp), full window
+            if (!which.empty() && which[0] >= '0' && which[0] <= '7')
+                shell.gameMenuTab = which[0] - '0';
+        }
     }
 
     void requestQuit(App &app)
@@ -778,6 +784,12 @@ namespace screens
             ui::wakeAt((steps + 1) * 0.8);
         }
 
+        if (g_forcedMode == 200)
+        {
+            drawGameMenu(window);
+            drawToasts(window);
+            return;
+        }
         if (g_forcedMode == 100)
         {
             drawBackdrop(window, 0);

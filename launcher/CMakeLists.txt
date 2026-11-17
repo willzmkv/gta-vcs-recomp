@@ -32,6 +32,7 @@ set(VCS_LAUNCHER_COMMON
     screens/sheets.cpp
     screens/overlays.cpp
     screens/gallery.cpp
+    screens/gamemenu.cpp
     model/tasks.cpp
     model/game_config.cpp
     model/hardware.cpp

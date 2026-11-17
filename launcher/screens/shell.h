@@ -99,6 +99,8 @@ namespace screens
         int configSubTab = 0; // 0=Display, 1=Graphics, 2=World, 3=Population, 4=Audio & Game
         int modsSubTab = 0;   // 0=All, 1=Compatible, 2=Incompatible, 3=ModLoader
         int controlsSubTab = 0; // 0=PS2, 1=Xbox, 2=DS4, 3=DualSense, 4=Switch, 5=KB+Mouse, 6=Settings
+        int gameMenuTab = 0;    // the game menu's page (gamemenu.cpp): 0 Map .. 7 Trainer
+        int gameMenuSlot = 0;   // its Game page's selected save slot
         int aboutSubTab = 0;  // 0=Project, 1=Disc & Install, 2=Memory Card
         bool buildConfirmOpen = false;
         bool c64TerminalOpen = false;
@@ -188,5 +190,8 @@ namespace screens
     void drawDialogs(Rect window);
     void drawToasts(Rect window);
     void drawGallery(Rect r);
+    void drawGameMenu(Rect window); // the in-game menu (T12), full screen; --screen gamemenu:N shows it
+    void vcCategoryBar(Rect barR, const char *const *labels, int count, int &activeTab);
+    void vcFillStripes(Rect tableR, float currentY, float rowH, int &rowIdx);
     void drawFolderBody(Rect r, float &y);   // the folder step's content, also the Folder sheet's
 }
