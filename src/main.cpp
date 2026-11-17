@@ -686,15 +686,10 @@ namespace
         s.type = Type::Toggle;
         s.defaultValue = 0;
         s.env = "VCS_POST_PROCESS";
-        s.onChange = [](int v) {
-            present::setPostProcessEnabled(v != 0);
-            // when the toggle is switched on and exposure is still at its default, give a
-            // visible nudge so the effect is immediately apparent; switching off restores it
-            if (v != 0 && settings::value("graphics.exposure") == 100)
-                settings::set("graphics.exposure", 120);
-            else if (v == 0)
-                settings::set("graphics.exposure", 100);
-        };
+        // the exposure stays as set (100, the original's, by default): switching this on used to push it to 120, and
+        // since the launcher's presets switch it on, players ended up with a brighter picture than the PS2's (the
+        // player's request, 2026-11-17)
+        s.onChange = [](int v) { present::setPostProcessEnabled(v != 0); };
         settings::add(s);
 
         s = {};
