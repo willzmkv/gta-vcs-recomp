@@ -70,6 +70,25 @@ def repository():
     return m.group(1) if m else ""
 
 
+# the mods every release carries (the player's decision, DECISIONS.md 2026-11-17): not in the repository - a
+# release takes them from --mods (CI: the fork's `mods-pack` release asset)
+BUNDLED_MODS = ("HD Hands", "HD Hud")
+
+
+def copy_mods(stage, folder):
+    """The bundled mods from folder (a modloader/ or its parent) into the release's modloader/."""
+    base = os.path.join(folder, "modloader") if os.path.isdir(os.path.join(folder, "modloader")) else folder
+    for mod in BUNDLED_MODS:
+        src = os.path.join(base, mod)
+        if not os.path.isdir(src):
+            tc.fail("the bundled mod %r is not in %s" % (mod, base), "release_mods")
+        dst = os.path.join(stage, "modloader", mod)
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        print("[release] bundled mod: %s" % mod)
+
+
 def copy_source(stage, ref, worktree):
     if worktree:
         names = git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
@@ -78,7 +97,7 @@ def copy_source(stage, ref, worktree):
                 continue
             if name.startswith("modloader/"):
                 sub = name[len("modloader/"):].split("/")[0]
-                if sub not in ("HD Hands", "HD Hud", "modloader.ini", "README.md"):
+                if sub not in BUNDLED_MODS + ("modloader.ini", "README.md"):
                     continue
             src = os.path.join(tc.ROOT, name)
             if not os.path.isfile(src):
@@ -385,6 +404,7 @@ def main():
     ap.add_argument("--out", default=DIST)
     ap.add_argument("--platform", choices=("windows", "linux"), default="windows" if tc.IS_WINDOWS else "linux")
     ap.add_argument("--allow-new-glibc", action="store_true", help="Linux: a launcher built on a newer system (tests)")
+    ap.add_argument("--mods", help="a folder holding modloader/HD Hands and HD Hud: the mods every release carries")
     ap.add_argument("--standalone-exe", action="store_true", help="Windows: also emit a single self-extracting VCSLauncher .exe with the project embedded")
     a = ap.parse_args()
     if (a.platform == "windows") != tc.IS_WINDOWS:
@@ -428,6 +448,8 @@ def main():
 
     print("[release] %s: source %s" % (name, "working tree" if a.worktree else ref))
     copy_source(stage, ref, a.worktree)
+    if a.mods:
+        copy_mods(stage, a.mods)
     with open(os.path.join(stage, "VERSION"), "w", encoding="utf-8") as f:
         f.write(version + "\n")
     launcher = a.launcher or build_launcher()

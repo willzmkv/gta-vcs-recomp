@@ -131,9 +131,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { "no generated code here (expected)" }
           exit 0
 
+      # the mods every release carries (HD Hands, HD Hud): not in the repository, they live in this fork's
+      # `mods-pack` release (DECISIONS.md 2026-11-17)
+      - name: Bundled mods
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download mods-pack --repo ${{ github.repository }} --pattern "VCS-Recomp-mods.zip" --dir "${{ runner.temp }}"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Expand-Archive -Path "${{ runner.temp }}/VCS-Recomp-mods.zip" -DestinationPath "${{ runner.temp }}/mods"
+
       - name: Release zip
         if: startsWith(github.ref, 'refs/tags/v')
-        run: python tools/release.py --ref ${{ github.ref_name }} --launcher VCSLauncher.exe
+        run: python tools/release.py --ref ${{ github.ref_name }} --launcher VCSLauncher.exe --mods "${{ runner.temp }}/mods"
 
       - uses: actions/upload-artifact@v4
         if: startsWith(github.ref, 'refs/tags/v')
