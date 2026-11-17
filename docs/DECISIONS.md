@@ -1808,3 +1808,11 @@ turned stick (the pull-in toward the player), through the game's own switch for 
   byte, and the recompiler has not changed since).
 - **Checked with a rig of its own**, `tools/melee_check.py`: the street's own peds punched one by one at the police
   spot, the player's card and settings, A / B in one run.
+
+## 2026-11-17 - Version numbers of this fork (the user's decision)
+
+- **1.0.0 is the first release of this fork**: our work plus the upstream (gothamor) changes that strictly improve the
+  game without changing ours (mission and frame-rate fixes, yes; upstream's settings presets or platform work that
+  rewrites our renderer / launcher, not unless chosen).
+- **MAJOR.MINOR.PATCH**: PATCH (1.0.x) for minor fixes; MINOR (1.x.0) for a merge of a new upstream build; MAJOR
+  (x.0.0) for a complete improvement of our own. `VERSION` and the tag follow it (AGENTS.md, Release notes).

@@ -211,6 +211,8 @@ itself ("GTA Vice City Stories Launcher vX"), so the file has no heading. Follow
   Arms:`). Never use function names, addresses, environment variables or internal file names.
 - **Be honest:** if a fix couldn't be reproduced here, say it's hoped to fix the problem. Tell updaters about costs:
   a full rebuild, a large download (with its size), or a feature they'll only see from the next update on.
+- **Version numbers** (the user's rule, DECISIONS.md 2026-11-17): PATCH for minor fixes, MINOR for a merge of a new
+  upstream (gothamor) build, MAJOR for a complete improvement of our own; 1.0.0 is this fork's first release.
 - **Before tagging:** bump `VERSION` to the tag's number, and commit the notes in the same commit. Never put `[skip ci]`
   in the message of the commit the `v*` tag points at: GitHub then skips the tag's workflow, so no release is made.
   If that happens anyway, `gh workflow run launcher.yml --ref vX` builds and publishes it.
