@@ -56,6 +56,7 @@ namespace launcher
         std::string theme = "system";         // system (Windows' app mode), light, dark
         std::string language = "pt";          // "pt" (Português do Brasil) or "en" (English)
         bool languageChosen = false;          // true once the user selected a language on first launch
+        bool autoPresetDone = false;          // the first install's graphics preset was chosen from the hardware (hardware.h)
     };
 
     class App
@@ -140,6 +141,7 @@ namespace launcher
 
         GameConfig gameConfig;
         void saveGameConfig();
+        void applyFirstInstallPreset(); // once: the graphics preset from the PC's hardware (hardware.h)
         void refreshMods();
         std::filesystem::path assetsFolder() const;
         bool addToSteam(std::string &messageOut);

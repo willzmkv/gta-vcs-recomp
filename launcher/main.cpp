@@ -5,6 +5,7 @@
 //   VCSLauncher.exe --build [--iso X]   tools/build.py --recompile-if-needed, output in the terminal
 //   VCSLauncher.exe --play [--iso X]    start the game and wait for it; its exit code
 //   VCSLauncher.exe --self-test [--iso X]   the launcher's own checks (CI): repository, Python, doctor, disc check
+//   VCSLauncher.exe --hardware          what the PC has and the graphics preset a first install gets (hardware.h)
 //   ... --out FILE                      the output to a file instead (scripts, CI)
 //   VCSLauncher.exe --screenshot F.png  the window rendered offscreen and saved (tests, docs; never a window):
 //       [--screen S] [--demo D]         what is shown (screens/screens.h: setup:disc, home, task, sheet:saves,
@@ -31,6 +32,7 @@
 // uses no CPU or GPU.
 #include "core/png.h"
 #include "model/disc_check.h"
+#include "model/hardware.h"
 #include "model/scskiller.h"
 #include "model/sound.h"
 #include "model/system.h"
@@ -128,6 +130,18 @@ namespace
         };
         if (hasArg(args, "--check"))
             return runInConsole(tool("doctor.py"), app.root);
+        if (hasArg(args, "--hardware"))
+        {
+            const HardwareInfo hw = probeHardware();
+            std::string why;
+            static const char *const kNames[] = {"Custom", "Original (PS2)", "Low", "Medium", "High", "Vice Ultra"};
+            const GraphicsPreset preset = recommendPreset(hw, why);
+            std::printf("gpu=%s vram_mb=%llu integrated=%d threads=%d avx2=%d ram_mb=%llu\npreset=%s (%s)\n",
+                        hw.gpuName.c_str(), static_cast<unsigned long long>(hw.vramMb), hw.integrated ? 1 : 0, hw.threads,
+                        hw.avx2 ? 1 : 0, static_cast<unsigned long long>(hw.ramMb), kNames[static_cast<int>(preset)],
+                        why.c_str());
+            return 0;
+        }
         if (hasArg(args, "--build"))
         {
             auto argv = tool("build.py");
@@ -158,6 +172,32 @@ namespace
                 std::printf("[%s] %s\n", ok ? "ok" : "FAIL", what.c_str());
                 failed += ok ? 0 : 1;
             };
+            // the first install's preset (hardware.h): the lowest part decides, never Vice Ultra
+            {
+                struct Case
+                {
+                    const char *what;
+                    HardwareInfo hw;
+                    GraphicsPreset want;
+                };
+                const Case cases[] = {
+                    {"12 GB card, 16 threads, 32 GB", {"card", 12288, false, 16, true, 32768}, GraphicsPreset::High},
+                    {"24 GB card, 32 threads, 64 GB", {"card", 24576, false, 32, true, 65536}, GraphicsPreset::High},
+                    {"8 GB card, 8 threads, 16 GB", {"card", 8192, false, 8, true, 16384}, GraphicsPreset::Medium},
+                    {"4 GB card, 12 threads, 16 GB", {"card", 4096, false, 12, true, 16384}, GraphicsPreset::Medium},
+                    {"8 GB card, 16 threads, 8 GB", {"card", 8192, false, 16, true, 8000}, GraphicsPreset::Medium},
+                    {"2 GB card, 8 threads, 16 GB", {"card", 2048, false, 8, true, 16384}, GraphicsPreset::Low},
+                    {"integrated, 8 threads, 16 GB", {"igpu", 128, true, 8, true, 16384}, GraphicsPreset::Low},
+                    {"8 GB card, 4 threads, 16 GB", {"card", 8192, false, 4, false, 16384}, GraphicsPreset::Low},
+                    {"integrated, 2 threads, 4 GB", {"igpu", 0, true, 2, false, 4096}, GraphicsPreset::OriginalPS2},
+                    {"no card read (Linux), 16 threads, 32 GB", {"", 0, false, 16, true, 32768}, GraphicsPreset::Medium},
+                };
+                for (const Case &c : cases)
+                {
+                    std::string why;
+                    check(recommendPreset(c.hw, why) == c.want, std::string("first-install preset: ") + c.what);
+                }
+            }
             check(fs::is_regular_file(app.root / "tools" / "build.py"), "repository: " + pathText(app.root));
             check(!app.python.empty(), "python: " + app.pythonText);
             check(app.toolsProblem.empty(), app.toolsProblem.empty() ? "scripts: all in tools" : app.toolsProblem);
@@ -398,6 +438,8 @@ namespace
                 platform::errorBox(error);
             return 1;
         }
+        if (!shots && !hidden)
+            app.applyFirstInstallPreset(); // a player's window only: tests and screenshots leave vcs.ini alone
         g_loop.app = &app;
         g_loop.shots = shots;
         g_loop.stats = stats;

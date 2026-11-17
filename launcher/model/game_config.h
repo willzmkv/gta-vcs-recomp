@@ -115,6 +115,7 @@ namespace launcher
         bool hasTextureMods() const;
         void applyPadPreset(int preset);
 
+        bool graphicsConfigured = false; // the last vcs.ini read held graphics settings (not a first install)
         bool loadIni(const std::filesystem::path &iniPath);
         bool saveIni(const std::filesystem::path &iniPath) const;
 

@@ -77,6 +77,7 @@ namespace launcher
 
     bool GameConfig::loadIni(const fs::path &iniPath)
     {
+        graphicsConfigured = false;
         std::ifstream in(iniPath);
         if (!in)
             return false;
@@ -91,6 +92,8 @@ namespace launcher
                 continue;
             const std::string key = trim(line.substr(0, eq));
             const std::string val = trim(line.substr(eq + 1));
+            if (key == "display.scale" || key == "display.msaa" || key == "world.hd_radius" || key == "world.view_distance")
+                graphicsConfigured = true;
 
             if (key == "display.window") displayWindow = std::clamp(parseInt(val, displayWindow), 0, 1);
             else if (key == "display.aspect") displayAspect = parseInt(val, displayAspect);

@@ -34,6 +34,7 @@ set(VCS_LAUNCHER_COMMON
     screens/gallery.cpp
     model/tasks.cpp
     model/game_config.cpp
+    model/hardware.cpp
     model/scskiller.cpp
     model/sound.cpp
     model/process.cpp

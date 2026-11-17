@@ -1,5 +1,7 @@
 #include "tasks.h"
 
+#include "hardware.h"
+
 #include "os.h"
 #include "system.h"
 
@@ -1010,6 +1012,8 @@ namespace launcher
                     settings.theme = value;
                 else if (key == "reduce_motion")
                     settings.reduceMotion = value == "1";
+                else if (key == "auto_preset")
+                    settings.autoPresetDone = value == "1";
                 else if (key == "language" && (value == "pt" || value == "en"))
                 {
                     settings.language = value;
@@ -1018,12 +1022,13 @@ namespace launcher
             }
         };
         readIniFile(root / "launcher.ini");
+        settings.autoPresetDone = false; // the build folder's alone: the source folder's launcher.ini ships in releases
         readIniFile(build / "launcher.ini");
     }
 
     void App::saveSettings()
     {
-        auto writeIniFile = [&](const fs::path &iniPath) {
+        auto writeIniFile = [&](const fs::path &iniPath, bool buildOnly) {
             std::error_code ec;
             fs::create_directories(iniPath.parent_path(), ec);
             std::ofstream out(iniPath, std::ios::trunc | std::ios::binary);
@@ -1033,11 +1038,13 @@ namespace launcher
                 << "check_updates=" << (settings.checkUpdates ? 1 : 0) << "\n"
                 << "theme=" << settings.theme << "\n"
                 << "reduce_motion=" << (settings.reduceMotion ? 1 : 0) << "\n";
+            if (buildOnly) // the source folder's launcher.ini ships in releases: a first install must not read it as done
+                out << "auto_preset=" << (settings.autoPresetDone ? 1 : 0) << "\n";
             if (settings.languageChosen)
                 out << "language=" << settings.language << "\n";
         };
-        writeIniFile(build / "launcher.ini");
-        writeIniFile(root / "launcher.ini");
+        writeIniFile(build / "launcher.ini", true);
+        writeIniFile(root / "launcher.ini", false);
     }
 
     void App::saveGameConfig()
@@ -1045,6 +1052,29 @@ namespace launcher
         if (!gameConfig.saveIni(build / "vcs.ini"))
             say(std::string("Não foi possível salvar ") + os::kBuildIni);
         gameConfig.saveModPriorities(root, build);
+    }
+
+    void App::applyFirstInstallPreset()
+    {
+        if (settings.autoPresetDone)
+            return;
+        // a first install gets the preset this PC runs with room to spare; a vcs.ini that already holds graphics
+        // settings (an earlier install, the player's own choice) is left as it is
+        if (!gameConfig.graphicsConfigured)
+        {
+            std::string why;
+            const GraphicsPreset preset = recommendPreset(probeHardware(), why);
+            gameConfig.applyPreset(preset);
+            saveGameConfig();
+            static const char *const kPt[] = {"Personalizado", "Original (PS2)", "Baixo", "Médio", "Alto", "Vice Ultra"};
+            static const char *const kEn[] = {"Custom", "Original (PS2)", "Low", "Medium", "High", "Vice Ultra"};
+            const int i = static_cast<int>(preset);
+            std::printf("[launcher] first install: graphics preset %s for %s\n", kEn[i], why.c_str());
+            say(isPt() ? std::string("Preset gráfico escolhido para este PC: ") + kPt[i] + " (" + why + ")"
+                       : std::string("Graphics preset chosen for this PC: ") + kEn[i] + " (" + why + ")");
+        }
+        settings.autoPresetDone = true;
+        saveSettings();
     }
 
     void App::refreshMods()
