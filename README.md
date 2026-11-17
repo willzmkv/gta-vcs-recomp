@@ -17,9 +17,10 @@ game on your PC from this source and your disc, and the game reads everything el
 game), 8 GB of memory, a graphics card with Direct3D 12 (Direct3D 11 works too), about **6 GB** of free space, an
 internet connection for the first build, and the game's **USA** disc as an `.iso`.
 
-1. Download `VCS-Recomp-<version>-windows.zip` from [Releases](../../releases) and extract it into a short local folder,
-   such as `C:\Games\VCS`. Not Program Files, and not a OneDrive-synced folder such as Desktop or Documents.
-2. Start **`VCSLauncher.exe`**. It walks you through setup:
+1. Download **`VCS.rec-Launcher-<version>.exe`** from [Releases](../../releases): one file with everything inside (or
+   the same as `VCS-Recomp-<version>-windows.zip`, to extract yourself). Keep the game in a short local folder, such
+   as `C:\Games\VCS`: not Program Files, and not a OneDrive-synced folder such as Desktop or Documents.
+2. Start it. The launcher walks you through setup:
    - **Folder** — checks the place and the free space.
    - **Disc** — drop your `.iso` on the window or pick it. The launcher checks that it is the USA release; it can also
      copy a PS2 disc from a DVD drive.
@@ -62,7 +63,9 @@ everything back to the game's own look.
 - **Crowd bands** (experimental): a few real people near you and the crowd beyond, a walker turning into a real
   person as you come closer.
 
-**Mods** ([docs/MODS.md](docs/MODS.md)) — one folder per mod in `modloader/`, switched and ordered live in F2 → Mods
+**Mods** ([docs/MODS.md](docs/MODS.md)) — one folder per mod in `modloader/`, switched and ordered live in the game
+- **Included:** HD Hands (Vic's hands in higher detail) and HD Hud (a sharper HUD, radar and weapon icons), made for
+  this fork.
 - **Texture packs**: PCSX2-style packs, DDS or PNG ([docs/TEXTURE_PACKS.md](docs/TEXTURE_PACKS.md)).
 - **PC Vice City vehicle mods** as they come: a car's `.dff` + `.txd` replaces the game's vehicle of that name (cars,
   bikes, boats, helicopters).
@@ -147,6 +150,6 @@ works inside ([docs/game-internals.md](docs/game-internals.md)), decisions, prog
 
 ## Credits and license
 
-The port and its recompiler are the work of [gothamor/gta-vcs-recomp](https://github.com/gothamor/gta-vcs-recomp),
+HD Hands and HD Hud are by willzmkv, this fork's author. The port and its recompiler are the work of [gothamor/gta-vcs-recomp](https://github.com/gothamor/gta-vcs-recomp),
 built on [PS2Recomp](https://github.com/ran-j/PS2Recomp). GPL-3.0, inherited from PS2Recomp. Grand Theft Auto and all
 game content are property of Rockstar Games / Take-Two Interactive.

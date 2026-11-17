@@ -604,6 +604,56 @@ namespace ui
         }
     }
 
+    void vcSliderTrack(Rect track, float t, float pressed, float s)
+    {
+        const float trackH = track.h;
+        rectEx(track, rgb(0xBCE3ED), rgb(0xBCE3ED), trackH * 0.5f, rgb(0x007A96, 95), 1.0f);
+        const float fillW = std::max(trackH, track.w * core::clamp01(t));
+        if (t > 0.002f)
+        {
+            gradient({track.x, track.y, fillW, track.h}, rgb(0xFF2A85), rgb(0xFE7FB4), trackH * 0.5f, Gradient::Horizontal);
+        }
+
+        // Classic Vice City double-ring target knob (◎) in Pink & White
+        const float knobX = track.x + track.w * core::clamp01(t);
+        const float knobCy = track.cy();
+        const float outerR = px(10.5f) * s * (1.0f + 0.08f * pressed);
+        shadow({knobX - outerR, knobCy - outerR + px(1) * s, outerR * 2, outerR * 2}, rgb(0x801045, 95), px(4) * s, outerR);
+        circle(knobX, knobCy, outerR, rgb(0xFFFFFF));
+        outline({knobX - outerR, knobCy - outerR, outerR * 2, outerR * 2}, rgb(0xFF2A85), px(2.2f) * s, outerR);
+        circle(knobX, knobCy, outerR * 0.50f, pressed > 0.5f ? rgb(0xFF1476) : rgb(0xFE7FB4));
+    }
+
+    void vcToggleSwitch(Rect togR, float t, float hover, float s)
+    {
+        // Pill-shaped recessed track
+        const float trackRadius = px(7.0f) * s;
+        // OFF track: Ice Cyan / Muted Teal (#8EC1CE) | ON track: Vice City Flamingo Pink (#FE7FB4 -> #FF2A85)
+        const Color trackOffCol = mix(rgb(0x8EC1CE), rgb(0xA2D0DC), hover);
+        const Color trackOnCol = mix(rgb(0xFE7FB4), rgb(0xFF3892), hover);
+        const Color trackCol = mix(trackOffCol, trackOnCol, t);
+        const Color trackBorder = mix(rgb(0x005E72, 180), rgb(0xC8145E, 220), t);
+
+        // Track inset shadow & fill
+        shadow(togR.offset(0, px(1) * s), rgb(0x00222B, 95), px(4) * s, trackRadius);
+        rectEx(togR, trackCol, trackCol, trackRadius, trackBorder, 1.2f * s);
+
+        // Sliding Soft-beveled Square White Knob
+        const float knobPad = px(2.5f) * s;
+        const float knobSize = togR.h - knobPad * 2;
+        const float knobX = togR.x + knobPad + t * (togR.w - knobPad * 2 - knobSize);
+        const float knobY = togR.y + knobPad;
+        const Rect knobR{knobX, knobY, knobSize, knobSize};
+        const float knobCorner = px(3.5f) * s;
+
+        // Knob shadow
+        shadow(knobR.offset(0, px(1.5f) * s), rgb(0x001B24, 110), px(4) * s, knobCorner);
+        // Beveled white square face
+        rectEx(knobR, rgb(0xFFFFFF), rgb(0xEDEBEB), knobCorner, rgb(0xD0CECE), 1.0f * s);
+        // Inner soft bevel highlight
+        rectEx(knobR.inset(px(1.5f) * s), rgb(0xFFFFFF, 240), rgb(0xE2E0E0, 240), px(2.5f) * s, rgb(0xFFFFFF, 180), 0.8f * s);
+    }
+
     bool vcSubTab(std::string_view idLabel, Rect r, std::string_view text, bool active)
     {
         const Interaction in = interact(id(idLabel), r, true);
@@ -777,21 +827,7 @@ namespace ui
         // High-contrast Vice City Pink horizontal track + filled bar
         const float trackH = px(8);
         const Rect track{trackHit.x + px(10), trackHit.cy() - trackH * 0.5f, trackHit.w - px(20), trackH};
-        rectEx(track, rgb(0xBCE3ED), rgb(0xBCE3ED), trackH * 0.5f, rgb(0x007A96, 95), 1.0f);
-        const float fillW = std::max(trackH, track.w * core::clamp01(w.t));
-        if (w.t > 0.002f)
-        {
-            gradient({track.x, track.y, fillW, track.h}, rgb(0xFF2A85), rgb(0xFE7FB4), trackH * 0.5f, Gradient::Horizontal);
-        }
-
-        // Classic Vice City double-ring target knob (◎) in Pink & White
-        const float knobX = track.x + track.w * core::clamp01(w.t);
-        const float knobCy = track.cy();
-        const float outerR = px(10.5f) * (1.0f + 0.08f * float(w.value));
-        shadow({knobX - outerR, knobCy - outerR + px(1), outerR * 2, outerR * 2}, rgb(0x801045, 95), px(4), outerR);
-        circle(knobX, knobCy, outerR, rgb(0xFFFFFF));
-        outline({knobX - outerR, knobCy - outerR, outerR * 2, outerR * 2}, rgb(0xFF2A85), px(2.2f), outerR);
-        circle(knobX, knobCy, outerR * 0.50f, w.value ? rgb(0xFF1476) : rgb(0xFE7FB4));
+        vcSliderTrack(track, w.t, w.value);
 
         // Tabular number readout on the right
         std::string valText = std::to_string(value);
@@ -906,32 +942,7 @@ namespace ui
         drawVcRowStripe(r, rowIndex, hover, std::max(togIn.w->press, float(sw.value)));
 
         // --- DRAW GRAPHICAL TOGGLE SWITCH (Reference: uploaded_media_1794748945526.png) ---
-        // Pill-shaped recessed track
-        const float trackRadius = px(7.0f);
-        // OFF track: Ice Cyan / Muted Teal (#8EC1CE) | ON track: Vice City Flamingo Pink (#FE7FB4 -> #FF2A85)
-        const Color trackOffCol = mix(rgb(0x8EC1CE), rgb(0xA2D0DC), togIn.w->hover);
-        const Color trackOnCol = mix(rgb(0xFE7FB4), rgb(0xFF3892), togIn.w->hover);
-        const Color trackCol = mix(trackOffCol, trackOnCol, togT);
-        const Color trackBorder = mix(rgb(0x005E72, 180), rgb(0xC8145E, 220), togT);
-
-        // Track inset shadow & fill
-        shadow(togR.offset(0, px(1)), rgb(0x00222B, 95), px(4), trackRadius);
-        rectEx(togR, trackCol, trackCol, trackRadius, trackBorder, 1.2f);
-
-        // Sliding Soft-beveled Square White Knob
-        const float knobPad = px(2.5f);
-        const float knobSize = togH - knobPad * 2;
-        const float knobX = togR.x + knobPad + togT * (togR.w - knobPad * 2 - knobSize);
-        const float knobY = togR.y + knobPad;
-        const Rect knobR{knobX, knobY, knobSize, knobSize};
-        const float knobCorner = px(3.5f);
-
-        // Knob shadow
-        shadow(knobR.offset(0, px(1.5f)), rgb(0x001B24, 110), px(4), knobCorner);
-        // Beveled white square face
-        rectEx(knobR, rgb(0xFFFFFF), rgb(0xEDEBEB), knobCorner, rgb(0xD0CECE), 1.0f);
-        // Inner soft bevel highlight
-        rectEx(knobR.inset(px(1.5f)), rgb(0xFFFFFF, 240), rgb(0xE2E0E0, 240), px(2.5f), rgb(0xFFFFFF, 180), 0.8f);
+        vcToggleSwitch(togR, togT, togIn.w->hover);
 
         // --- DRAW CENTER MOD NAME ---
         const Color tealText = mix(rgb(0x007A96), rgb(0x00586E), hover);
@@ -965,7 +976,7 @@ namespace ui
         render::popOpacity();
 
         render::popOpacity();
-        focusRing(togR, tw.focus, trackRadius);
+        focusRing(togR, tw.focus, px(7.0f)); // the switch's track radius (vcToggleSwitch)
         focusRing(trackHit, sw.focus, px(2));
         popId();
         return changed;

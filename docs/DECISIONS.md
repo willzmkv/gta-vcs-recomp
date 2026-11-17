@@ -1820,7 +1820,10 @@ turned stick (the pull-in toward the player), through the game's own switch for 
 
 ## 2026-11-17 - HD Hands and HD Hud ship with every release (the user's decision)
 
-- **The two mods come with the game.** Raised before deciding: HD Hands is Vic's own model (`plr2.mdl` / `.xtx`)
+- **The two mods come with the game, inside the launcher** (the player's plan): the CI makes the standalone
+  `VCS.rec-Launcher-<version>.exe` (`release.py --standalone-exe`: the whole release appended to the launcher) with them,
+  next to the zip. Both are the user's own work (HD Hands made together in this project, HD Hud theirs); credited in the
+  README. Raised before deciding: HD Hands is Vic's own model (`plr2.mdl` / `.xtx`)
   changed, so a release carries a piece derived from the game's data, and HD Hud's licence is not known. The user's
   answer: they belong with the release.
 - **Still not in the repository** (the rule above every other: no game code or data in git). They live in the fork's

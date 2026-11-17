@@ -101,6 +101,7 @@ namespace screens
         int controlsSubTab = 0; // 0=PS2, 1=Xbox, 2=DS4, 3=DualSense, 4=Switch, 5=KB+Mouse, 6=Settings
         int gameMenuTab = 0;    // the game menu's page (gamemenu.cpp): 0 Map .. 6 Trainer
         int gameMenuSlot = 0;   // its Game page's selected save slot
+        bool gameMenuControllerLayout = false; // Options > Controls > Adjust Control Layout open: the launcher's controllers
         int aboutSubTab = 0;  // 0=Project, 1=Disc & Install, 2=Memory Card
         bool buildConfirmOpen = false;
         bool c64TerminalOpen = false;

@@ -698,6 +698,7 @@ namespace screens
                 shell.gameMenuTab = which[0] - '0';
             if (which.size() > 1 && which[1] >= '0' && which[1] <= '5')
                 shell.configSubTab = which[1] - '0'; // the Options page's tab
+            shell.gameMenuControllerLayout = which.size() > 2 && which[2] == 'L'; // and Adjust Control Layout open
 
         }
     }

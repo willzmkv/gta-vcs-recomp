@@ -145,7 +145,9 @@ jobs:
 
       - name: Release zip
         if: startsWith(github.ref, 'refs/tags/v')
-        run: python tools/release.py --ref ${{ github.ref_name }} --launcher VCSLauncher.exe --mods "${{ runner.temp }}/mods"
+        # the zip, and the standalone launcher: one VCS.rec-Launcher-<version>.exe with the whole release (the bundled
+        # mods with it) inside, as the player planned the download
+        run: python tools/release.py --ref ${{ github.ref_name }} --launcher VCSLauncher.exe --mods "${{ runner.temp }}/mods" --standalone-exe
 
       - uses: actions/upload-artifact@v4
         if: startsWith(github.ref, 'refs/tags/v')
@@ -154,6 +156,7 @@ jobs:
           path: |
             build/dist/*.zip
             build/dist/*.zip.sha256
+            build/dist/*.exe
 
   # both platforms' files on one release, only when both were made: Windows and Linux ship together
   # The title as every release has it; the notes from docs/releases/<tag>.md when the tag has one (written for players),

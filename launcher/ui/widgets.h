@@ -72,6 +72,11 @@ namespace ui
                      std::string_view rightText = {}, Color rightColor = 0, bool *hoveredOut = nullptr,
                      bool enabled = true);
 
+    // the Vice City rows' controls as drawings, shared with the game menu (screens/gamemenu.cpp): the pink track and its
+    // double-ring knob (t 0..1, pressed 0..1), the pill switch with its square knob (t 0 off .. 1 on); s scales them
+    void vcSliderTrack(Rect track, float t, float pressed, float s = 1.0f);
+    void vcToggleSwitch(Rect togR, float t, float hover, float s = 1.0f);
+
     // Classic GTA: Vice City Commodore 64 Terminal (Terminal.png style) for live CMD build output
     void c64TerminalView(Id wid, Rect r, const std::deque<std::string> &lines, std::string_view statusRight,
                          float progress01, bool finished, bool *closeClicked = nullptr);

@@ -4,7 +4,7 @@
 //
 // The look is GTA: Vice City - The Definitive Edition's options menu (the player's reference, 2026-11-17): the logo top
 // left, the pages as a column of capitals bottom left with a slanted pink bar under the one shown, a row of tabs top
-// right and the rows under them, pastel and alternating, with chevrons and ring-knob sliders. Measured on a 1920x1080
+// right and the rows under them, pastel and alternating, with chevrons; the launcher's pink sliders and switches (the player's choice). Measured on a 1920x1080
 // picture of it and laid out in those units (u()), centred on wider windows. The launcher's fonts (the player's
 // choice: no Pricedown). Behind: the game's frame the player paused on, blurred and tinted cyan (in the game the real
 // one; here menu_backdrop.png, a test frame never committed). Above the tabs, where the story stands.
@@ -81,19 +81,26 @@ namespace screens
             text(kFontSemibold, 24, {left + u(14), r.y, right - left - u(28), r.h}, kTealValue, value, ui::Align::Centre);
         }
 
-        // the track x 1256..1786, a black ring knob
+        // the launcher's own controls (ui::vcSliderTrack / vcToggleSwitch: identical drawings, the player's request),
+        // scaled from its 44-pixel rows to these 80-pixel ones
+        float controlScale() { return u(kRowH / 44.0f) / px(1); }
+
+        // the launcher's pink slider on the reference's track (x 1256..1786), the value left of it
         void slider(float top, int i, std::string_view label, float frac, std::string_view value = {})
         {
             const Rect r = row(top, i, label);
-            const float cy = r.y + r.h * 0.5f;
-            const Rect track{ux(1256), cy - u(11), u(530), u(22)};
-            rect(track, rgb(0xFFFFFF, 150), Corners(u(11)));
-            const float kx = track.x + u(11) + (track.w - u(22)) * std::clamp(frac, 0.0f, 1.0f);
-            rect({track.x, track.y, kx - track.x, track.h}, rgb(0xFFFFFF, 235), Corners(u(11)));
-            circle(kx, cy, u(16), rgb(0x0C0C0E));
-            circle(kx, cy, u(10.5f), rgb(0xFFFFFF));
+            const float cy = r.y + r.h * 0.5f, s = controlScale(), h = px(8) * s;
+            ui::vcSliderTrack({ux(1266), cy - h * 0.5f, u(510), h}, std::clamp(frac, 0.0f, 1.0f), 0.0f, s);
             if (!value.empty())
                 text(kFontSemibold, 20, {ux(1100), r.y, u(140), r.h}, kTealValue, value, ui::Align::Right);
+        }
+
+        // the launcher's switch, at the right end of the row
+        void toggle(float top, int i, std::string_view label, bool on)
+        {
+            const Rect r = row(top, i, label);
+            const float s = controlScale(), w = px(52) * s, h = px(26) * s;
+            ui::vcToggleSwitch({ux(1792) - w, std::floor(r.y + (r.h - h) * 0.5f), w, h}, on ? 1.0f : 0.0f, 0.0f, s);
         }
 
         // a value on the right, read-only (stats, slots)
@@ -209,18 +216,25 @@ namespace screens
                                                     tr("POPULAÇÃO", "PEOPLE"), tr("ÁUDIO", "AUDIO")};
             const int sub = std::clamp(shell.configSubTab, 0, 5);
             tabs(names, sub);
-            const char *yes = tr("Sim", "On"), *no = tr("Não", "Off");
             auto pct = [](int v) { return std::to_string(v) + "%"; };
             int i = 0;
             switch (sub)
             {
             case 0:
+                if (shell.gameMenuControllerLayout)
+                {
+                    // the launcher's controller page as it is (the real controllers, their callouts, the schemes)
+                    const Rect area{ux(kColX), u(kRowY), u(kColR - kColX), u(1015 - kRowY)};
+                    rect(area, rgb(0xDDF1F7));
+                    drawControls(area.inset(-px(38), -px(10)));
+                    return;
+                }
                 row(kRowY, i++, tr("Ajustar o layout do controle", "Adjust Control Layout"));
                 cycle(kRowY, i++, tr("Esquema", "Scheme"), cfg.padPreset == 2 ? tr("Moderno (GTA IV / V)", "Modern (GTA IV / V)") : tr("Clássico PS2", "Classic PS2"));
-                cycle(kRowY, i++, tr("Inverter visão", "Invert Look"), cfg.mouseInvertY ? yes : no);
+                toggle(kRowY, i++, tr("Inverter visão", "Invert Look"), cfg.mouseInvertY != 0);
                 slider(kRowY, i++, tr("Sensibilidade do mouse", "Mouse Sensitivity"), (cfg.mouseSensitivity - 10) / 390.0f, pct(cfg.mouseSensitivity));
                 slider(kRowY, i++, tr("Velocidade da câmera (controle)", "Camera Speed (gamepad)"), (cfg.padCameraSpeed - 10) / 390.0f, pct(cfg.padCameraSpeed));
-                cycle(kRowY, i++, tr("Mira livre", "Free Aim"), cfg.padFreeAim ? yes : no);
+                toggle(kRowY, i++, tr("Mira livre", "Free Aim"), cfg.padFreeAim != 0);
                 slider(kRowY, i++, tr("Vibração", "Vibration"), cfg.padVibration / 200.0f, pct(cfg.padVibration));
                 row(kRowY, i++, tr("Restaurar padrões", "Restore Defaults"));
                 break;
@@ -229,17 +243,17 @@ namespace screens
                 cycle(kRowY, i++, tr("Proporção da tela", "Aspect Ratio"), cfg.displayAspect == 169 ? "16:9" : cfg.displayAspect == 43 ? "4:3" : tr("Automático", "Auto"));
                 cycle(kRowY, i++, "HUD", cfg.displayHud == 2 ? tr("Nas bordas", "At the edges") : cfg.displayHud == 1 ? "4:3" : tr("Esticado", "Stretched"));
                 cycle(kRowY, i++, tr("Taxa de quadros", "Frame Rate"), cfg.displayFps == -1 ? tr("Do monitor", "Display's") : std::to_string(cfg.displayFps) + " fps");
-                cycle(kRowY, i++, tr("Sincronização vertical", "Vertical Sync"), cfg.displayVsync ? yes : no);
-                cycle(kRowY, i++, tr("Barras pretas nas cutscenes", "Cutscene Black Bars"), cfg.displayCutsceneBars ? yes : no);
+                toggle(kRowY, i++, tr("Sincronização vertical", "Vertical Sync"), cfg.displayVsync != 0);
+                toggle(kRowY, i++, tr("Barras pretas nas cutscenes", "Cutscene Black Bars"), cfg.displayCutsceneBars != 0);
                 slider(kRowY, i++, tr("Exposição", "Exposure"), cfg.graphicsExposure / 200.0f, pct(cfg.graphicsExposure));
-                cycle(kRowY, i++, tr("Legendas", "Subtitles"), yes);
+                toggle(kRowY, i++, tr("Legendas", "Subtitles"), true);
                 break;
             case 2:
                 cycle(kRowY, i++, tr("Predefinição", "Preset"), tr("Alto", "High"));
                 cycle(kRowY, i++, tr("Resolução interna", "Internal Resolution"), cfg.displayScale == 0 ? tr("Da janela", "Window's") : std::to_string(cfg.displayScale) + "x");
                 cycle(kRowY, i++, tr("Anti-serrilhado (MSAA)", "Anti-aliasing (MSAA)"), std::to_string(cfg.displayMsaa) + "x");
                 cycle(kRowY, i++, tr("Filtro anisotrópico", "Anisotropic Filtering"), std::to_string(cfg.displayAniso) + "x");
-                cycle(kRowY, i++, tr("Rastros e brilho", "Trails and Bloom"), cfg.graphicsPostProcess ? yes : no);
+                toggle(kRowY, i++, tr("Rastros e brilho", "Trails and Bloom"), cfg.graphicsPostProcess != 0);
                 cycle(kRowY, i++, tr("API gráfica", "Graphics API"), cfg.displayRenderer == 1 ? "Direct3D 12" : cfg.displayRenderer == 2 ? "Vulkan" : "Direct3D 11");
                 break;
             case 3:
@@ -253,7 +267,7 @@ namespace screens
                 slider(kRowY, i++, tr("Distância da população", "Population Distance"), cfg.worldPopulationDistance / 100.0f, pct(cfg.worldPopulationDistance));
                 slider(kRowY, i++, tr("Densidade de veículos", "Vehicle Density"), cfg.worldVehicleDensity / 100.0f, pct(cfg.worldVehicleDensity));
                 slider(kRowY, i++, tr("Densidade de pedestres", "Pedestrian Density"), cfg.worldPedestrianDensity / 100.0f, pct(cfg.worldPedestrianDensity));
-                cycle(kRowY, i++, tr("Faixas de multidão", "Crowd Bands"), cfg.worldCrowdBands ? yes : no);
+                toggle(kRowY, i++, tr("Faixas de multidão", "Crowd Bands"), cfg.worldCrowdBands != 0);
                 slider(kRowY, i++, tr("Trânsito distante", "Distant Traffic"), cfg.worldDistantTraffic / 100.0f, pct(cfg.worldDistantTraffic));
                 slider(kRowY, i++, tr("Multidões distantes", "Distant Crowds"), cfg.worldDistantCrowds / 100.0f, pct(cfg.worldDistantCrowds));
                 break;
@@ -274,8 +288,8 @@ namespace screens
             int i = 0;
             if (cfg.mods.empty())
             {
-                cycle(kTabY, i++, "HD Hands", tr("Ligado", "On"));
-                cycle(kTabY, i++, "HD Hud", tr("Ligado", "On"));
+                toggle(kTabY, i++, "HD Hands", true);
+                toggle(kTabY, i++, "HD Hud", true);
             }
             for (const launcher::ModEntry &m : cfg.mods)
             {
@@ -290,7 +304,7 @@ namespace screens
         void pageTrainer()
         {
             int i = 0;
-            cycle(kTabY, i++, tr("Modo Deus", "God Mode"), tr("Não", "Off"));
+            toggle(kTabY, i++, tr("Modo Deus", "God Mode"), false);
             slider(kTabY, i++, tr("Nível de procurado", "Wanted Level"), 0.0f, "0");
             value(kTabY, i++, tr("Dinheiro", "Money"), "+ $ 10.000", kPinkDeep);
             value(kTabY, i++, tr("Armas e munição", "Weapons and Ammo"), tr("Pacote completo", "Full set"), kPinkDeep);
