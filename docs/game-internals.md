@@ -2671,6 +2671,15 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   the detailed city drawn far moves that change from ~260 m to the reach. Found with the `skipextra` command (sector
   ids the extra cells do not add) and `build/analysis/hd_world/bisect_cmd.py` (a generic bisection: a pose, a box of the
   picture, a command over a list of ids).
+- **A neighbour's low-detail twin drawn over the detail** (the player's "deformed, flickering textures" on pavements and
+  walls, 2026-11-17, at night most visibly): a low-detail sector with the very sphere of a detailed one (the twins of
+  the Boomshine Blowout fix below: kept, never replaced) came from a neighbour cell's list too - and an extra list's
+  records are drawn shown (`hide = 0`), whatever the record's own flag (5976, flag 1, over 2519 at -1217,-1154; 5952 over
+  2800 at -986,-1153; `VCS_HD_TWINS=1`). Its coarse triangles lay over the building: light triangles on the walls,
+  the doors cut, shifting with the camera. Found by bisecting with `VCS_HD_DRAWMODE` (1 and 2 clean, 3 not) at the
+  player's spot (-1188,-1214, 00:30). A neighbour's twin is now never drawn: the slot's own records pick the version
+  (the twin rule stays for the game's own list). The same spot then matches radius 0; the cruise route's checks 0.
+  `VCS_HD_DUPES=1` (every 10 s) counts detailed sectors drawn twice under two ids (2 on the mainland, none near).
 - **Entries emptied by a slot drop** (the player's "buildings switching between high and low quality", 2026-11-12):
   dropping a slot, the game clears the table entries that still hold that slot's copy (`FUN_0023CED0`) - gids our
   extra cells hold too. Until our next re-entry those sectors were left out of the built list, then back: models

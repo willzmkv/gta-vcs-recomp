@@ -1426,6 +1426,17 @@ namespace vcs::world_hd
                         const float near = std::hypot(half(rd16(r + 4u)) - camX, half(rd16(r + 6u)) - camY); // (its centre)
                         if (id >= kLodIds && drawMode() < 3)
                             continue;
+                        // A neighbour's low-detail twin of a building the slot's list has in detail (the same sphere): the
+                        // same building again, its coarse triangles over the detailed one - light triangles on walls and
+                        // pavements that shift with the camera, the doors cut through (5976 over 2519 at -1217,-1154; 5952
+                        // over 2800 at -986,-1153 - the player's reports, 2026-11-17). replaced() keeps twins for the
+                        // game's own list, where the game's flags pick the version (Phil's warehouse); from a neighbour's
+                        // list the slot's own records already decide which version shows.
+                        if (id >= kLodIds && twin(r))
+                        {
+                            ++coarser;
+                            continue;
+                        }
                         const bool glowing = id >= kLodIds && replaced(id, r);
                         if (glowing && !glowNow)
                         {
@@ -1467,6 +1478,35 @@ namespace vcs::world_hd
                 }
             }
             g_stats.coarser = coarser;
+            // VCS_HD_DUPES=1 (every 10 s): detailed sectors drawn twice under two ids - the same sphere (centre halves equal,
+            // radius within 2 %) in two lists; drawn on the same plane they fight over depth (the player's flickering
+            // pavement, 2026-11-17)
+            static const bool dupeLog = std::getenv("VCS_HD_DUPES") != nullptr;
+            static double dupeAt = 0.0;
+            if (dupeLog && &b == &g_built[0] && t - dupeAt > 10.0)
+            {
+                dupeAt = t;
+                std::unordered_map<uint64_t, uint32_t> byCentre; // centre -> record
+                uint32_t dupes = 0, drawn = 0;
+                for (int k = 0; k < 8; ++k)
+                    for (const Rec &rec : out[k])
+                    {
+                        if (rec.id >= kLodIds || rec.hide == 1)
+                            continue;
+                        ++drawn;
+                        const auto [it, fresh] = byCentre.emplace(centreKey(rec.from), rec.from);
+                        if (fresh || (rd16(it->second) & 0x7FFFu) == rec.id)
+                            continue;
+                        const float ra = half(rd16(it->second + 0xAu)), rb = half(rd16(rec.from + 0xAu));
+                        if (std::fabs(ra - rb) > 0.02f * std::max(ra, rb))
+                            continue;
+                        if (dupes++ < 20u)
+                            std::fprintf(stderr, "[hddupe] %u (gid %u) and %u (gid %u) at %.0f,%.0f,%.0f r %.1f / %.1f\n",
+                                         rd16(it->second) & 0x7FFFu, rd16(it->second + 2u), rec.id, rd16(rec.from + 2u),
+                                         half(rd16(rec.from + 4u)), half(rd16(rec.from + 6u)), half(rd16(rec.from + 8u)), ra, rb);
+                    }
+                std::fprintf(stderr, "[hddupe] %u detailed sectors drawn, %u twice under two ids\n", drawn, dupes);
+            }
             // VCS_HD_TWINS=1 (once a minute): of the low-detail sectors left out as replaced, how many have a detailed
             // twin (a record of id < kLodIds at the very same centre and radius - the half floats equal) in the lists
             static double twinAt = 0.0;
