@@ -697,6 +697,22 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             return true;
         }
 
+        // The police after the player: their cars come out of the same spawner as the traffic, at its distance - with the
+        // population distance's (up to 3 x: 300-480 m away) they appeared too far ever to catch a car, and came only once
+        // the player stood still (the player's report, 2026-11-17). While the player is wanted the spawner keeps the
+        // game's own distance; VCS_CHASE_SPAWN=0 leaves it at the population distance's (for comparing).
+        bool chased()
+        {
+            static const bool on = !(std::getenv("VCS_CHASE_SPAWN") && *std::getenv("VCS_CHASE_SPAWN") == '0');
+            if (!on)
+                return false;
+            const uint32_t ped = rd32(0x004E4910u + rd8(0x004CD128u) * 0x190u); // CWorld::Players[in focus].m_pPed
+            if (ped < 0x00100000u || ped >= 0x02000000u)
+                return false;
+            const uint32_t stars = rd32(ped + 0x920u); // the wanted level (game-internals.md 12e)
+            return stars >= 1u && stars <= 6u;
+        }
+
         // a reader of GenerationDistMultiplier: the frame's base (the game's value) times this reader's factor
         template <size_t I>
         PS2_GUEST_CC void genReader(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -732,7 +748,9 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                     // the car spawner: its rings spread from the game's distance out to the population distance's (the
                     // spawn rings' note at g_carRings; the removal, FUN_00433378, keeps the population distance)
                     const int rings = std::max(g_carRings, 1);
-                    if (rings > 1)
+                    if (chased())
+                        k = 1.0f; // (the police's distance: chased() above)
+                    else if (rings > 1)
                         k = 1.0f + (cars - 1.0f) * static_cast<float>(g_carRing++ % rings) / static_cast<float>(rings - 1);
                     g_carSpawnK = k;
                 }
@@ -1218,7 +1236,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         {
             if (ctx->pc == kNodeList)
             {
-                const float k = g_carRings > 1 ? g_carSpawnK : carDistance(), kp = pedDistance();
+                const float k = g_carRings > 1 || chased() ? g_carSpawnK : carDistance(), kp = pedDistance();
                 const uint32_t ra = GPR_U32(ctx, 31);
                 if (k > 1.0f && ra >= kSpotFinder && ra < kSpotFinderEnd)
                 {
