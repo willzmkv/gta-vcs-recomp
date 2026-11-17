@@ -126,6 +126,33 @@ def main():
            keys.get("device") == "keyboard" and keys.get("shown") == "keyboard",
            {"after the pad": pad.get("shown"), "after a key": keys.get("shown")})
 
+        # scheme: the Modern scheme's triggers move the PS2's buttons - R2 accelerates and L2 brakes in a vehicle, R2
+        # fires and L2 aims on foot; Classic leaves them on the bound buttons
+        g.cmd("setting enhance.prompts 2")
+        frames(10)
+
+        def specs(pairs):
+            return {p: g.cmd("prompts spec " + p).split(":")[-1] for p in pairs}
+        pairs = ("X@vehicle", "S@vehicle", "R2@vehicle", "O@foot", "R1@foot", "R2@foot", "X@foot")
+        for key in ("pad.trigger_drive", "pad.trigger_shoot", "pad.v_layout"):
+            g.cmd("setting %s 0" % key)
+        classic = specs(pairs)
+        g.cmd("setting pad.trigger_drive 1")
+        g.cmd("setting pad.trigger_shoot 1")
+        frames(10)
+        modern = specs(pairs)
+        for key, name in (("H_IV_40", "accelerate"), ("H_GUN01", "aim_fire")):
+            help_text(key)
+            frames(30)
+            shot("help_ps_modern_" + name)
+        ok("scheme", classic == {"X@vehicle": "south", "S@vehicle": "west", "R2@vehicle": "rt", "O@foot": "east",
+                                 "R1@foot": "rb", "R2@foot": "rt", "X@foot": "south"} and
+           modern == {"X@vehicle": "rt", "S@vehicle": "lt", "R2@vehicle": "dpad_r", "O@foot": "rt", "R1@foot": "lt",
+                      "R2@foot": "dpad_r", "X@foot": "south"},
+           {"classic": classic, "modern": modern})
+        g.cmd("setting pad.trigger_drive 0")
+        g.cmd("setting pad.trigger_shoot 0")
+
         # menu: the help bars' buttons, keyboard then Xbox
         g.scm(S.op(CLEAR_HELP) + S.end())
         gamectl.send("press Escape", port=g.port)

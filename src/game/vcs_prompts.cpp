@@ -242,10 +242,44 @@ namespace vcs::prompts
             }
         }
 
-        std::string padSpec(const char *family, int ctl)
+        // the control scheme's moves (game/vcs_input.cpp), which take a PS2 button off its bound pad button: "Drive with
+        // the triggers" - in a vehicle R2 accelerates (Cross), L2 brakes (Square), the D-pad looks left / right (L2 / R2);
+        // "Shoot with the triggers" - on foot R2 fires (Circle), L2 aims (R1), the D-pad steps the weapons (L2 / R2); GTA V's
+        // buttons with the triggers driving: L1 / R1 look, the pad's Cross is the handbrake (R1), the D-pad's down starts a
+        // sub-mission (R3). Nullptr: the button the player bound.
+        const char *schemeButton(int ctx, int ctl)
+        {
+            const bool v = setting("pad.v_layout") != 0;
+            if (ctx == Vehicle && setting("pad.trigger_drive"))
+                switch (ctl)
+                {
+                case Cross: return "rt";
+                case Square: return "lt";
+                case L2: return v ? "lb" : "dpad_l";
+                case R2: return v ? "rb" : "dpad_r";
+                case R1: return v ? "south" : nullptr;
+                default: break;
+                }
+            if (ctx == Vehicle && v && ctl == R3)
+                return "dpad_d";
+            if (ctx == Foot && setting("pad.trigger_shoot"))
+                switch (ctl)
+                {
+                case Circle: return "rt";
+                case R1: return "lt";
+                case L2: return "dpad_l";
+                case R2: return "dpad_r";
+                default: break;
+                }
+            return nullptr;
+        }
+
+        std::string padSpec(const char *family, int ctx, int ctl)
         {
             std::string button;
-            if (ctl < DPad) // the physical button the player bound (Gamepad page)
+            if (const char *moved = schemeButton(ctx, ctl))
+                button = moved;
+            else if (ctl < DPad) // the physical button the player bound (Gamepad page)
             {
                 const char *bound = padSourceName(setting(std::string("pad.") + kButtonIds[ctl]));
                 button = bound ? bound : kPadDefault[ctl];
@@ -268,9 +302,9 @@ namespace vcs::prompts
         {
             switch (set)
             {
-            case PlayStation: return padSpec("ps", ctl);
-            case Xbox: return padSpec("xbox", ctl);
-            case NintendoSwitch: return padSpec("switch", ctl);
+            case PlayStation: return padSpec("ps", ctx, ctl);
+            case Xbox: return padSpec("xbox", ctx, ctl);
+            case NintendoSwitch: return padSpec("switch", ctx, ctl);
             default: return keyboardSpec(ctx, ctl);
             }
         }
@@ -1329,6 +1363,18 @@ namespace vcs::prompts
                 for (char16_t c : gameText(args.substr(5)))
                     s += c < 128 ? static_cast<char>(c) : '?';
                 return reply("ok " + s);
+            }
+            // prompts spec <CTL>@<foot|vehicle|menu> -> ok <the glyph the set shown draws for it>
+            if (args.rfind("spec ", 0) == 0)
+            {
+                const std::string arg = args.substr(5);
+                const size_t at = arg.find('@');
+                const std::string where = at == std::string::npos ? "foot" : arg.substr(at + 1);
+                const int ctl = ctlByName(arg.substr(0, at));
+                const int c = where == "vehicle" ? Vehicle : where == "menu" ? Menu : Foot;
+                if (ctl < 0)
+                    return reply("error unknown control");
+                return reply("ok " + specFor(g_shownSet.load(std::memory_order_relaxed), c, ctl));
             }
             // prompts unknown -> ok <the configuration's actions whose American text the phrase table leaves words in>
             if (args == "unknown")
