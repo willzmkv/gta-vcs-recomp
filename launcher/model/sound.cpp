@@ -24,6 +24,7 @@
 
 namespace fs = std::filesystem;
 
+#ifdef _WIN32 // (waveOut; elsewhere the launcher is silent for now - see the end)
 namespace sound
 {
     namespace
@@ -358,3 +359,12 @@ namespace sound
 #endif
     }
 }
+#else
+// Linux (and anything without waveOut): no sounds yet - the calls do nothing
+namespace sound
+{
+    void init(const fs::path &) {}
+    void play(Sfx) {}
+    void shutdown() {}
+}
+#endif
