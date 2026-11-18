@@ -184,6 +184,12 @@ pause map) are shown at 4:3, pillarboxed.
   row greyed out showing On, the saved value kept for widescreen: `Spec::locked` / `lockedValue` / `lockedNote`
   (settings.h), for any setting another one decides; `main.cpp` `cutsceneBarsLocked()`. DECISIONS.md has why;
   `tools/menu_check.py` "display" and `tools/regress.py` "widepref" check it.
+- [x] **Cutscene framing** (2026-11-18, Display > Screen, `display.cutscene_framing`, default PS2, `VCS_CUTSCENE_FRAMING`):
+  while the camera's cinematic widescreen is on (`TheCamera + 0x844`, cutscenes and SWITCH_WIDESCREEN; the game's aspect
+  then 1.25) the PS2 showed the 4:3 width under bars, and scenes park actors just outside it until they walk in - Hor+
+  showed Vic waiting at the right of the jet in Soldier's airport scene (issue #40). PS2 framing keeps the view window's
+  width (f12) and sets its aspect (f13) to the display's: a Vert- 16:9 picture of what the bars left, square pixels, and
+  the bars are not drawn over it. Wide keeps Hor+ (and the bars setting).
 - **Scope / camera mask** (same day): the black mask around the sniper scope, the camera and binoculars was squeezed
   into the middle 4:3 with the scope, so the world showed at the sides in widescreen; its side bars now reach the
   screen edges (game-internals.md 6f "Scope mask", regress step "scopemask").
