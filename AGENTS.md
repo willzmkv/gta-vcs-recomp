@@ -112,6 +112,7 @@ python tools/memcheck.py [OUT] [--minutes 15]                 # memory over a ro
 python tools/shakedown.py [OUT]                               # mission 50: cutscene + shop entry (the "Loading..." hang)
 python tools/haze_check.py [OUT] [--timing 1 --fps 144]       # mission 94 at 60 fps: the cutscene that stuck on "Loading...",
                                                               # the haze across a 16:9 picture
+python tools/hdworld_missions.py [OUT]                        # HD world building switches (#61): every WRLD switch location (R=3 vs 0)
 python tools/soundcheck.py all OUT [--mission N]             # native sound vs the emulated IOP: record, replay, compare
 python tools/hose_check.py [OUT] [--step 144]                 # Hose the Hoes at a simulated frame rate: the girls' bar,
                                                               # the parked cars' fuses (the hose: framerate_audit --only hose)
