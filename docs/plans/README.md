@@ -9,6 +9,8 @@ contract: hooks, tests on card copies, no game data in git) and the `docs/game-i
 then follow the plan's steps. Close the issue with the commit that finishes it ("done when" met), and write what you
 learnt into `docs/game-internals.md`.
 
+**Another agent helping?** Read [AGENT-HANDOFF.md](AGENT-HANDOFF.md) first: it works in its own worktree and branch, builds into its own folder and delivers by pull request into `hd-world-merge`.
+
 | Plan | What | Milestone |
 |---|---|---|
 | [Release 1.0.0](2026-11-17-release-1.0.0.md) | The path to the release: the order, the police chase check, the test suite, CI, notes, release candidate, tag | 1.0.0 |
