@@ -544,6 +544,7 @@ namespace vcs::prompts
         // came from the help box)
         constexpr float kHelpTextScale = 0.74f, kHelpBoxScale = 0.84f;
         bool g_inHelpBox = false; // game thread
+        bool g_inSubFont = false; // fontRender: drawing with the subtitles' copy (style 4)
         bool inSubtitleFn(uint32_t ra)
         {
             return (ra >= kSubtitleFrom && ra < kSubtitleTo) || (ra >= kSubtitle2From && ra < kSubtitle2To) ||
@@ -697,6 +698,44 @@ namespace vcs::prompts
         // FUN_003F4000(style): the current style - 1 becomes 4 when asked from the subtitle function
         std::atomic<uint32_t> g_subCalls{0}, g_subSwitched{0}, g_subLettersDrawn{0}; // (prompts subtitles)
         PS2Runtime::RecompiledFunction g_origFontSetScale = nullptr;
+
+        // Sub-pixel letters (#43). FUN_003E0888(vertices a0, rect a1, the corners' u / v f12..f19) turns a glyph's rect
+        // (x0 +0, x1 +8: 480-wide units, times 0x48A0D8) into Im2D's whole-pixel positions (cvt.w.s truncates), so at 4K
+        // the gaps between letters varied by up to 6 screen pixels ("mu dar"). For Oswald's letters - their v exactly the
+        // row kSubV, so a multiple of 128 in Im2D's 1.15 - the position's lost sixteenths go into the low bits of the
+        // corners' v (bit 6 the mark; the left corners x0's, the right ones x1's, told apart by u), before the original
+        // runs; classify reads them back as the vertices' dx.
+        constexpr uint32_t kRectVertices = 0x003E0888u, kPositionScaleX = 0x0048A0D8u;
+        constexpr uint32_t kSubPixelMark = 0x40u;
+        PS2Runtime::RecompiledFunction g_origRectVertices = nullptr;
+        PS2_GUEST_CC void rectVertices(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            // the corners' (u, v) registers: (f12, f13), (f14, f15), (f18, f19), (f16, f17)
+            static constexpr int kU[4] = {12, 14, 18, 16}, kV[4] = {13, 15, 19, 17};
+            const float top = static_cast<float>(kSubV) / 256.0f;
+            bool letter = g_inSubFont;
+            for (int k = 0; k < 4 && letter; ++k)
+                letter = ctx->f[kV[k]] >= top - 1e-6f; // every corner on or below the row (a letter's: top kSubV)
+            if (letter && (ctx->f[13] == top || ctx->f[15] == top || ctx->f[19] == top || ctx->f[17] == top))
+            {
+                const uint32_t rect = GPR_U32(ctx, 5) & kRamMask;
+                float x0 = 0.0f, x1 = 0.0f, scale = 0.0f;
+                std::memcpy(&x0, rdram + rect, 4);
+                std::memcpy(&x1, rdram + ((rect + 8u) & kRamMask), 4);
+                std::memcpy(&scale, rdram + kPositionScaleX, 4);
+                auto sixteenths = [](float x) {
+                    const float f = x - std::trunc(x);
+                    return static_cast<uint32_t>(std::clamp(static_cast<int>(std::lround(std::fabs(f) * 16.0f)), 0, 15));
+                };
+                const uint32_t left = sixteenths(x0 * scale), right = sixteenths(x1 * scale);
+                float uMin = ctx->f[kU[0]];
+                for (int k = 1; k < 4; ++k)
+                    uMin = std::min(uMin, ctx->f[kU[k]]);
+                for (int k = 0; k < 4; ++k)
+                    ctx->f[kV[k]] += static_cast<float>(kSubPixelMark | (ctx->f[kU[k]] <= uMin ? left : right)) / 32768.0f;
+            }
+            g_origRectVertices(rdram, ctx, runtime);
+        }
         // FUN_00262570(font, scale): for the copy, the scale over kSubGrid (its measures are kSubGrid x)
         PS2_GUEST_CC void fontSetScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
@@ -1186,7 +1225,6 @@ namespace vcs::prompts
             return true;
         }
 
-        bool g_inSubFont = false; // fontRender: drawing with the subtitles' copy (style 4)
 
         void captureFontBatch(uint8_t *rdram, R5900Context *ctx)
         {
@@ -1372,7 +1410,9 @@ namespace vcs::prompts
                     {
                         hit.u[i] = uv[2 * i] > u0 + 0.75f ? c.u1 : c.u0;
                         hit.v[i] = uv[2 * i + 1] > v0 + 0.75f ? c.v1 : c.v0;
-                        hit.dx[i] = 0.0f;
+                        // the position's sixteenths of a pixel, carried in v's low bits (rectVertices)
+                        const uint32_t low = static_cast<uint32_t>(std::lround(uv[2 * i + 1] * 128.0f)) & 0x7Fu;
+                        hit.dx[i] = low & kSubPixelMark ? static_cast<float>(low & 0xFu) * 0.0625f : 0.0f;
                     }
                     hit.shadow = false;
                     hit.tint = true;
@@ -1751,6 +1791,9 @@ namespace vcs::prompts
         runtime.replaceFunction(kFontHeightField, &fontHeightField); // (a leaf too)
         if ((g_origFontSetScale = runtime.lookupFunction(kFontSetScale)))
             runtime.replaceFunction(kFontSetScale, &fontSetScale);
+        static const bool subPixel = !(std::getenv("VCS_SUBTITLE_SUBPIXEL") && *std::getenv("VCS_SUBTITLE_SUBPIXEL") == '0');
+        if (subPixel && (g_origRectVertices = runtime.lookupFunction(kRectVertices)))
+            runtime.replaceFunction(kRectVertices, &rectVertices);
         gsHwSetGlyphClassifier(&classify);
         g_installed = true;
 

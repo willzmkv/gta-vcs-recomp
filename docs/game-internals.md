@@ -1863,6 +1863,11 @@ Read with `tools/eedecomp.py` and the rig (`prompts subtitles` counts the switch
   becomes 4. The renderer knows a letter by its texture coordinates (the letters touch: their corners are shared, so
   positions, as the button glyphs use, could not tell them apart) and draws it from the glyph atlas in the text's
   colour.
+- **Sub-pixel letters** (2026-11-18, #43): `FUN_003E0888(vertices a0, rect a1, corner u / v f12..f19)` makes a glyph's
+  four Im2D vertices - x = cvt.w.s(rect x * `*0x48A0D8`), truncated; u / v = cvt(f * 32768 + 0.5). Oswald's letters
+  (v exactly row 253: a multiple of 128 in 1.15) get the lost sixteenths of x0 / x1 into v's low bits (0x40 the mark)
+  before the original; the classifier puts them back as the vertices' dx. Even gaps at 4K; `VCS_SUBTITLE_SUBPIXEL=0`
+  = before.
 - **The help box too** (2026-11-18): `FUN_00321CF8` sets style 1 at 0x322048 / 0x322050 before its text; its range is
   among the subtitle functions'. Its box is `lines (FUN_003F4308) x CFont::GetHeight (FUN_003F4138: the font's +6 via
   FUN_003F4110 -> FUN_003E5D90, times the global scale 0x48A1E4) + 20` - the global scale, not the font's own +0x20 that
