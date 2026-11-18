@@ -494,9 +494,21 @@ namespace vcs::distant
                 const uint32_t vtable = rd32(entity + 0x5Cu);
                 if (vtable != kCarVtable && vtable != kCar2Vtable)
                     return;
+                // never a wreck (status 5, entity +0x48 bits 4-8): its burnt shell became every far car of its model - a
+                // chassis without a body down the road (#34)
+                if (((rd32(entity + 0x48u) >> 4) & 0x1Fu) == 5u)
+                    return;
             }
             else if ((g_crowds.load(std::memory_order_relaxed) > 0 || realPedProxies()) && isRandomPed(entity))
+            {
+                // never a driver or a passenger: drawn seated (state 0x37 driving, or in a vehicle and not on foot), it
+                // gave the standing walkers of its model a sitting pose (#34; at Little Havana 14 of 15 pool peds were
+                // drivers)
+                const uint32_t state = rd32(entity + 0x8C4u);
+                if (state == 0x37u || (rd32(entity + 0x480u) != 0 && state != 1u))
+                    return;
                 ped = true;
+            }
             else
                 return;
             Rendered r{};
