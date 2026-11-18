@@ -2,7 +2,8 @@
 """Kenney's Input Prompts (CC0) for the game's button prompts (src/game/vcs_glyph_art.cpp, "Icon style: Kenney").
 
     python tools/kenney_prompts.py copy KENNEY_DIR     the icons the prompts use (128 px, "Double") into assets/prompts/kenney
-    python tools/kenney_prompts.py embed OUT.cpp       those icons as a C++ table (CMake runs it at configure)
+    python tools/kenney_prompts.py embed OUT.cpp       those icons as a C++ table (CMake runs it at configure), and the
+                                                     subtitles' font (assets/fonts/oswald, OFL) beside them
 
 KENNEY_DIR is the unpacked pack (https://kenney.nl/assets/input-prompts, 1.5a: "Nintendo Switch/Double/..."). Only
 the files below are copied, with the pack's License.txt; they are Kenney's, CC0 - not game data - and live in git.
@@ -13,6 +14,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS = os.path.join(ROOT, "assets", "prompts", "kenney")
+SUBTITLE_FONT = os.path.join(ROOT, "assets", "fonts", "oswald", "Oswald-wght.ttf")
 
 PADS = {
     "PlayStation Series": ["playstation_button_color_cross", "playstation_button_color_circle", "playstation_button_color_square",
@@ -68,12 +70,16 @@ def embed(out):
     lines += ['        {"%s", kIcon%d, sizeof(kIcon%d)},' % (n, i, i) for i, n in enumerate(names)]
     lines.append("        {nullptr, nullptr, 0}};")
     lines.append("    extern const size_t kPromptIconCount = %d;" % len(names))
+    font = open(SUBTITLE_FONT, "rb").read() if os.path.isfile(SUBTITLE_FONT) else b""
+    lines.append("    static const unsigned char kFont[] = {%s};" % (",".join(str(b) for b in font) or "0"))
+    lines.append("    extern const unsigned char *const kSubtitleFont = kFont;")
+    lines.append("    extern const size_t kSubtitleFontSize = %d;" % len(font))
     lines.append("}")
     text = "\n".join(lines) + "\n"
     if not (os.path.isfile(out) and open(out, encoding="utf-8").read() == text): # (unchanged: no rebuild)
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
         open(out, "w", encoding="utf-8", newline="\n").write(text)
-    print("[kenney] %d prompt icons embedded" % len(names))
+    print("[kenney] %d prompt icons embedded, the subtitles' font (%d bytes)" % (len(names), len(font)))
 
 
 if __name__ == "__main__":

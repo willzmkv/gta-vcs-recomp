@@ -510,6 +510,195 @@ namespace vcs::prompts
             g_resolved.assign(g_resolved.size(), {});
         }
 
+        // ---- the subtitles' font (Enhancements > Subtitles: Oswald) ---------------------------------------------------
+        // The subtitles (CHud's message at the bottom: cutscene lines, mission text; FUN_0031CA80) are drawn with the
+        // "Game" font, style 1, as the help box. Their letters come out of Oswald instead, through the game's own text
+        // code - its layout (centring, wrapping, colours) unchanged: the font list (*0x48A1D8, four fonts) is copied into
+        // guest scratch with a fifth, style 4 = a copy of "Game" whose letter table holds Oswald's advances (width),
+        // room for the outline either side (left / right: drawn beyond the advance, FUN_00261600) and texture
+        // coordinates on a row no letter of the font has (v kSubV, u 2 x the letter); the subtitle function's choice of
+        // style 1 (FUN_003F4000 called from inside it) becomes 4, and its letters are drawn from the glyph atlas's
+        // "sub:<char>" cells in the text's colour (gsHw glyph hit `tint`). A letter Oswald lacks keeps the font's own.
+        constexpr uint32_t kSubFonts = 0x00064000u;   // the font list's copy: the four fonts, then ours
+        constexpr uint32_t kSubFont = 0x00064040u;    // "Game"'s copy (0x50 bytes)
+        constexpr uint32_t kSubLetters = 0x00064100u; // its letter table (7 halfwords a letter)
+        constexpr uint32_t kSubButtons = 0x00065000u; // its button glyph table: the prompts' (kTable), kSubGrid x
+        constexpr uint32_t kFontSetScale = 0x00262570u; // FUN_00262570(font a0, scale f12): +0x20, each text's scale
+        // The copy's measures are kSubGrid x the font's, its scale 1 / kSubGrid of the asked: the same size on screen,
+        // each letter's advance rounded to a quarter of the font's unit (whole units left gaps: "volt ar")
+        constexpr int kSubGrid = 4;
+        constexpr uint32_t kSetFontStyle = 0x003F4000u, kFontStyle = 0x0048A1DCu;
+        // CHud's two message drawers (functions.csv): FUN_0031CA80 when the message's +0x21C flag is 1, FUN_003219E0
+        // when it is 0 - the same text (the HUD's +0x1C), each with a widescreen (cutscene) branch
+        constexpr uint32_t kSubtitleFrom = 0x0031CA80u, kSubtitleTo = 0x0031D8A8u;
+        constexpr uint32_t kSubtitle2From = 0x003219E0u, kSubtitle2To = 0x00321CF8u;
+        bool inSubtitleFn(uint32_t ra) { return (ra >= kSubtitleFrom && ra < kSubtitleTo) || (ra >= kSubtitle2From && ra < kSubtitle2To); }
+        constexpr uint16_t kSubV = 253;
+        std::atomic<int> g_subSetting{0}; // 0 the game's font, 1 Oswald
+        bool g_subIn = false, g_subReady = false;
+        uint32_t g_subStylesWas = 0, g_subGame = 0;
+        std::vector<uint16_t> g_subChars;    // per letter of the copy: its character (Oswald's when g_subOswald)
+        std::vector<uint8_t> g_subOswald;
+        std::vector<Cell> g_subCells;        // per letter: its cell in the atlas in use
+        std::vector<char> g_subCellValid;
+        std::shared_ptr<Atlas> g_subAtlas;   // the atlas g_subCells come from
+
+        bool subtitlesOn() { return g_subSetting.load(std::memory_order_relaxed) != 0; }
+        void postSubCells(bool on); // (below)
+
+        void subOut()
+        {
+            if (!g_subIn)
+                return;
+            if (rd32(kFontStyles) == kSubFonts)
+                wr32(kFontStyles, g_subStylesWas);
+            if (rd32(kFontStyle) == 4u)
+                wr32(kFontStyle, 1u);
+            g_subIn = g_subReady = false;
+            postSubCells(false);
+        }
+
+        void subIn()
+        {
+            const uint32_t game = gameFont();
+            if (!game)
+                return;
+            if (g_subIn && game == g_subGame && rd32(kFontStyles) == kSubFonts)
+            {
+                // the button glyphs follow the game's (tableIn may have moved them, the frame kick re-widths them): a copy
+                // in the grid's measures
+                const uint16_t buttons = std::min<uint16_t>(rd16(game + 2), 0x600 / 14);
+                const uint32_t from = rd32(game + 0xC);
+                if (buttons && inRam(from, buttons * 14u))
+                    for (uint16_t i = 0; i < buttons; ++i)
+                    {
+                        int16_t rec[7];
+                        std::memcpy(rec, g_rdram + from + i * 14u, 14);
+                        for (int k = 0; k < 4; ++k)
+                            rec[k] = static_cast<int16_t>(rec[k] * kSubGrid);
+                        std::memcpy(g_rdram + kSubButtons + i * 14u, rec, 14);
+                    }
+                wr16(kSubFont + 2, buttons);
+                wr32(kSubFont + 0xC, kSubButtons);
+                return;
+            }
+            const uint32_t styles = rd32(kFontStyles);
+            const uint16_t count = rd16(game);
+            const uint32_t table = rd32(game + 8);
+            if (styles == kSubFonts || !inRam(styles, 16) || count == 0 || count > 255 || !inRam(table, count * 14u))
+                return;
+            for (uint32_t i = 0; i < 4; ++i)
+                wr32(kSubFonts + i * 4u, rd32(styles + i * 4u));
+            wr32(kSubFonts + 16u, kSubFont);
+            std::memcpy(g_rdram + kSubFont, g_rdram + game, 0x50);
+            g_subChars.assign(count, 0);
+            g_subOswald.assign(count, 0);
+            for (uint16_t i = 0; i < count; ++i)
+            {
+                int16_t rec[7];
+                std::memcpy(rec, g_rdram + table + i * 14u, 14);
+                const uint16_t ch = static_cast<uint16_t>(rec[4]);
+                g_subChars[i] = ch;
+                // (the font's 128-159 are symbols of its own, not Latin-1's)
+                const int adv = ch < 128 || ch >= 160 ? glyphart::subtitleAdvance(ch, kSubGrid) : -1;
+                if (adv >= 0)
+                {
+                    const int16_t mine[7] = {static_cast<int16_t>(glyphart::kSubtitleMargin * kSubGrid), static_cast<int16_t>(adv),
+                                             static_cast<int16_t>(glyphart::kSubtitleMargin * kSubGrid),
+                                             static_cast<int16_t>(glyphart::kSubtitleCell * kSubGrid), rec[4], static_cast<int16_t>(2 * i),
+                                             static_cast<int16_t>(kSubV)};
+                    std::memcpy(g_rdram + kSubLetters + i * 14u, mine, 14);
+                    g_subOswald[i] = 1;
+                }
+                else
+                {
+                    for (int k = 0; k < 4; ++k)
+                        rec[k] = static_cast<int16_t>(rec[k] * kSubGrid);
+                    std::memcpy(g_rdram + kSubLetters + i * 14u, rec, 14);
+                }
+            }
+            wr32(kSubFont + 8, kSubLetters);
+            wr16(kSubFont + 4, static_cast<uint16_t>(rd16(game + 4) * kSubGrid)); // the line heights
+            wr16(kSubFont + 6, static_cast<uint16_t>(rd16(game + 6) * kSubGrid));
+            g_subStylesWas = styles;
+            g_subGame = game;
+            wr32(kFontStyles, kSubFonts);
+            g_subIn = true;
+            g_subAtlas.reset(); // the cells looked up again
+            std::fprintf(stderr, "[subtitles] Oswald: %d of the font's %u letters, style 4 at 0x%x\n",
+                         static_cast<int>(std::count(g_subOswald.begin(), g_subOswald.end(), 1)), count, kSubFont);
+        }
+
+        // the letters' cells for the renderer (GS stage): a letter is known there by its texture row and column (the
+        // letters touch each other - their corners are shared, so positions cannot tell them apart); empty = none
+        struct SubCell
+        {
+            Cell cell;
+            bool valid = false;
+        };
+        std::shared_ptr<const std::vector<SubCell>> g_gsSubCells = std::make_shared<std::vector<SubCell>>(); // GS stage
+        void postSubCells(bool on)
+        {
+            auto cells = std::make_shared<std::vector<SubCell>>();
+            if (on)
+                for (size_t i = 0; i < g_subCells.size(); ++i)
+                    cells->push_back({g_subCells[i], g_subCellValid[i] != 0});
+            std::shared_ptr<const std::vector<SubCell>> shared = std::move(cells);
+            ps2_render_worker::post([shared] { ps2_render_worker::runOnGsStage([shared] { g_gsSubCells = shared; }); });
+        }
+
+        // the letters' cells in the atlas in use: Oswald's letters are drawn from it once every one has its cell
+        void subCells()
+        {
+            if (!g_subIn || !g_atlas || g_subAtlas == g_atlas)
+                return;
+            g_subAtlas = g_atlas;
+            g_subCells.assign(g_subChars.size(), {});
+            g_subCellValid.assign(g_subChars.size(), 0);
+            bool all = true;
+            for (size_t i = 0; i < g_subChars.size(); ++i)
+            {
+                if (!g_subOswald[i])
+                    continue;
+                const auto it = g_atlas->cells.find("sub:" + std::to_string(g_subChars[i]));
+                if (it == g_atlas->cells.end())
+                {
+                    all = false;
+                    continue;
+                }
+                g_subCells[i] = it->second;
+                g_subCellValid[i] = 1;
+            }
+            g_subReady = all;
+            postSubCells(all);
+        }
+
+        // FUN_003F4000(style): the current style - 1 becomes 4 when asked from the subtitle function
+        std::atomic<uint32_t> g_subCalls{0}, g_subSwitched{0}, g_subLettersDrawn{0}; // (prompts subtitles)
+        PS2Runtime::RecompiledFunction g_origFontSetScale = nullptr;
+        // FUN_00262570(font, scale): for the copy, the scale over kSubGrid (its measures are kSubGrid x)
+        PS2_GUEST_CC void fontSetScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if ((GPR_U32(ctx, 4) & kRamMask) == kSubFont)
+                ctx->f[12] /= static_cast<float>(kSubGrid);
+            g_origFontSetScale(rdram, ctx, runtime);
+        }
+        PS2_GUEST_CC void setFontStyle(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+        {
+            uint32_t style = GPR_U32(ctx, 4);
+            const uint32_t ra = GPR_U32(ctx, 31);
+            if (inSubtitleFn(ra))
+                g_subCalls.fetch_add(1, std::memory_order_relaxed);
+            if (style == 1u && g_subReady && subtitlesOn() && inSubtitleFn(ra) && rd32(kFontStyles) == kSubFonts)
+            {
+                style = 4u;
+                g_subSwitched.fetch_add(1, std::memory_order_relaxed);
+            }
+            (void)rdram;
+            wr32(kFontStyle, style);
+            ctx->pc = ra;
+        }
+
         // ---- the expander: phrases into tokens ----------------------------------------------------------------------
         struct Phrase
         {
@@ -933,6 +1122,7 @@ namespace vcs::prompts
             Cell cell;
             float dxLeft = 0.0f; // the left edge moved (pixels): a glyph wider than the game's box
             bool shadow = false;
+            bool tint = false; // a subtitle letter: the text's own colour
         };
         std::vector<Drawn> g_drawn; // game thread
         bool g_inGameFont = false, g_shadow = false;
@@ -956,6 +1146,8 @@ namespace vcs::prompts
                 d.corner[i] = static_cast<uint8_t>((d.x[i] * 2 > x0 + x1 ? 1 : 0) | (d.y[i] * 2 > y0 + y1 ? 2 : 0));
             return true;
         }
+
+        bool g_inSubFont = false; // fontRender: drawing with the subtitles' copy (style 4)
 
         void captureFontBatch(uint8_t *rdram, R5900Context *ctx)
         {
@@ -1070,6 +1262,7 @@ namespace vcs::prompts
         PS2_GUEST_CC void fontRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_inGameFont = g_tableIn && g_font && (GPR_U32(ctx, 4) & kRamMask) == g_font;
+            g_inSubFont = g_subIn && (GPR_U32(ctx, 4) & kRamMask) == kSubFont;
             g_shadow = GPR_U32(ctx, 11) != 0;
             g_origFontRender(rdram, ctx, runtime);
         }
@@ -1083,7 +1276,11 @@ namespace vcs::prompts
 
         PS2_GUEST_CC void im2dRenderIndexed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            if (active())
+            if (g_inSubFont && GPR_U32(ctx, 31) == kGlyphBatch)
+            {
+                // (the subtitles' letters: known by their texture coordinates in classify)
+            }
+            else if (active())
             {
                 if (GPR_U32(ctx, 31) == kGlyphBatch)
                 {
@@ -1105,8 +1302,35 @@ namespace vcs::prompts
         std::shared_ptr<const GlyphFrame> g_gsFrame = std::make_shared<GlyphFrame>(); // GS stage
         uint32_t positionKey(int x, int y) { return uint32_t(uint16_t(x)) | (uint32_t(uint16_t(y)) << 16); }
 
-        bool classify(const float *xy, uint32_t count, GSHwGlyphHit &hit)
+        bool classify(const float *xy, const float *uv, uint32_t count, GSHwGlyphHit &hit)
         {
+            // a subtitle letter: on row kSubV, column 2 x the letter (subIn), its corners by where its texels lie
+            if (const std::vector<SubCell> &sub = *g_gsSubCells; !sub.empty() && count >= 3)
+            {
+                float u0 = 1e9f, v0 = 1e9f;
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    u0 = std::min(u0, uv[2 * i]);
+                    v0 = std::min(v0, uv[2 * i + 1]);
+                }
+                if (std::fabs(v0 - kSubV) < 0.75f)
+                {
+                    const int letter = static_cast<int>(std::lround((u0 - 0.5f) / 2.0f));
+                    if (letter < 0 || letter >= static_cast<int>(sub.size()) || !sub[letter].valid)
+                        return false;
+                    const Cell &c = sub[letter].cell;
+                    for (uint32_t i = 0; i < count; ++i)
+                    {
+                        hit.u[i] = uv[2 * i] > u0 + 0.75f ? c.u1 : c.u0;
+                        hit.v[i] = uv[2 * i + 1] > v0 + 0.75f ? c.v1 : c.v0;
+                        hit.dx[i] = 0.0f;
+                    }
+                    hit.shadow = false;
+                    hit.tint = true;
+                    g_subLettersDrawn.fetch_add(1, std::memory_order_relaxed);
+                    return true;
+                }
+            }
             const GlyphFrame &f = *g_gsFrame;
             if (f.glyphs.empty())
                 return false;
@@ -1132,6 +1356,7 @@ namespace vcs::prompts
                 hit.v[i] = corner & 2u ? d.cell.v1 : d.cell.v0;
                 hit.dx[i] = corner & 1u ? 0.0f : d.dxLeft;
                 hit.shadow = d.shadow;
+                hit.tint = d.tint;
             }
             return glyph != ~0u;
         }
@@ -1167,10 +1392,15 @@ namespace vcs::prompts
         std::vector<std::string> allSpecs()
         {
             std::vector<std::string> specs;
-            for (int set : {PlayStation, Xbox, NintendoSwitch, Keyboard})
-                for (int ctx = 0; ctx < kCtxCount; ++ctx)
-                    for (int ctl = 0; ctl < kCtlCount; ++ctl)
-                        specs.push_back(specFor(set, ctx, ctl));
+            if (g_setting.load(std::memory_order_relaxed) != Original)
+                for (int set : {PlayStation, Xbox, NintendoSwitch, Keyboard})
+                    for (int ctx = 0; ctx < kCtxCount; ++ctx)
+                        for (int ctl = 0; ctl < kCtlCount; ++ctl)
+                            specs.push_back(specFor(set, ctx, ctl));
+            if (subtitlesOn()) // the subtitles' letters (Latin-1 less the font's own symbols 128-159)
+                for (int ch = 32; ch < 256; ++ch)
+                    if ((ch < 128 || ch >= 160) && glyphart::subtitleAdvance(static_cast<uint16_t>(ch)) >= 0)
+                        specs.push_back("sub:" + std::to_string(ch));
             std::sort(specs.begin(), specs.end());
             specs.erase(std::unique(specs.begin(), specs.end()), specs.end());
             return specs;
@@ -1223,16 +1453,47 @@ namespace vcs::prompts
         s.env = "VCS_PROMPT_STYLE";
         s.onChange = [](int v) { glyphart::setStyle(v); };
         settings::add(s);
+
+        s = {};
+        s.key = "enhance.subtitle_font";
+        s.page = "Enhancements";
+        s.section = "Subtitles";
+        s.label = "Subtitle font";
+        s.help = "The lines at the bottom of the screen - what people say in cutscenes, the mission's instructions. "
+                 "Original: the game's own letters. Oswald: a clean, tall font, sharp at any resolution, with an outline "
+                 "that keeps it readable over anything. The game's layout and colours stay.";
+        s.type = settings::Type::Choice;
+        s.choices = {{"Original", 0}, {"Oswald", 1}};
+        s.defaultValue = 0;
+        s.env = "VCS_SUBTITLE_FONT";
+        s.onChange = [](int v) { g_subSetting.store(v, std::memory_order_relaxed); };
+        settings::add(s);
+
+        s = {};
+        s.key = "enhance.subtitle_outline";
+        s.page = "Enhancements";
+        s.section = "Subtitles";
+        s.label = "Subtitle outline";
+        s.help = "How thick the dark edge round the subtitles' letters is (with the Oswald font). 0: none.";
+        s.type = settings::Type::Integer;
+        s.min = 0;
+        s.max = 100;
+        s.format = "%d%%";
+        s.defaultValue = 50;
+        s.env = "VCS_SUBTITLE_OUTLINE";
+        s.onChange = [](int v) { glyphart::setSubtitleOutline(v); };
+        settings::add(s);
     }
 
     void onHostFrame()
     {
-        if (!g_installed || g_setting.load(std::memory_order_relaxed) == Original || (g_hostFrames++ % 20) != 0 ||
+        if (!g_installed || (g_setting.load(std::memory_order_relaxed) == Original && !subtitlesOn()) || (g_hostFrames++ % 20) != 0 ||
             g_building.load())
             return;
         const int cellH = cellHeight();
         std::vector<std::string> specs = allSpecs();
-        std::string signature = std::to_string(cellH) + "/" + std::to_string(glyphart::style()); // (a new style: a new atlas)
+        std::string signature = std::to_string(cellH) + "/" + std::to_string(glyphart::style()) + "/" +
+                                std::to_string(glyphart::subtitleOutline()); // (a new style or outline: a new atlas)
         for (const std::string &s : specs)
             signature += "|" + s;
         if (signature == g_requested)
@@ -1296,18 +1557,6 @@ namespace vcs::prompts
         }
         g_drawn.clear();
 
-        const int choice = g_setting.load(std::memory_order_relaxed);
-        if (choice == Original)
-        {
-            if (g_tableIn)
-            {
-                tableOut();
-                std::fprintf(stderr, "[prompts] Original: the game's own glyphs and text\n");
-            }
-            g_appliedSet = -1;
-            g_shownSet.store(Original, std::memory_order_relaxed);
-            return;
-        }
         // a new atlas: to the renderer before the frames that use its cells
         {
             std::shared_ptr<Atlas> ready;
@@ -1322,6 +1571,26 @@ namespace vcs::prompts
                 auto pixels = ready->pixels;
                 ps2_render_worker::post([w, h, pixels] { ps2_render_worker::runOnGsStage([w, h, pixels] { gsHwSetGlyphAtlas(w, h, pixels); }); });
             }
+        }
+        if (subtitlesOn())
+        {
+            subIn();
+            subCells();
+        }
+        else
+            subOut();
+
+        const int choice = g_setting.load(std::memory_order_relaxed);
+        if (choice == Original)
+        {
+            if (g_tableIn)
+            {
+                tableOut();
+                std::fprintf(stderr, "[prompts] Original: the game's own glyphs and text\n");
+            }
+            g_appliedSet = -1;
+            g_shownSet.store(Original, std::memory_order_relaxed);
+            return;
         }
         if (!g_atlas)
             return; // the first atlas is being made
@@ -1365,6 +1634,9 @@ namespace vcs::prompts
         runtime.replaceFunction(kFontRender, &fontRender);
         runtime.replaceFunction(kIm2DRender, &im2dRender);
         runtime.replaceFunction(kIm2DRenderIndexed, &im2dRenderIndexed);
+        runtime.replaceFunction(kSetFontStyle, &setFontStyle); // (a leaf: the style stored, here too)
+        if ((g_origFontSetScale = runtime.lookupFunction(kFontSetScale)))
+            runtime.replaceFunction(kFontSetScale, &fontSetScale);
         gsHwSetGlyphClassifier(&classify);
         g_installed = true;
 
@@ -1390,6 +1662,12 @@ namespace vcs::prompts
                     return reply("error unknown control");
                 return reply("ok " + specFor(g_shownSet.load(std::memory_order_relaxed), c, ctl));
             }
+            // prompts subtitles -> ok in=<copy made> ready=<cells> calls=<style asks from the subtitle function>
+            // switched=<made style 4> letters=<Oswald letters drawn>
+            if (args == "subtitles")
+                return reply("ok in=" + std::to_string(g_subIn) + " ready=" + std::to_string(g_subReady) + " calls=" +
+                             std::to_string(g_subCalls.load()) + " switched=" + std::to_string(g_subSwitched.load()) +
+                             " letters=" + std::to_string(g_subLettersDrawn.load()) + " style=" + std::to_string(rd32(kFontStyle)));
             // prompts unknown -> ok <the configuration's actions whose American text the phrase table leaves words in>
             if (args == "unknown")
             {

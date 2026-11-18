@@ -4,6 +4,9 @@
 
 #include "platform/platform.h"
 #include "../../third_party/stb/stb_image.h"
+#define STBTT_STATIC // (this file's own copy: Dear ImGui keeps another)
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "../../third_party/stb/stb_truetype.h"
 
 #include <algorithm>
 #include <atomic>
@@ -25,6 +28,8 @@ namespace vcs::glyphart
     };
     extern const EmbeddedIcon kPromptIcons[];
     extern const size_t kPromptIconCount;
+    extern const unsigned char *const kSubtitleFont; // Oswald (OFL), assets/fonts/oswald
+    extern const size_t kSubtitleFontSize;
 
     namespace
     {
@@ -572,6 +577,73 @@ namespace vcs::glyphart
             return 1.2f;
         }
 
+        // ---- the subtitles' font (Oswald, OFL; embedded by tools/kenney_prompts.py) ----
+        // A letter's box is kSubtitleCell of the game's font units high (its "Game" font's letters are 23: the box grows
+        // down from the line's top); the em is kEm of the box, the baseline kBaseline down - Oswald's Latin-1 reaches 1.056
+        // em above the baseline (an accented capital) and 0.235 em below: 1.29 em, in 95 % of the box.
+        constexpr float kEm = 0.735f, kBaseline = 0.80f;
+        std::atomic<int> g_subOutline{50}; // setSubtitleOutline: 0..100 % of kMaxOutline
+
+        struct SubFont
+        {
+            stbtt_fontinfo info{};
+            bool ok = false;
+            float unit = 0.0f; // the em's scale for one pixel (font units -> em)
+        };
+        const SubFont &subFont()
+        {
+            static const SubFont font = [] {
+                SubFont f;
+                if (kSubtitleFont && kSubtitleFontSize && stbtt_InitFont(&f.info, kSubtitleFont, stbtt_GetFontOffsetForIndex(kSubtitleFont, 0)))
+                {
+                    f.ok = true;
+                    f.unit = stbtt_ScaleForMappingEmToPixels(&f.info, 1.0f);
+                }
+                return f;
+            }();
+            return font;
+        }
+
+        // "sub:<char>": the letter, white, with its outline in black, kSubtitleMargin units of room each side
+        float subtitleLetter(const std::string &rest, Canvas *c)
+        {
+            const SubFont &f = subFont();
+            const int ch = std::atoi(rest.c_str());
+            const int adv = subtitleAdvance(static_cast<uint16_t>(ch), kSubtitleGrid);
+            if (!f.ok || adv < 0)
+                return -1.0f;
+            const float width = static_cast<float>(adv + 2 * kSubtitleMargin * kSubtitleGrid) / (kSubtitleCell * kSubtitleGrid);
+            if (!c)
+                return width;
+            const int glyph = stbtt_FindGlyphIndex(&f.info, ch);
+            const float h = static_cast<float>(c->h), perUnit = h / kSubtitleCell;
+            const float outline = g_subOutline.load(std::memory_order_relaxed) / 100.0f * 0.09f * h; // pixels
+            const int pad = static_cast<int>(std::ceil(outline)) + 2;
+            const float onEdge = 180.0f, perPixel = onEdge / pad;
+            int gw = 0, gh = 0, xoff = 0, yoff = 0;
+            unsigned char *sdf = stbtt_GetGlyphSDF(&f.info, stbtt_ScaleForMappingEmToPixels(&f.info, kEm * h), glyph, pad,
+                                                   static_cast<unsigned char>(onEdge), perPixel, &gw, &gh, &xoff, &yoff);
+            if (!sdf)
+                return width; // (a space)
+            const float penX = kSubtitleMargin * perUnit, baseY = kBaseline * h;
+            for (int y = 0; y < gh; ++y)
+                for (int x = 0; x < gw; ++x)
+                {
+                    const int px = static_cast<int>(penX) + xoff + x, py = static_cast<int>(baseY) + yoff + y;
+                    if (px < 0 || py < 0 || px >= c->w || py >= c->h)
+                        continue;
+                    const float inside = (sdf[y * gw + x] - onEdge) / perPixel; // pixels inside the outline of the letter
+                    const float fill = std::clamp(inside + 0.5f, 0.0f, 1.0f);
+                    const float ring = outline > 0.0f ? std::clamp(inside + outline + 0.5f, 0.0f, 1.0f) : fill;
+                    float *p = &c->px[(static_cast<size_t>(py) * c->w + px) * 4];
+                    const float a = std::max(fill, ring); // white over the black ring (premultiplied: the white's share)
+                    p[0] = p[1] = p[2] = fill;
+                    p[3] = a;
+                }
+            stbtt_FreeSDF(sdf, nullptr);
+            return width;
+        }
+
         // ---- Kenney's Input Prompts (CC0; assets/prompts/kenney, embedded by tools/kenney_prompts.py) ----
         std::atomic<int> g_style{0}; // setStyle: 0 Kenney's icons, 1 drawn here
 
@@ -796,6 +868,8 @@ namespace vcs::glyphart
         // the glyph named by spec: drawn into c when given; its width either way
         float compose(const std::string &spec, Canvas *c)
         {
+            if (spec.rfind("sub:", 0) == 0)
+                return std::max(subtitleLetter(spec.substr(4), c), 0.05f);
             if (const float w = kenney(spec, c); w > 0.0f)
                 return w;
             const size_t a = spec.find(':');
@@ -840,6 +914,17 @@ namespace vcs::glyphart
     float width(const std::string &spec) { return compose(spec, nullptr); }
 
     void setStyle(int style) { g_style.store(style, std::memory_order_relaxed); }
+    void setSubtitleOutline(int percent) { g_subOutline.store(std::clamp(percent, 0, 100), std::memory_order_relaxed); }
+    int subtitleOutline() { return g_subOutline.load(std::memory_order_relaxed); }
+    int subtitleAdvance(uint16_t ch, int grid)
+    {
+        const SubFont &f = subFont();
+        if (!f.ok || (ch != ' ' && !stbtt_FindGlyphIndex(&f.info, ch)))
+            return -1;
+        int advance = 0, lsb = 0;
+        stbtt_GetCodepointHMetrics(&f.info, ch, &advance, &lsb);
+        return std::max(1, static_cast<int>(std::lround(advance * f.unit * kEm * kSubtitleCell * grid)));
+    }
     int style() { return g_style.load(std::memory_order_relaxed); }
 
     void render(const std::string &spec, int w, int h, uint32_t *dst, int stride)

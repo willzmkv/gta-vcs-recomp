@@ -1828,6 +1828,29 @@ btn_triangle_psp, btn_square_psp, btn_up_psp, btn_down_psp, btn_left_psp, btn_ri
 - **The drop shadow** (`FUN_003f3d88` renders twice, the shadow first with t3 = 1) draws button glyphs in white too, the
   same as the text's own pass (`FUN_00261be8` gives them colour 255,255,255 with the text's alpha).
 
+### 6n2. The subtitles' font (2026-11-17, Enhancements > Subtitles: Oswald)
+
+Read with `tools/eedecomp.py` and the rig (`prompts subtitles` counts the switches and letters drawn):
+- **The message** at the bottom (cutscene lines, mission text) is CHud's text at its +0x1C (UTF-16), drawn by one of
+  two functions chosen by its +0x21C byte: `FUN_0031CA80` (1) and `FUN_003219E0` (0; the one Shakedown's opening
+  cutscene uses), each with a widescreen branch for cutscenes. Both start `FUN_003F4000(1)` (the style: stores
+  `0x48A1DC`), `FUN_003F3C30` (the font state's reset), `FUN_003F41E0` (justify, `0x48A1EC`), `FUN_003F40B0` (the
+  scale, `0x48A1E4` - 0.61 in `FUN_003219E0`), `FUN_003F4050` (the wrap rect, `0x711F38`) and `FUN_003F3D10` (print).
+- **The fonts**: `*0x48A1D8` -> four pointers (styles 0 "Fanc", 1 "Game", 2 "BigT", 3 "Page"), objects 0x50 bytes
+  apart: +0 u16 letters, +2 u16 button glyphs, +4 / +6 u16 line heights, +8 the letter table, +0xC the button glyph
+  table, +0x20 float the scale (`FUN_00262570(font, scale)` writes it for each text, `FUN_00262578` reads it).
+  "Game": 195 letters, 23 high, a 256 x 256 atlas.
+- **A letter** (14 bytes: left, width, right, height, char, u, v): the pen advances by `width` x scale
+  (`FUN_002625F0` measures so); the quad spans from x - left x scale to x + (width + right) x scale, y to y + height
+  x scale (`FUN_00261600`). left / right are room beyond the advance.
+- The Oswald letters (`src/game/vcs_prompts.cpp`, "the subtitles' font"): a fifth style - the font list copied to
+  0x64000 with a copy of "Game" at 0x64040 whose letters hold Oswald's advances and texture coordinates on row 253,
+  all its measures 4 x (the scale over 4 in the `FUN_00262570` hook: advances rounded to a quarter unit), its letters
+  28 units high (the line's 23: room for an accented capital); `FUN_003F4000(1)` from inside either message function
+  becomes 4. The renderer knows a letter by its texture coordinates (the letters touch: their corners are shared, so
+  positions, as the button glyphs use, could not tell them apart) and draws it from the glyph atlas in the text's
+  colour.
+
 ### 6o. Draw distance: the LOD scale and the two far planes (2026-11-07, Enhancements > World)
 
 Found reading the generated code's disassembly for the far plane's setters and readers and the camera update's LOD

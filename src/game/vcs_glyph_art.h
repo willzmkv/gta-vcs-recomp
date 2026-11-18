@@ -19,4 +19,13 @@ namespace vcs::glyphart
     // 0: Kenney's Input Prompts (CC0, embedded) where there is an icon; 1: everything drawn here (the classic look)
     void setStyle(int style);
     int style();
+
+    // The subtitles' font (Oswald, OFL, embedded; game/vcs_prompts.cpp): a letter's advance in the game's font units (a
+    // line kSubtitleLine high), -1 without one. A "sub:<char code>" glyph is that letter in white with a black outline
+    // (setSubtitleOutline: 0..100 % of its thickest), kSubtitleMargin units of room each side, the line's full height.
+    // The advance in 1 / grid of a unit (the letter tables a grid finer: game/vcs_prompts.cpp kSubGrid = kSubtitleGrid).
+    constexpr int kSubtitleLine = 23, kSubtitleCell = 28, kSubtitleMargin = 2, kSubtitleGrid = 4; // (the letter's box: kSubtitleCell)
+    int subtitleAdvance(uint16_t ch, int grid = 1);
+    void setSubtitleOutline(int percent);
+    int subtitleOutline();
 }

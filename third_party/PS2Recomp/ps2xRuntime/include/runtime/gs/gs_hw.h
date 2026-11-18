@@ -89,8 +89,11 @@ struct GSHwGlyphHit
 {
     float u[8], v[8], dx[8];
     bool shadow;
+    bool tint = false; // [gta-recomp] the primitive's own colour kept (a letter in the text's colour), not white / dark
 };
-using GSHwGlyphFn = bool (*)(const float *xy, uint32_t count, GSHwGlyphHit &hit);
+// [gta-recomp] uv: the vertices' texture coordinates in texels of the primitive's texture (u, v pairs) - a glyph known by
+// what it samples rather than where it lies (the subtitles' letters, which touch each other)
+using GSHwGlyphFn = bool (*)(const float *xy, const float *uv, uint32_t count, GSHwGlyphHit &hit);
 void gsHwSetGlyphClassifier(GSHwGlyphFn fn);
 // [gta-recomp] The glyph atlas (RGBA8, alpha in the PS2's 0..128 scale, w and h powers of two), taken by the next glyph
 // draw. Call it on the thread that processes GS packets (through ps2_render_worker::runOnGsStage), so the frames

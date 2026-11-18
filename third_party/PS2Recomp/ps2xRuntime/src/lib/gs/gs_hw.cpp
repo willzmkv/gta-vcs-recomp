@@ -3166,6 +3166,8 @@ namespace
                 out[i].t = hit.v[i];
                 out[i].q = 1.0f;
                 out[i].x += hit.dx[i];
+                if (hit.tint) // (the subtitles' letters: the text's colour, its shadow's dark)
+                    continue;
                 const uint8_t c = hit.shadow ? 0u : 128u;
                 out[i].r = out[i].g = out[i].b = c;
             }
@@ -3204,14 +3206,17 @@ namespace
             if (batch && s.tme && !s.texIsRt && batch->vertexCount == n && n <= 8u && gsDrawSourcePath(source) == 2u)
                 if (const GSHwGlyphFn glyph = g_glyphClassifier.load(std::memory_order_relaxed); glyph && g_glyphAtlas.pixels)
                 {
-                    float xy[2 * 8];
+                    float xy[2 * 8], uv[2 * 8];
                     for (uint32_t i = 0; i < n; ++i)
                     {
                         xy[2 * i] = batch->vertices[i].x - ofx;
                         xy[2 * i + 1] = batch->vertices[i].y - ofy;
+                        const float q = s.fst || out[i].q == 0.0f ? 1.0f : out[i].q;
+                        uv[2 * i] = s.fst ? out[i].s : out[i].s / q * static_cast<float>(s.tw);
+                        uv[2 * i + 1] = s.fst ? out[i].t : out[i].t / q * static_cast<float>(s.th);
                     }
                     GSHwGlyphHit hit{};
-                    if (glyph(xy, n, hit))
+                    if (glyph(xy, uv, n, hit))
                         glyphDraw(s, out, n, hit);
                 }
             if (s.texIsRt && rtFullScale())
