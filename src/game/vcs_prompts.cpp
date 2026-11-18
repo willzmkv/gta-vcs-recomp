@@ -66,6 +66,7 @@ namespace vcs::prompts
         constexpr uint32_t kTextTable = 0x0048A2A0u;     // -> the text table: {entries, count}; entry {u32 text, key[8]}
         constexpr uint32_t kImageItem = 0x0048FE10u;     // the menu's image item class (help-bar buttons)
         constexpr uint32_t kTable = 0x00061000u;         // our copy of the font's glyph table (guest scratch)
+        constexpr uint32_t kSubFonts = 0x00064000u;      // the subtitles' copy of the font list (subIn): the four fonts, then ours
         constexpr uint16_t kTokenBase = 0xE000u;
         constexpr uint16_t kTokenV = 255;                // the tokens' texture row
         constexpr int kGlyphHeight = 23;                 // the originals' height (menu units)
@@ -426,8 +427,10 @@ namespace vcs::prompts
 
         uint32_t gameFont()
         {
+            // (the font list may be the subtitles' copy in guest scratch, below inRam's floor: the button prompts found no
+            // font while the Oswald subtitles were on and kept the PS2's glyphs - prompts_check, 2026-11-18)
             const uint32_t styles = rd32(kFontStyles);
-            if (!inRam(styles, 8))
+            if (styles != kSubFonts && !inRam(styles, 8))
                 return 0;
             const uint32_t font = rd32(styles + 4);
             if (!inRam(font, 0x30) || std::memcmp(g_rdram + font + 0x2C, "Game", 4) != 0)
@@ -519,7 +522,6 @@ namespace vcs::prompts
         // coordinates on a row no letter of the font has (v kSubV, u 2 x the letter); the subtitle function's choice of
         // style 1 (FUN_003F4000 called from inside it) becomes 4, and its letters are drawn from the glyph atlas's
         // "sub:<char>" cells in the text's colour (gsHw glyph hit `tint`). A letter Oswald lacks keeps the font's own.
-        constexpr uint32_t kSubFonts = 0x00064000u;   // the font list's copy: the four fonts, then ours
         constexpr uint32_t kSubFont = 0x00064040u;    // "Game"'s copy (0x50 bytes)
         constexpr uint32_t kSubLetters = 0x00064100u; // its letter table (7 halfwords a letter)
         constexpr uint32_t kSubButtons = 0x00065000u; // its button glyph table: the prompts' (kTable), kSubGrid x
