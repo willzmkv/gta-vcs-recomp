@@ -14,7 +14,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS = os.path.join(ROOT, "assets", "prompts", "kenney")
-SUBTITLE_FONT = os.path.join(ROOT, "assets", "fonts", "oswald", "Oswald-wght.ttf")
+SUBTITLE_FONT = os.path.join(ROOT, "assets", "fonts", "oswald", "Oswald-SemiBold.ttf")
 
 PADS = {
     "PlayStation Series": ["playstation_button_color_cross", "playstation_button_color_circle", "playstation_button_color_square",

@@ -28,7 +28,7 @@ namespace vcs::glyphart
     };
     extern const EmbeddedIcon kPromptIcons[];
     extern const size_t kPromptIconCount;
-    extern const unsigned char *const kSubtitleFont; // Oswald (OFL), assets/fonts/oswald
+    extern const unsigned char *const kSubtitleFont; // Oswald SemiBold 4.103 (OFL), assets/fonts/oswald
     extern const size_t kSubtitleFontSize;
 
     namespace
@@ -579,9 +579,9 @@ namespace vcs::glyphart
 
         // ---- the subtitles' font (Oswald, OFL; embedded by tools/kenney_prompts.py) ----
         // A letter's box is kSubtitleCell of the game's font units high (its "Game" font's letters are 23: the box grows
-        // down from the line's top); the em is kEm of the box, the baseline kBaseline down - Oswald's Latin-1 reaches 1.056
-        // em above the baseline (an accented capital) and 0.235 em below: 1.29 em, in 95 % of the box.
-        constexpr float kEm = 0.735f, kBaseline = 0.80f;
+        // down from the line's top); the em is kEm of the box, the baseline kBaseline down - Oswald SemiBold's Latin-1
+        // reaches 1.071 em above the baseline (an accented capital) and 0.268 em below: 1.34 em, in 95 % of the box.
+        constexpr float kEm = 0.71f, kBaseline = 0.785f;
         std::atomic<int> g_subOutline{50}; // setSubtitleOutline: 0..100 % of kMaxOutline
 
         struct SubFont
