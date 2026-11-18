@@ -33,24 +33,24 @@ attempt painted a gradient over the picture by screen height and was removed).
 
 ## Work list
 
-One task at a time, in this order. T3 is the base for T4-T7.
+**Since 2026-11-18 the tasks are the repository's issues**, each with a plan in [docs/plans](plans/README.md) and a milestone: [1.0.0](https://github.com/willzmkv/gta-vcs-recomp/milestone/1) (before the fork's first release) or [After 1.0.0](https://github.com/willzmkv/gta-vcs-recomp/milestone/2). This table is the history of the T-numbered tasks and where each went; T3 is the base for T4-T7.
 
 | # | Task | Depends on | Status | Issue |
 |---|---|---|---|---|
 | T1 | Texture replacement: PCSX2-compatible packs, **DDS** first-class, PNG kept | - | **Done** (Vulkan compiled, not run) | [#1](https://github.com/willzmkv/gta-vcs-recomp/issues/1) |
 | T1b | Mod loader (PC Mod Loader's way): `modloader/` folders as mods, `modloader.ini`, F2 > Mods switched live with priority sliders; texture packs as its first content | T1 | **Done** | [#10](https://github.com/willzmkv/gta-vcs-recomp/issues/10) |
 | T1c | Mod loader: VCS's own game files from mods (archive entries `.mdl` / `.xtx` / ..., `MAIN.SCM`, `.GXT`) - the `std.stream` of PC Mod Loader | T1b | **Done** (archive entries and loose files, any size) | [#11](https://github.com/willzmkv/gta-vcs-recomp/issues/11) |
-| T2 | Draw distance (Project2DFX): view distance, object / LOD distance, HD world further, population distance, distant lights | - | Object distance done (#23); **beta, experimental** (branch task/T2-population): five sliders 0-100 (view, detail, population distance, vehicle / ped density), frame-rate target, distant traffic, pools 280 / 200, crowd fixes - all at the original by default. Left: the extra population's cost (D3D12 backend, instancing, simulation), LOD as Project2DFX (HD world further, distant lights) | [#2](https://github.com/willzmkv/gta-vcs-recomp/issues/2) |
-| T3 | Pre-HUD post-processing pass (colour + depth before the 2D) | - | Planned | [#3](https://github.com/willzmkv/gta-vcs-recomp/issues/3) |
-| T4 | Volumetric height fog (Proper Shaders `[VolumetricFog]`) | T3 | Planned | [#4](https://github.com/willzmkv/gta-vcs-recomp/issues/4) |
-| T5 | SMAA 1x | T3 | Planned | [#5](https://github.com/willzmkv/gta-vcs-recomp/issues/5) |
-| T6 | Simulated HDR: tone mapping, exposure, bloom (replaces the interim Exposure) | T3 | Planned | [#6](https://github.com/willzmkv/gta-vcs-recomp/issues/6) |
-| T7 | Sun rays | T3 | Planned | [#7](https://github.com/willzmkv/gta-vcs-recomp/issues/7) |
-| T8 | Presets and player docs (Authentic / Enhanced), release notes | T1-T7 | Planned | [#8](https://github.com/willzmkv/gta-vcs-recomp/issues/8) |
-| T9 | PC `.dff` / `.txd` in mods: convert RW 3 clumps / TXDs to VCS's formats, or draw them natively (research) | T1c, RSL submission | Cars, bikes, boats, helicopters work as they come (67 / 67 checked triangle by triangle); wheels need T10 | [#12](https://github.com/willzmkv/gta-vcs-recomp/issues/12) |
-| T10 | More streaming memory: a larger EE RAM for the port, VCS's streaming heap (5.4 MB) moved into it; then resident models (VC's `wheels.dff`) | - | Steps 1-3 done (Game > Memory: up to 30 MB; more car variety); step 4 left | [#15](https://github.com/willzmkv/gta-vcs-recomp/issues/15) |
+| T2 | Draw distance (Project2DFX): view distance, object / LOD distance, HD world further, population distance, distant lights | - | **Done** (ships in 1.0.0; what is left: #32-#37, #61) | [#2](https://github.com/willzmkv/gta-vcs-recomp/issues/2) (closed) |
+| T3 | Pre-HUD post-processing pass (colour + depth before the 2D) | - | Planned, after 1.0.0 | [#3](https://github.com/willzmkv/gta-vcs-recomp/issues/3) |
+| T4 | Volumetric height fog (Proper Shaders `[VolumetricFog]`) | T3 | Planned, after 1.0.0 | [#4](https://github.com/willzmkv/gta-vcs-recomp/issues/4) |
+| T5 | SMAA 1x | T3 | Planned, after 1.0.0 | [#5](https://github.com/willzmkv/gta-vcs-recomp/issues/5) |
+| T6 | Simulated HDR: tone mapping, exposure, bloom (replaces the interim Exposure) | T3 | Planned, after 1.0.0 | [#6](https://github.com/willzmkv/gta-vcs-recomp/issues/6) |
+| T7 | Sun rays | T3 | Planned, after 1.0.0 | [#7](https://github.com/willzmkv/gta-vcs-recomp/issues/7) |
+| T8 | Presets and player docs (Authentic / Enhanced), release notes | T1-T7 | **Done** (the launcher's presets, picked from the machine; the README; release notes: #57) | [#8](https://github.com/willzmkv/gta-vcs-recomp/issues/8) (closed) |
+| T9 | PC `.dff` / `.txd` in mods: convert RW 3 clumps / TXDs to VCS's formats, or draw them natively (research) | T1c, RSL submission | **Done** (67 / 67 VC vehicles; weapons in T11; follow-ups #15, #75) | [#12](https://github.com/willzmkv/gta-vcs-recomp/issues/12) (closed) |
+| T10 | More streaming memory: a larger EE RAM for the port, VCS's streaming heap (5.4 MB) moved into it; then resident models (VC's `wheels.dff`) | - | Steps 1-3 done (up to 30 MB); step 4 - VC's wheels - after 1.0.0 | [#15](https://github.com/willzmkv/gta-vcs-recomp/issues/15) |
 | T11 | PC weapon mods (`.dff` / `.txd`): a VC weapon onto VCS's (one element), where VCS holds it, VCS's HUD icon kept | T9 | **Done** (the 10 of `HD Weapons` in Vic's hand where VCS holds its own, VCS's icons) | [#16](https://github.com/willzmkv/gta-vcs-recomp/issues/16) |
-| T12 | One menu: the game's own pause / options menu and the F2 settings menu joined (the final task) | T2, T8 | Planned (the player's request, 2026-11-04) | - |
+| T12 | One menu: the game's own pause / options menu and the F2 settings menu joined (the final task) | T2, T8 | Phase 0 approved; phases 1-6 in 1.0.0, the last part | [#48](https://github.com/willzmkv/gta-vcs-recomp/issues/48)-[#53](https://github.com/willzmkv/gta-vcs-recomp/issues/53) |
 
 Backlog (not scheduled): SkyGFX's Xbox rim light / gloss / screen water drops, YCbCr correction, a larger reflection
 map, shadow maps, deferred lights, PBR sky, volumetric clouds, car paint reflections, rain on cars, ragdolls.
