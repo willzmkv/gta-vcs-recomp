@@ -2119,6 +2119,120 @@ namespace screens
             }
             {
                 bool hov = false;
+                if (ui::vcCycleRow("#vc-aud-prompt-style", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Estilo dos Ícones", "Prompt Icon Style"),
+                                   {"Kenney", tr("Clássico", "Classic")}, cfg.enhancePromptStyle, &hov))
+                    changed = true;
+                if (hov)
+                {
+                    inspector.title = tr("ESTILO DOS ÍCONES", "PROMPT ICON STYLE");
+                    inspector.desc = tr("Kenney: ícones modernos e coloridos para cada controle e tecla. Clássico: os botões desenhados no estilo do próprio jogo.",
+                                        "Kenney: modern coloured icons for every controller and key. Classic: the buttons drawn in the game's own style.");
+                    inspector.badge = tr("IMPACTO: 0%", "COST: 0%");
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
+                if (ui::vcCycleRow("#vc-aud-sub-font", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Fonte das Legendas", "Subtitle Font"),
+                                   {"Original", "Oswald"}, cfg.subtitleFont, &hov))
+                    changed = true;
+                if (hov)
+                {
+                    inspector.title = tr("FONTE DAS LEGENDAS", "SUBTITLE FONT");
+                    inspector.desc = tr("Oswald: legendas e caixas de ajuda numa fonte moderna, nítida em qualquer resolução, com contorno. As opções abaixo valem com ela.",
+                                        "Oswald: subtitles and help boxes in a modern font, sharp at any resolution, with an outline. The options below apply with it.");
+                    inspector.badge = tr("IMPACTO: 0%", "COST: 0%");
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
+                if (ui::vcSliderRow("#vc-aud-sub-size", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                    tr("Tamanho das Legendas", "Subtitle Size"), cfg.subtitleSize, 80, 150, 5, "%", &hov))
+                    changed = true;
+                if (hov)
+                {
+                    inspector.title = tr("TAMANHO DAS LEGENDAS", "SUBTITLE SIZE");
+                    inspector.desc = tr("O tamanho das legendas em relação ao do jogo (com a Oswald). O jogo quebra e centraliza as linhas para ele.",
+                                        "How big the subtitles are compared to the game's (with Oswald). The game wraps and centres the lines for it.");
+                    inspector.badge = tr("IMPACTO: 0%", "COST: 0%");
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
+                if (ui::vcSliderRow("#vc-aud-sub-outline", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                    tr("Contorno das Legendas", "Subtitle Outline"), cfg.subtitleOutline, 0, 100, 5, "%", &hov))
+                    changed = true;
+                if (hov)
+                {
+                    inspector.title = tr("CONTORNO DAS LEGENDAS", "SUBTITLE OUTLINE");
+                    inspector.desc = tr("A espessura da borda escura em volta das letras (com a Oswald). 0: sem contorno.",
+                                        "How thick the dark edge round the letters is (with Oswald). 0: none.");
+                    inspector.badge = tr("IMPACTO: 0%", "COST: 0%");
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
+                int shadowIdx = cfg.subtitleShadow ? 0 : 1;
+                if (ui::vcCycleRow("#vc-aud-sub-shadow", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Sombra das Legendas", "Subtitle Shadow"),
+                                   {tr("Sim", "On"), tr("Não", "Off")}, shadowIdx, &hov))
+                {
+                    cfg.subtitleShadow = shadowIdx == 0 ? 1 : 0;
+                    changed = true;
+                }
+                if (hov)
+                {
+                    inspector.title = tr("SOMBRA DAS LEGENDAS", "SUBTITLE SHADOW");
+                    inspector.desc = tr("A sombra projetada do jogo sob as legendas (com a Oswald). Não: só o contorno.",
+                                        "The game's drop shadow under the subtitles (with Oswald). Off: the outline alone.");
+                    inspector.badge = tr("IMPACTO: 0%", "COST: 0%");
+                }
+                y += rowH;
+            }
+            {
+                static const int kBackgrounds[] = {0, 25, 50, 75};
+                int bgIdx = indexInList(cfg.subtitleBackground, kBackgrounds, 4, 0);
+                bool hov = false;
+                if (ui::vcCycleRow("#vc-aud-sub-bg", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Fundo das Legendas", "Subtitle Background"),
+                                   {tr("Não", "Off"), tr("Claro (25%)", "Light (25%)"), tr("Médio (50%)", "Medium (50%)"),
+                                    tr("Escuro (75%)", "Dark (75%)")},
+                                   bgIdx, &hov))
+                {
+                    cfg.subtitleBackground = kBackgrounds[bgIdx];
+                    changed = true;
+                }
+                if (hov)
+                {
+                    inspector.title = tr("FUNDO DAS LEGENDAS", "SUBTITLE BACKGROUND");
+                    inspector.desc = tr("Uma faixa escura atrás de cada linha da legenda (com a Oswald), como nos jogos modernos: legível sobre qualquer cena.",
+                                        "A dark box behind each subtitle line (with Oswald), as in modern games: readable over anything.");
+                    inspector.badge = tr("IMPACTO: 0%", "COST: 0%");
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
+                if (ui::vcCycleRow("#vc-aud-sub-colour", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Cor das Legendas", "Subtitle Colour"),
+                                   {tr("Do jogo", "Game's"), tr("Branca", "White")}, cfg.subtitleColour, &hov))
+                    changed = true;
+                if (hov)
+                {
+                    inspector.title = tr("COR DAS LEGENDAS", "SUBTITLE COLOUR");
+                    inspector.desc = tr("Do jogo: as cores do jogo (nomes e palavras-chave destacados). Branca: todo o texto em branco (com a Oswald).",
+                                        "Game's: the game's colours (names and key words highlighted). White: all of the text white (with Oswald).");
+                    inspector.badge = tr("IMPACTO: 0%", "COST: 0%");
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
                 if (ui::vcCycleRow("#vc-aud-driveby", {tableR.x, y, tableR.w, rowH}, rowIdx++,
                                    tr("Cadência de Tiro em Veículos", "Drive-By Firing Rate"),
                                    {"PS2 Original", tr("Cadência Real da Arma", "Normal Weapon Rate")},

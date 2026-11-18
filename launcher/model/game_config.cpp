@@ -140,6 +140,13 @@ namespace launcher
                 static const int kFromOld[] = {1, 0, 2, 3, 5};
                 enhanceButtonPrompts = kFromOld[std::clamp(parseInt(val, 1), 0, 4)];
             }
+            else if (key == "enhance.prompt_style") enhancePromptStyle = std::clamp(parseInt(val, enhancePromptStyle), 0, 1);
+            else if (key == "enhance.subtitle_font") subtitleFont = std::clamp(parseInt(val, subtitleFont), 0, 1);
+            else if (key == "enhance.subtitle_outline") subtitleOutline = std::clamp(parseInt(val, subtitleOutline), 0, 100);
+            else if (key == "enhance.subtitle_size") subtitleSize = std::clamp(parseInt(val, subtitleSize), 80, 150);
+            else if (key == "enhance.subtitle_shadow") subtitleShadow = std::clamp(parseInt(val, subtitleShadow), 0, 1);
+            else if (key == "enhance.subtitle_background") subtitleBackground = std::clamp(parseInt(val, subtitleBackground), 0, 75);
+            else if (key == "enhance.subtitle_colour") subtitleColour = std::clamp(parseInt(val, subtitleColour), 0, 1);
             else if (key == "enhance.driveby_rate") enhanceDrivebyRate = std::clamp(parseInt(val, enhanceDrivebyRate), 0, 1);
             else if (key == "pad.preset") padPreset = std::clamp(parseInt(val, padPreset), 0, 2);
             else if (key == "pad.trigger_drive") padTriggerDrive = std::clamp(parseInt(val, padTriggerDrive), 0, 1);
@@ -206,6 +213,13 @@ namespace launcher
             {"display.skip_intro", std::to_string(displaySkipIntro)},
             {"game.background", std::to_string(gameBackground)},
             {"enhance.prompts", std::to_string(enhanceButtonPrompts)},
+            {"enhance.prompt_style", std::to_string(enhancePromptStyle)},
+            {"enhance.subtitle_font", std::to_string(subtitleFont)},
+            {"enhance.subtitle_outline", std::to_string(subtitleOutline)},
+            {"enhance.subtitle_size", std::to_string(subtitleSize)},
+            {"enhance.subtitle_shadow", std::to_string(subtitleShadow)},
+            {"enhance.subtitle_background", std::to_string(subtitleBackground)},
+            {"enhance.subtitle_colour", std::to_string(subtitleColour)},
             {"enhance.driveby_rate", std::to_string(enhanceDrivebyRate)},
             {"pad.preset", std::to_string(padPreset)},
             {"pad.trigger_drive", std::to_string(padTriggerDrive)},

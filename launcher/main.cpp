@@ -270,6 +270,23 @@ namespace
                           has("enhance.prompts=5") && has("pad.deadzone_left=20") && has("pad.deadzone_right=20"),
                       "GameConfig: the DualSense, prompt and deadzone settings under the game's own keys");
 
+                // the subtitle and prompt style rows: the game's keys, read and written back as they are, defaults as the game's
+                {
+                    std::ofstream out(tmpIni, std::ios::binary | std::ios::trunc);
+                    out << "enhance.prompt_style=1\nenhance.subtitle_font=1\nenhance.subtitle_outline=40\nenhance.subtitle_size=130\n"
+                        << "enhance.subtitle_shadow=0\nenhance.subtitle_background=50\n";
+                }
+                GameConfig subs;
+                subs.loadIni(tmpIni);
+                subs.saveIni(tmpIni);
+                std::ifstream subsIn(tmpIni);
+                const std::string subsText((std::istreambuf_iterator<char>(subsIn)), {});
+                auto hasSub = [&](const char *line) { return subsText.find(line) != std::string::npos; };
+                check(hasSub("enhance.prompt_style=1") && hasSub("enhance.subtitle_font=1") && hasSub("enhance.subtitle_outline=40") &&
+                          hasSub("enhance.subtitle_size=130") && hasSub("enhance.subtitle_shadow=0") &&
+                          hasSub("enhance.subtitle_background=50") && hasSub("enhance.subtitle_colour=0"),
+                      "GameConfig: the subtitle options and the prompt icon style round trip, the colour at the game's default");
+
                 const fs::path modGood = tmpDir / "mod_good";
                 const fs::path modBad = tmpDir / "mod_bad";
                 fs::create_directories(modGood, ec);

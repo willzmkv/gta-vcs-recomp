@@ -85,6 +85,15 @@ namespace launcher
         int displaySkipIntro = 0;       // 0 = Off, 1 = On
         int gameBackground = 0;         // 0 = Pause, 1 = Mute, 2 = Play
         int enhanceButtonPrompts = 0;   // enhance.prompts, the game's: 0 Original (PS2), 1 Automatic, 2 PlayStation, 3 Xbox, 4 Keyboard, 5 Nintendo Switch
+        int enhancePromptStyle = 0;     // enhance.prompt_style: 0 Kenney, 1 Classic
+        // the subtitles (the game's defaults): enhance.subtitle_font 0 Original / 1 Oswald, _outline 0..100, _size 80..150,
+        // _shadow 1 On / 0 Off, _background 0 / 25 / 50 / 75, _colour 0 Game's / 1 White
+        int subtitleFont = 0;
+        int subtitleOutline = 50;
+        int subtitleSize = 100;
+        int subtitleShadow = 1;
+        int subtitleBackground = 0;
+        int subtitleColour = 0;
         int enhanceDrivebyRate = 0;     // 0 = Original PS2, 1 = Normal weapon rate
 
         // Gamepad & Controls
