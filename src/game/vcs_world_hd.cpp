@@ -1390,6 +1390,29 @@ namespace vcs::world_hd
             auto takenElsewhere = [&](uint16_t id, const Cell *c) { return taken.test(id) && takenBy[id] != c; };
             const uint32_t room = (kSynthBytes - 0x40u) / kRecord;
             uint32_t total = (b8 - b0) / kRecord;
+            // A detailed sector under another id with the same sphere as one already taken: the same geometry twice (the
+            // same gid: 55 / 3193 by Fort Baxter's road, 3143 / 3184 and 3147 / 3185 by the docks) or two versions of one
+            // large piece of ground (r >= 20: 2562 / 2527, the airport's apron) - drawn on the same plane they fought over
+            // depth (#37, VCS_HD_DUPES). Taken from the first list that names it; small props sharing a sphere with a
+            // different gid are kept (two parts of one thing).
+            struct Sphere
+            {
+                uint16_t gid;
+                float r;
+            };
+            std::unordered_map<uint64_t, Sphere> detailed;
+            for (int k = 0; k < 8; ++k)
+                for (const Rec &rec : out[k])
+                    if (rec.id < kLodIds && rec.hide != 1)
+                        detailed.emplace(centreKey(rec.from), Sphere{rd16(rec.from + 2u), half(rd16(rec.from + 0xAu))});
+            auto sameSphere = [&](uint32_t r, uint16_t gid) {
+                const auto it = detailed.find(centreKey(r));
+                if (it == detailed.end())
+                    return false;
+                const float rr = half(rd16(r + 0xAu));
+                return std::fabs(rr - it->second.r) <= 0.02f * std::max(rr, it->second.r) && (it->second.gid == gid || rr >= 20.0f);
+            };
+            static const bool keepDupes = std::getenv("VCS_HD_KEEPDUPES") && *std::getenv("VCS_HD_KEEPDUPES") == '1';
             for (const Cell *c : extra)
             {
                 if (drawMode() < 2)
@@ -1437,6 +1460,8 @@ namespace vcs::world_hd
                             ++coarser;
                             continue;
                         }
+                        if (id < kLodIds && !keepDupes && sameSphere(r, gid))
+                            continue; // (the same detailed sector under another id: above)
                         const bool glowing = id >= kLodIds && replaced(id, r);
                         if (glowing && !glowNow)
                         {
@@ -1445,6 +1470,8 @@ namespace vcs::world_hd
                         }
                         taken.set(id);
                         takenBy[id] = c;
+                        if (id < kLodIds)
+                            detailed.emplace(centreKey(r), Sphere{gid, half(rd16(r + 0xAu))});
                         int hide = switched(id);
                         if (hide < 0)
                             hide = 0;
