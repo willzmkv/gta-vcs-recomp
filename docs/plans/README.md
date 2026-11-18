@@ -13,6 +13,7 @@ learnt into `docs/game-internals.md`.
 |---|---|---|
 | [Release 1.0.0](2026-11-17-release-1.0.0.md) | The path to the release: the order, the police chase check, the test suite, CI, notes, release candidate, tag | 1.0.0 |
 | [HD world overlaps](2026-11-17-hd-world-overlaps.md) | A second version of a building near the camera (the spots still seen), sectors drawn twice under two ids | 1.0.0 |
+| [HD world in cutscenes](2026-11-18-hd-world-cutscenes.md) | Outdoor cutscenes show the detailed city as far as gameplay (today it falls back to ~260 m while the cutscene's cell is forced) | 1.0.0 |
 | [HD world visual fixes](2026-11-14-hd-world-visual-fixes.md) | Phil's warehouse the first time, other missions that switch buildings, distant buildings sunk at sunset, the distant proxies' missing parts, the glow in free-camera shots | 1.0.0 (tasks 1, 3, 4) |
 | [Population tuning](2026-11-14-population-tuning.md) | Vehicle density standing still, the crowd bands standing still, the benchmark, bands on by default | 1.0.0 (vehicle density), the rest after |
 | [Cutscene loading](2026-11-17-cutscene-loading.md) | The dark sky in a cutscene's first frames, Vic missing in the airport cutscene's first frame | 1.0.0 |
