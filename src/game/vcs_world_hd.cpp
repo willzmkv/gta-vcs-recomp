@@ -268,7 +268,8 @@ namespace vcs::world_hd
             float cx = 0, cy = 0;
             Piece list;                                // the cell's piece: its sector list
             std::vector<Piece> conditional;            // pieces its list switches on (state, hour)
-            uint64_t condMask = 0;                     // which of its list's conditions were on when it was read
+            std::array<uint64_t, 4> condMask{};        // which of its list's conditions were on when it was read
+            std::unordered_set<uint16_t> condGids;     // gids from active non-hour conditional pieces (kind < 0x80)
             uint64_t area = 0;                         // key into g_areas
             std::unordered_map<uint32_t, uint32_t> geometry; // gid -> our geometry (cell, conditional, area pieces)
             std::bitset<0x8000> ids;                  // the sector ids in its list
@@ -983,14 +984,14 @@ namespace vcs::world_hd
         // The pieces they switch hold, among others, the buildings' lit windows at night: read once with the cell, a cell
         // read in the afternoon kept its dark towers all night (the player's downtown tower, 2026-11-12) - update() reads a
         // cell again when its mask changes.
-        uint64_t condMask(uint32_t list, uint32_t bytes)
+        std::array<uint64_t, 4> condMask(uint32_t list, uint32_t bytes)
         {
             const uint32_t conds = rd16(list + 0x2Cu), condAt = rd32(list + 0x30u);
-            uint64_t mask = 0;
+            std::array<uint64_t, 4> mask{};
             if (conds && conds < 0x100u && condAt >= list && condAt + conds * 4u <= list + bytes)
-                for (uint32_t i = 0; i < conds && i < 64u; ++i)
+                for (uint32_t i = 0; i < conds; ++i)
                     if (switchedOn(rd8(condAt + i * 4u), rd8(condAt + i * 4u + 1u)))
-                        mask |= uint64_t(1) << i;
+                        mask[i >> 6] |= uint64_t(1) << (i & 63u);
             return mask;
         }
 
@@ -1014,11 +1015,17 @@ namespace vcs::world_hd
                 for (uint32_t i = 0; i < conds; ++i)
                 {
                     const uint32_t c = condAt + i * 4u;
-                    if (!switchedOn(rd8(c), rd8(c + 1u)))
+                    const uint8_t kind = rd8(c);
+                    if (!switchedOn(kind, rd8(c + 1u)))
                         continue;
                     Piece p;
                     if (loadIndexed(rd32(g_info + 4u) + uint32_t(rd16(c + 2u)) * 0x20u, p))
+                    {
+                        if (!(kind & 0x80u))
+                            for (const auto &[gid, geom] : p.pairs)
+                                cell->condGids.insert(static_cast<uint16_t>(gid));
                         cell->conditional.push_back(std::move(p));
+                    }
                 }
             // its area (FUN_0023BDF8: cell / 3)
             const int ax = x / 3, ay = y / 3;
@@ -1268,11 +1275,51 @@ namespace vcs::world_hd
                 const auto it = twins.find(centreKey(r));
                 return it != twins.end() && std::fabs(half(rd16(r + 0xAu)) - it->second) <= 0.02f * it->second;
             };
-            for (uint32_t r = b0; r < b8; r += kRecord)
-                if (const uint16_t id = rd16(r) & 0x7FFFu; id >= 0x20u && id < kLodIds)
+            // Active non-hour conditional pieces (kind < 0x80: story / mission building switches, FUN_0023D600): some
+            // differ in centre or radius from their detailed version (kind=9 MEN_C6: 6296-6299; kind=32 Downtown:
+            // 6326-6327), so twin() alone cannot tell them apart from ordinary coarse LODs. Collect their gids from
+            // extra cells and the slot's own conditional pieces; in the slot's own list they are never replaced, and
+            // in extra cells they are replaced only if the slot itself already draws a conditional sector inside
+            // their sphere (e.g. far LOD 6299 covered by close conditional tanks 6298 at MEN_C6).
+            std::unordered_set<uint16_t> condGids;
+            for (const Cell *c : extra)
+                condGids.insert(c->condGids.begin(), c->condGids.end());
+            const uint32_t conds = rd16(original + 0x2Cu), condAt = rd32(original + 0x30u);
+            const uint32_t slotPieces = rd32(slot + 0x1Cu);
+            if (conds && conds < 0x100u && valid(condAt, conds * 4u) && slotPieces > 1u && slotPieces <= 32u)
+            {
+                std::vector<uint8_t> onKinds;
+                onKinds.reserve(slotPieces - 1u);
+                for (int i = int(conds) - 1; i >= 0; --i)
                 {
-                    hd.add(half(rd16(r + 4u)), half(rd16(r + 6u)), 0);
-                    twins[centreKey(r)] = half(rd16(r + 0xAu));
+                    const uint32_t e = condAt + uint32_t(i) * 4u;
+                    if (switchedOn(rd8(e), rd8(e + 1u)))
+                        onKinds.push_back(rd8(e));
+                }
+                if (onKinds.size() == slotPieces - 1u)
+                    for (size_t j = 0; j < onKinds.size(); ++j)
+                        if (!(onKinds[j] & 0x80u))
+                        {
+                            const uint32_t p = rd32(slot + 0x20u + uint32_t(j + 1u) * 4u);
+                            if (!valid(p, 8u))
+                                continue;
+                            const uint32_t pairs = rd32(p), cnt = rd16(p + 4u);
+                            if (cnt && cnt <= 0x4000u && valid(pairs, cnt * 8u))
+                                for (uint32_t m = 0; m < cnt; ++m)
+                                    condGids.insert(static_cast<uint16_t>(rd32(pairs + m * 8u)));
+                        }
+            }
+            Grid slotCondHd;
+            for (uint32_t r = b0; r < b8; r += kRecord)
+                if (const uint16_t id = rd16(r) & 0x7FFFu; id >= 0x20u)
+                {
+                    if (id < kLodIds)
+                    {
+                        hd.add(half(rd16(r + 4u)), half(rd16(r + 6u)), 0);
+                        twins[centreKey(r)] = half(rd16(r + 0xAu));
+                    }
+                    else if (!(rd16(r) & 0x8000u) && condGids.count(rd16(r + 2u)))
+                        slotCondHd.add(half(rd16(r + 4u)), half(rd16(r + 6u)), 0);
                 }
             for (size_t i = 0; i < extra.size(); ++i)
                 for (const auto &p : extra[i]->hd)
@@ -1291,9 +1338,11 @@ namespace vcs::world_hd
                     return true;
                 return good(gid, now);
             };
-            auto replaced = [&](uint16_t id, uint32_t r) {
+            auto replaced = [&](uint16_t id, uint32_t r, bool fromExtra) {
                 if (g_keepLod.test(id) || std::find(std::begin(kAlwaysKeepLod), std::end(kAlwaysKeepLod), id) != std::end(kAlwaysKeepLod))
                     return false;
+                if (condGids.count(rd16(r + 2u)))
+                    return fromExtra && slotCondHd.any(half(rd16(r + 4u)), half(rd16(r + 6u)), half(rd16(r + 0xAu)));
                 if (twin(r))
                 {
                     ++twinKept;
@@ -1372,7 +1421,7 @@ namespace vcs::world_hd
                     Rec rec{uint16_t(rd16(r) & 0x7FFFu), r, 0.0f, 0.0f, 0.0f, -1};
                     if (std::find(std::begin(kAlwaysKeepLod), std::end(kAlwaysKeepLod), rec.id) != std::end(kAlwaysKeepLod))
                         rec.hide = 0; // (shown even where the game's own list hides it)
-                    if (drawMode() >= 3 && rec.id >= kLodIds && !(rd16(r) & 0x8000u) && rd32(r + 0xCu) == 0 && replaced(rec.id, r))
+                    if (drawMode() >= 3 && rec.id >= kLodIds && !(rd16(r) & 0x8000u) && rd32(r + 0xCu) == 0 && replaced(rec.id, r, false))
                     {
                         if (glowNow)
                         {
@@ -1457,7 +1506,7 @@ namespace vcs::world_hd
                             std::fprintf(stderr, "[hdprobe]   cell %d,%d id %5u gid %5u at %.0f,%.0f r %.0f mat 0x%08x flag %u -> %s\n", c->x, c->y, id, gid,
                                          half(rd16(r + 4u)), half(rd16(r + 6u)), half(rd16(r + 0xAu)), rd32(r + 0xCu), rd16(r) >> 15,
                                          id < 0x20u ? "SKIPPED (moving)" : takenElsewhere(id, c) ? "taken already" : rd32(r + 0xCu) ? "SKIPPED (matrix)" :
-                                         !drawable(c, gid) ? "SKIPPED (entry)" : id >= kLodIds && replaced(id, r) ? "coarser, replaced" :
+                                         !drawable(c, gid) ? "SKIPPED (entry)" : id >= kLodIds && replaced(id, r, true) ? "coarser, replaced" :
                                          switched(id) == 1 ? "added, switched off" : switched(id) == 0 ? "added, switched on" : "added");
                         if (id < 0x20u || takenElsewhere(id, c) || rd32(r + 0xCu) || g_skipExtra.test(id) || !drawable(c, gid))
                             continue;
@@ -1470,15 +1519,16 @@ namespace vcs::world_hd
                         // over 2800 at -986,-1153 - the player's reports, 2026-11-17). replaced() keeps twins for the
                         // game's own list, where the game's flags pick the version (Phil's warehouse); from a neighbour's
                         // list the slot's own records already decide which version shows.
-                        if (id >= kLodIds && twin(r))
+                        const bool isCond = condGids.count(gid) != 0;
+                        if (id >= kLodIds && !isCond && twin(r))
                         {
                             ++coarser;
                             continue;
                         }
                         if (id < kLodIds && !keepDupes && sameSphere(r, gid))
                             continue; // (the same detailed sector under another id: above)
-                        const bool glowing = id >= kLodIds && replaced(id, r);
-                        if (glowing && !glowNow)
+                        const bool glowing = id >= kLodIds && replaced(id, r, true);
+                        if (glowing && (!glowNow || isCond))
                         {
                             ++coarser;
                             continue;
@@ -1794,9 +1844,16 @@ namespace vcs::world_hd
             // entries the game left stale (or emptied) since: ours again - every change of its slots, and once a second
             if (g_reenter || slotState() != g_gameState || g_frame % 60u == 0u)
                 reenterAll();
-            // too far now: dropped (and, once a second, a cell whose conditional pieces switched - read again)
+            // too far now: dropped (and once a second for clock windows, or right away when any switch at level + 0x418 changes,
+            // a cell whose conditional pieces switched - read again)
             const double t = seconds();
-            const bool checkConds = g_frame % 60u == 30u;
+            static std::array<uint32_t, 40> lastSwitches{};
+            std::array<uint32_t, 40> curSwitches{};
+            std::memcpy(curSwitches.data(), g_ram + ((g_level + 0x418u) & PS2_RAM_MASK), sizeof(curSwitches));
+            const bool switchesChanged = curSwitches != lastSwitches;
+            if (switchesChanged)
+                lastSwitches = curSwitches;
+            const bool checkConds = switchesChanged || (g_frame % 60u == 30u);
             for (auto it = g_cells.begin(); it != g_cells.end();)
             {
                 Cell &c = *it->second;
@@ -2475,6 +2532,315 @@ namespace vcs::world_hd
             runtime.replaceFunction(kRingPush, &ringPushHook);
         if (g_pktDebug && (g_heapFree = runtime.lookupFunction(kHeapFree)))
             runtime.replaceFunction(kHeapFree, &heapFreeHook);
+
+        ps2control::addCommand("hdpairs", [](const std::string &, ps2control::Reply reply) {
+            std::lock_guard<std::recursive_mutex> lock(g_mutex);
+            if (!g_ram || !levelUsable())
+                return reply("error no level");
+            vcs::IsoImage *image = iso();
+            if (!image)
+                return reply("error no iso");
+
+            auto centreKey = [](uint16_t hx, uint16_t hy, uint16_t hz) {
+                return uint64_t(hx) | (uint64_t(hy) << 16) | (uint64_t(hz) << 32);
+            };
+            auto rdBuf16 = [](const std::vector<uint8_t> &b, uint32_t off) {
+                uint16_t v;
+                std::memcpy(&v, b.data() + off, 2);
+                return v;
+            };
+            auto rdBuf32 = [](const std::vector<uint8_t> &b, uint32_t off) {
+                uint32_t v;
+                std::memcpy(&v, b.data() + off, 4);
+                return v;
+            };
+            auto wrBuf32 = [](std::vector<uint8_t> &b, uint32_t off, uint32_t v) {
+                std::memcpy(b.data() + off, &v, 4);
+            };
+            auto readRawPiece = [&](uint32_t entry, std::vector<uint8_t> &buf) -> bool {
+                if (!entry || rd32(entry) != kDlrw)
+                    return false;
+                const uint32_t bytes = rd32(entry + 8u), relocAt = rd32(entry + 0x10u), relocs = rd32(entry + 0x14u),
+                               fileOffset = rd32(entry + 0x18u);
+                if (bytes < 0x40u || bytes > 0x200000u || rd16(entry + 0x1Cu) || rd16(entry + 0x1Eu) ||
+                    relocAt < 0x20u || relocAt + uint64_t(relocs) * 4u > bytes + 0x20u)
+                    return false;
+                buf.resize(bytes);
+                if (!image->readBytes(g_imageBase + fileOffset, bytes, buf.data()))
+                    return false;
+                for (uint32_t i = 0; i < relocs; ++i)
+                {
+                    const uint32_t off = rdBuf32(buf, relocAt - 0x20u + i * 4u);
+                    if (off < 0x20u || off + 4u > bytes + 0x20u)
+                        return false;
+                    const uint32_t o = off - 0x20u;
+                    wrBuf32(buf, o, rdBuf32(buf, o) - 0x20u);
+                }
+                return true;
+            };
+            auto readRawCell = [&](int x, int y, std::vector<uint8_t> &buf, uint32_t &b0, uint32_t &b8,
+                                   uint32_t &conds, uint32_t &condAt) -> bool {
+                if (!readRawPiece(cellEntry(x, y), buf))
+                    return false;
+                b0 = rdBuf32(buf, 8u);
+                b8 = rdBuf32(buf, 0x28u);
+                if (b8 < b0 || b8 > buf.size() || (b8 - b0) % kRecord != 0)
+                    return false;
+                conds = rdBuf16(buf, 0x2Cu);
+                condAt = rdBuf32(buf, 0x30u);
+                return true;
+            };
+
+            const uint32_t levelId = rd32(kLevelId);
+            const uint32_t swCount = rd32(g_info + 0x2B8u), swList = rd32(g_info + 0x2BCu);
+            std::fprintf(stderr, "[hdpairs] level %u (loaded %u) info=0x%08x cached_cells=%zu switch_entries=%u\n",
+                         levelId, g_levelLoaded, g_info, g_cells.size(), swCount);
+            if (swCount <= 0x1000u && valid(swList, swCount * 4u))
+            {
+                for (uint32_t i = 0; i < swCount; ++i)
+                {
+                    const uint32_t e = swList + i * 4u;
+                    const uint8_t kind = rd8(e), val = rd8(e + 1u);
+                    const uint16_t id = rd16(e + 2u);
+                    const uint32_t state = (kind != 0xFFu && !(kind & 0x80u)) ? rd32(g_level + 0x418u + kind * 4u) : 0u;
+                    std::fprintf(stderr, "[hdpairs]   switch[%u]: id=%u kind=%u (0x%02x) val=%u state=%u on=%d\n",
+                                 i, id, kind, kind, val, state, switchedOn(kind, val) ? 1 : 0);
+                }
+            }
+
+            // 1. Pairs inside each cached cell list in g_cells
+            uint32_t cachedPairs = 0;
+            for (const auto &[ck, cell] : g_cells)
+            {
+                const uint32_t list = cell->list.at;
+                const uint32_t b0 = rd32(list + 8u), b8 = rd32(list + 0x28u);
+                if (b0 < list || b8 < b0 || b8 > list + cell->list.bytes || (b8 - b0) % kRecord != 0)
+                    continue;
+                struct Entry { uint16_t id, gid, flag, hx, hy, hz; float r; };
+                std::unordered_map<uint64_t, std::vector<Entry>> byCentre;
+                for (uint32_t r = b0; r < b8; r += kRecord)
+                {
+                    const uint16_t raw = rd16(r), id = raw & 0x7FFFu;
+                    const uint16_t hx = rd16(r + 4u), hy = rd16(r + 6u), hz = rd16(r + 8u);
+                    byCentre[centreKey(hx, hy, hz)].push_back({id, rd16(r + 2u), uint16_t(raw >> 15), hx, hy, hz, half(rd16(r + 0xAu))});
+                }
+                for (const auto &[cKey, listRecs] : byCentre)
+                    for (const Entry &d : listRecs)
+                    {
+                        if (d.id >= kLodIds)
+                            continue;
+                        for (const Entry &l : listRecs)
+                        {
+                            if (l.id < kLodIds)
+                                continue;
+                            if (std::fabs(d.r - l.r) <= 0.02f * std::max(d.r, l.r))
+                            {
+                                ++cachedPairs;
+                                std::fprintf(stderr,
+                                             "[hdpairs] cached cell %d,%d: det %u (gid %u flag %u) <-> lod %u (gid %u flag %u) "
+                                             "at %.1f,%.1f,%.1f [%04x %04x %04x] r %.2f/%.2f switched %d/%d\n",
+                                             cell->x, cell->y, d.id, d.gid, d.flag, l.id, l.gid, l.flag,
+                                             half(d.hx), half(d.hy), half(d.hz), d.hx, d.hy, d.hz, d.r, l.r,
+                                             switched(d.id), switched(l.id));
+                            }
+                        }
+                    }
+            }
+
+            // 2. Flag differences (bit 0x8000) between the game's active slot list(s) and our cached/disc copy
+            uint32_t flagDiffs = 0, geom0Diffs = 0;
+            const uint32_t table = rd32(g_info);
+            for (int si = 0; si < 2; ++si)
+            {
+                const uint32_t slot = rd32(g_level + (si ? 0x250u : 0x248u));
+                if (!valid(slot, 0x40u) || rd32(slot + 0x1Cu) == 0)
+                    continue;
+                uint32_t orig = rd32(slot + 0x20u);
+                for (const Installed &in : g_installed)
+                    if (in.slot == slot)
+                        orig = in.original;
+                if (!valid(orig, 0x34u))
+                    continue;
+                const uint32_t gb0 = rd32(orig + 8u), gb8 = rd32(orig + 0x28u);
+                if (gb8 < gb0 || (gb8 - gb0) % kRecord != 0 || (gb8 - gb0) / kRecord > 0x2000u || !valid(gb0, gb8 - gb0))
+                    continue;
+                const int sx = int(rd32(slot + 8u)), sy = int(rd32(slot + 0xCu));
+                std::vector<uint8_t> buf;
+                uint32_t db0 = 0, db8 = 0, conds = 0, condAt = 0;
+                if (!readRawCell(sx, sy, buf, db0, db8, conds, condAt))
+                    continue;
+                const uint32_t gCount = (gb8 - gb0) / kRecord, dCount = (db8 - db0) / kRecord;
+                if (gCount != dCount)
+                    std::fprintf(stderr, "[hdpairs] slot%d(%d,%d) count differs: game=%u disc=%u\n", si, sx, sy, gCount, dCount);
+                for (uint32_t i = 0; i < gCount && i < dCount; ++i)
+                {
+                    const uint32_t gr = gb0 + i * kRecord, dr = db0 + i * kRecord;
+                    const uint16_t gRaw = rd16(gr), dRaw = rdBuf16(buf, dr);
+                    const uint16_t gid = rd16(gr + 2u);
+                    if ((gRaw & 0x7FFFu) != (dRaw & 0x7FFFu))
+                        continue;
+                    const uint16_t id = gRaw & 0x7FFFu;
+                    const uint32_t gf = gRaw >> 15, df = dRaw >> 15;
+                    if (gf == df)
+                        continue;
+                    const uint32_t geom = (gid < kMaxGid) ? rd32(table + gid * 0xCu) : 0u;
+                    const int sw = switched(id);
+                    if (geom == 0u && gf == 1u && df == 0u && sw < 0)
+                    {
+                        if (geom0Diffs++ < 10u)
+                            std::fprintf(stderr, "[hdpairs] slot%d(%d,%d) flag-diff(no-geom) rec#%u id %u gid %u: game=%u disc=%u\n",
+                                         si, sx, sy, i, id, gid, gf, df);
+                    }
+                    else
+                    {
+                        ++flagDiffs;
+                        std::fprintf(stderr,
+                                     "[hdpairs] slot%d(%d,%d) flag-diff rec#%u id %u gid %u: game=%u disc=%u geom=0x%08x sw=%d at %.1f,%.1f,%.1f\n",
+                                     si, sx, sy, i, id, gid, gf, df, geom, sw,
+                                     half(rd16(gr + 4u)), half(rd16(gr + 6u)), half(rd16(gr + 8u)));
+                    }
+                }
+            }
+
+            // 3. Full-level scan of all cell lists on disc (same-cell and cross-cell pairs, plus non-hour conditions)
+            struct GlobalRec
+            {
+                uint16_t id, gid, flag, hx, hy, hz;
+                float r;
+                int x, y;
+            };
+            struct PairInfo
+            {
+                uint16_t detGid, lodGid, detFlag, lodFlag, hx, hy, hz;
+                float detR, lodR;
+                int firstX, firstY;
+                uint32_t sameCellCount;
+            };
+            std::unordered_map<uint64_t, std::vector<GlobalRec>> globalByCentre;
+            std::map<uint32_t, PairInfo> uniquePairs;
+            struct CondSector
+            {
+                uint16_t flag;
+                float x, y, z, r;
+            };
+            std::map<uint64_t, CondSector> condSectors;
+            uint32_t levelCells = 0, condSwitches = 0;
+            for (int y = 0; y < 0x24; ++y)
+            {
+                const uint32_t row = g_info + 4u + uint32_t(y) * 8u;
+                const uint32_t first = rd32(row), firstX = rd32(row + 4u), end = rd32(row + 8u);
+                if (end < first || (end - first) % 0x20u != 0)
+                    continue;
+                const uint32_t rowCount = (end - first) / 0x20u;
+                for (uint32_t xi = 0; xi < rowCount; ++xi)
+                {
+                    const int x = int(firstX) + int(xi);
+                    std::vector<uint8_t> buf;
+                    uint32_t b0 = 0, b8 = 0, conds = 0, condAt = 0;
+                    if (!readRawCell(x, y, buf, b0, b8, conds, condAt))
+                        continue;
+                    ++levelCells;
+                    if (conds && conds < 0x100u && condAt + conds * 4u <= buf.size())
+                    {
+                        for (uint32_t i = 0; i < conds; ++i)
+                        {
+                            const uint8_t kind = buf[condAt + i * 4u], val = buf[condAt + i * 4u + 1u];
+                            const uint16_t pieceIdx = rdBuf16(buf, condAt + i * 4u + 2u);
+                            if (kind != 0xFFu && !(kind & 0x80u))
+                            {
+                                ++condSwitches;
+                                std::vector<uint8_t> pbuf;
+                                if (readRawPiece(rd32(g_info + 4u) + uint32_t(pieceIdx) * 0x20u, pbuf))
+                                {
+                                    const uint32_t pairs = rdBuf32(pbuf, 0u), pcount = rdBuf16(pbuf, 4u);
+                                    if (pcount && pairs + pcount * 8u <= pbuf.size())
+                                    {
+                                        std::unordered_set<uint16_t> pgids;
+                                        for (uint32_t j = 0; j < pcount; ++j)
+                                            pgids.insert(uint16_t(rdBuf32(pbuf, pairs + j * 8u)));
+                                        for (uint32_t r = b0; r < b8; r += kRecord)
+                                        {
+                                            const uint16_t raw = rdBuf16(buf, r), id = raw & 0x7FFFu, gid = rdBuf16(buf, r + 2u);
+                                            if (pgids.count(gid))
+                                            {
+                                                const uint64_t ck = (uint64_t(kind) << 40) | (uint64_t(val) << 32) | (uint32_t(id) << 16) | gid;
+                                                condSectors.try_emplace(ck, CondSector{uint16_t(raw >> 15), half(rdBuf16(buf, r + 4u)),
+                                                                                       half(rdBuf16(buf, r + 6u)), half(rdBuf16(buf, r + 8u)),
+                                                                                       half(rdBuf16(buf, r + 0xAu))});
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    std::unordered_map<uint64_t, std::vector<GlobalRec>> cellByCentre;
+                    for (uint32_t r = b0; r < b8; r += kRecord)
+                    {
+                        const uint16_t raw = rdBuf16(buf, r), id = raw & 0x7FFFu;
+                        const uint16_t hx = rdBuf16(buf, r + 4u), hy = rdBuf16(buf, r + 6u), hz = rdBuf16(buf, r + 8u);
+                        const GlobalRec gr{id, rdBuf16(buf, r + 2u), uint16_t(raw >> 15), hx, hy, hz, half(rdBuf16(buf, r + 0xAu)), x, y};
+                        const uint64_t ck = centreKey(hx, hy, hz);
+                        cellByCentre[ck].push_back(gr);
+                        globalByCentre[ck].push_back(gr);
+                    }
+                    for (const auto &[ck, recs] : cellByCentre)
+                        for (const GlobalRec &d : recs)
+                        {
+                            if (d.id >= kLodIds)
+                                continue;
+                            for (const GlobalRec &l : recs)
+                            {
+                                if (l.id < kLodIds)
+                                    continue;
+                                if (std::fabs(d.r - l.r) <= 0.02f * std::max(d.r, l.r))
+                                {
+                                    const uint32_t pk = (uint32_t(d.id) << 16) | l.id;
+                                    auto [it, inserted] = uniquePairs.emplace(
+                                        pk, PairInfo{d.gid, l.gid, d.flag, l.flag, d.hx, d.hy, d.hz, d.r, l.r, x, y, 0});
+                                    ++it->second.sameCellCount;
+                                }
+                            }
+                        }
+                }
+            }
+            for (const auto &[ck, recs] : globalByCentre)
+                for (const GlobalRec &d : recs)
+                {
+                    if (d.id >= kLodIds)
+                        continue;
+                    for (const GlobalRec &l : recs)
+                    {
+                        if (l.id < kLodIds)
+                            continue;
+                        if (std::fabs(d.r - l.r) <= 0.02f * std::max(d.r, l.r))
+                        {
+                            const uint32_t pk = (uint32_t(d.id) << 16) | l.id;
+                            uniquePairs.emplace(pk, PairInfo{d.gid, l.gid, d.flag, l.flag, d.hx, d.hy, d.hz, d.r, l.r, d.x, d.y, 0});
+                        }
+                    }
+                }
+            for (const auto &[pk, info] : uniquePairs)
+            {
+                const uint16_t did = uint16_t(pk >> 16), lid = uint16_t(pk & 0xFFFFu);
+                std::fprintf(stderr,
+                             "[hdpairs] level-pair det %u (gid %u flag %u sw %d) <-> lod %u (gid %u flag %u sw %d) "
+                             "at %.1f,%.1f,%.1f [%04x %04x %04x] r %.2f/%.2f same_cells=%u (cell %d,%d)\n",
+                             did, info.detGid, info.detFlag, switched(did), lid, info.lodGid, info.lodFlag, switched(lid),
+                             half(info.hx), half(info.hy), half(info.hz), info.hx, info.hy, info.hz,
+                             info.detR, info.lodR, info.sameCellCount, info.firstX, info.firstY);
+            }
+            for (const auto &[ck, cs] : condSectors)
+                std::fprintf(stderr, "[hdpairs] cond-sector kind=%u val=%u id=%u gid=%u at %.1f,%.1f,%.1f r %.2f flag=%u\n",
+                             unsigned((ck >> 40) & 0xFFu), unsigned((ck >> 32) & 0xFFu), unsigned((ck >> 16) & 0xFFFFu),
+                             unsigned(ck & 0xFFFFu), cs.x, cs.y, cs.z, cs.r, cs.flag);
+
+            char ans[256];
+            std::snprintf(ans, sizeof(ans),
+                          "ok level=%u cached_cells=%zu cached_pairs=%u flag_diffs=%u geom0_diffs=%u level_cells=%u level_pairs=%zu switch_entries=%u cond_switches=%u",
+                          levelId, g_cells.size(), cachedPairs, flagDiffs, geom0Diffs, levelCells, uniquePairs.size(), swCount, condSwitches);
+            reply(ans);
+        });
 
         // hdworld -> ok radius=<n> cells=<n> areas=<n> mem=<KB> added=<records> hidden=<low detail> own=<records> ...
         // hdcompare -> ok ...: our copy of the game's current cell piece and area piece read and relocated as for an

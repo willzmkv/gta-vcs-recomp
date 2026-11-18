@@ -2716,6 +2716,24 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   drawn, 6285 "HIDDEN (replaced)"). Measured at the police, Little Havana, avenue and warehouse spots
   (`VCS_HD_TWINS=1`, which lists each sector the rule keeps and its twin): 3-5 kept per view, every one hidden by the
   game itself (flag 0x8000) - nothing drawn twice. Found with `VCS_HD_PROBE` (it prints each record's raw halves).
+- **Other mission-switched buildings in WRLD and entity swaps** (#61, `hdpairs` command and `tools/hdworld_missions.py`):
+  ONLY opcodes `0x0482` (`FUN_0023D3A0`, used by `MAIN.SCM`) and `0x03DA` (`FUN_0021AFF8`) write `level + 0x418 + kind * 4`
+  (`FUN_0023D4D0` resets it on load). Two mechanisms switch buildings: (1) **`WRLD` non-hour conditional pieces (`kind < 0x80`, `FUN_0023D600`)**:
+  - `kind=1` (`M047: PHI_A2`): `MAINLA` `-1210.0,-267.0,14.7`, `val=0` -> `3167` (`gid 3659`), `val=1` -> `6285` (`gids 5436, 5447`).
+  - `kind=3` (`M069: UMB_B4`): `MAINLA` `-974.5,59.5,11.1`, `val=0` -> `3329` (`gids 3854, 3859`), `val=1` -> `6286, 6287` (`gids 5448, 5450`).
+  - `kind=9` (`M077: MEN_C6`): `MAINLA` `val=0` -> `2762` (`gids 3207, 3210` at `-1065.0,-921.5`), `2801` (`gid 3214` at `-1019.0,-970.5,25.5`), `5924` (`gid 4737`, `flag=1`); `val=1` -> `6296, 6297` (`gids 5569, 5570` at `-1056.0,-963.5,28.8 r 91.19`), `6298` (`gid 5571` at `-1019.0,-970.5,26.1 r 85.00`), `6299` (`gid 5572` at `-1017.5,-970.0,26.1 r 86.12`, coarse LOD in far cells). `BEACH`: `val=0` -> `3540` (`gid 3767`), `val=1` -> `7135` (`gid 5453`).
+  - `kind=11`: `MAINLA` `-1028.0,-348.5,16.6`, `val=0` -> `277` (`gid 510`), `val=1` -> `6301` (`gid 5592`).
+  - `kind=12`: `BEACH` `-254.0,-1681.5`, `val=0` -> `1052` (`gid 1819`), `val=1` -> `7137` (`gid 5475`); `MAINLA` `val=1` -> `6302` (`gid 5593`).
+  - `kind=32` (Downtown): `MAINLA` `val=0` -> `766` (`gids 1086, 1088` at `-926.0,1336.0,77.4 r 28.84`), `val=1` -> `6326, 6327` (`gid 5967` at `-547.0,1073.0,189.6 r 347.50`).
+  - `MALL` (`level 3`): 0 switch entries, 0 non-hour conditional pieces, 0 same-sphere pairs.
+  Some switched sectors differ in centre or radius from their detailed version (`6296/6297/6299` at `kind=9`, `6326/6327` at
+  `kind=32`), so `twin()` alone mistook them for ordinary coarse LODs and hid them (`HIDDEN (replaced)` / `coarser, replaced`).
+  Active non-hour conditional pieces (`!(kind & 0x80u)`) now contribute `condGids` (from extra cells and the slot's matching
+  pieces): in the game's slot they are never replaced; in extra cells they are replaced only when the slot already draws
+  a conditional sector inside their sphere (`slotCondHd`, keeping far `6299` covered behind close `6298` at `MEN_C6`).
+  `condMask` is 256 bits (`conds < 0x100u`, previously capped at 64) and `update()` refreshes immediately whenever
+  `level + 0x418..+0x4B8` changes. (2) **`*(info + 0x2B4)` entity swaps (180 entries, `flags & 1 != 0`, `kind=4..8, 10, 13..31, 33..38`)**:
+  `FUN_0032E660` swaps `CEntity` model index directly (`entity+0x56/0x58`), unaffected by HD world (`VCS_HD_RADIUS=3` matches `0`).
 - **Conditional pieces follow the clock** (the player's downtown tower, 2026-11-12: lit from one spot, dark 130 m
   further): a cell list's conditional pieces (FUN_0023D600's {kind, value, piece} at +0x30) hold, among others, the
   buildings' lit windows at night (hour windows). They were chosen when an extra cell was read: a cell read in the
