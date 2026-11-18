@@ -1514,3 +1514,17 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `python tools/sendkey.py Return`, `python tools/screenshot.py f.png` | key press / screenshot (control channel if open, else the window) |
 | `python tools/eedis.py <elf> <addr or name>` | EE disassembly with function names |
 | `python tools/minidbg.py <exe> <iso>` | catch fail-fast crashes with a stack |
+
+## 2026-11-18 - the fork's first regression baseline and frame-rate audit (#54)
+
+- `tools/regress.py` (build/regress/fork-1.0.0): scenes, tour (23 ok, 3 relocated, 1 falling), missions 45 / 46 / 50
+  / 55 / 94 ok, drive, evening, shakedown, widecull, menushape, fire, distance pass. Fixed after it: scopemask (the sky
+  fix had taken the scope mask bars' corners), widepref (updated for Cutscene framing), haze / hose / finale checks (the
+  script space from *0x48741C, it moves with Game > Memory), controls 91 / 91 (the test card's save moved to slot 1).
+  Still failing on test automation, not the game: `saves` (menu navigation with a translated disc) and `meters`
+  (PHI_A2 stops in state 3 before the forklift).
+- `tools/framerate_audit.py --steps 15,30,60,100` (build/audit/20261118_162220): 93 values off 1/30 by over 5 %, most at
+  1/15. At 60 / 100 against 30: jump rise 0.81 -> 0.86 / 0.88 m and airtime 0.43 -> 0.52 / 0.54 s, a 15 m fall 1.06 ->
+  1.19 / 1.20 s, a car's first second 11.2 -> 10.4 / 9.95 m/s, run-over throw 1.37 -> 0.99 / 0.72 m/s, bike lean per g
+  0.56 -> 0.60 / 0.63, bike braking lean 5.9 -> 8.8 / 7.4 deg; bikewater depth 2.68 -> 2.86 / 2.93 m. The `brake`
+  scenario's 30 fps column did not run (the car never moved): no comparison there. These are after 1.0.0.
