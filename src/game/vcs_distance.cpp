@@ -698,9 +698,12 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         }
 
         // The police after the player: their cars come out of the same spawner as the traffic, at its distance - with the
-        // population distance's (up to 3 x: 300-480 m away) they appeared too far ever to catch a car, and came only once
-        // the player stood still (the player's report, 2026-11-17). While the player is wanted the spawner keeps the
-        // game's own distance; VCS_CHASE_SPAWN=0 leaves it at the population distance's (for comparing).
+        // population distance's (up to 3 x) they appeared too far ever to catch a car, and came only once the player
+        // stood still (the player's report, 2026-11-17). While the player is wanted, the spawner's ring **out of view**
+        // (behind and beside the camera: 60 / 90 / 70 m, kOffscreenSlots) keeps the game's distance, the police come
+        // from there as on the PS2; the ring in view stays far. (The first fix brought the whole spawner back to the
+        // game's distance: every new car then appeared close and in plain sight - the player's report, 2026-11-18.)
+        // VCS_CHASE_SPAWN=0 leaves both rings at the population distance's (for comparing).
         bool chased()
         {
             static const bool on = !(std::getenv("VCS_CHASE_SPAWN") && *std::getenv("VCS_CHASE_SPAWN") == '0');
@@ -732,9 +735,10 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 lastPeds = peds;
             }
             const float cars = carDistance();
-            wrf(kOffscreenSlots, 60.0f * cars);
-            wrf(kOffscreenSlots + 4u, 90.0f * cars);
-            wrf(kOffscreenSlots + 8u, 70.0f * cars);
+            const float offscreen = chased() ? 1.0f : cars; // (the police's ring: chased() above)
+            wrf(kOffscreenSlots, 60.0f * offscreen);
+            wrf(kOffscreenSlots + 4u, 90.0f * offscreen);
+            wrf(kOffscreenSlots + 8u, 70.0f * offscreen);
             if (g_genTouched)
             {
                 if (g_genFresh)
@@ -748,9 +752,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                     // the car spawner: its rings spread from the game's distance out to the population distance's (the
                     // spawn rings' note at g_carRings; the removal, FUN_00433378, keeps the population distance)
                     const int rings = std::max(g_carRings, 1);
-                    if (chased())
-                        k = 1.0f; // (the police's distance: chased() above)
-                    else if (rings > 1)
+                    if (rings > 1)
                         k = 1.0f + (cars - 1.0f) * static_cast<float>(g_carRing++ % rings) / static_cast<float>(rings - 1);
                     g_carSpawnK = k;
                 }
@@ -1236,7 +1238,7 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         {
             if (ctx->pc == kNodeList)
             {
-                const float k = g_carRings > 1 || chased() ? g_carSpawnK : carDistance(), kp = pedDistance();
+                const float k = g_carRings > 1 ? g_carSpawnK : carDistance(), kp = pedDistance();
                 const uint32_t ra = GPR_U32(ctx, 31);
                 if (k > 1.0f && ra >= kSpotFinder && ra < kSpotFinderEnd)
                 {
