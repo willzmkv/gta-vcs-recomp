@@ -537,10 +537,12 @@ namespace vcs::prompts
         // the help box (FUN_00321CF8: SetFontStyle(1) at 0x322048 / 0x322050 before its text) in Oswald too - the player
         // saw the help boxes still in the game's font (2026-11-18)
         constexpr uint32_t kHelpBoxFrom = 0x00321CF8u, kHelpBoxTo = 0x003221A0u;
-        // Oswald is taller than the game's letters at the same scale: in the help box it read too big and touched the
-        // box's edges (the player, 2026-11-18), so its text there is drawn at this share of the subtitles' size, the box
-        // sized to match (fontSetScale / fontHeightField while g_inHelpBox: the last style set came from the help box)
-        constexpr float kHelpBoxScale = 0.82f;
+        // Oswald is taller than the game's letters at the same scale and reaches lower: in the help box it read too big,
+        // the last line's descenders hung below the box and long lines touched its right edge (the player, 2026-11-18).
+        // Its text there is drawn at kHelpTextScale of the subtitles' size and the box's line height kept at
+        // kHelpBoxScale - room below the last line (fontSetScale / fontHeightField while g_inHelpBox: the last style set
+        // came from the help box)
+        constexpr float kHelpTextScale = 0.74f, kHelpBoxScale = 0.84f;
         bool g_inHelpBox = false; // game thread
         bool inSubtitleFn(uint32_t ra)
         {
@@ -696,7 +698,7 @@ namespace vcs::prompts
         PS2_GUEST_CC void fontSetScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             if ((GPR_U32(ctx, 4) & kRamMask) == kSubFont)
-                ctx->f[12] *= (g_inHelpBox ? kHelpBoxScale : 1.0f) / static_cast<float>(kSubGrid);
+                ctx->f[12] *= (g_inHelpBox ? kHelpTextScale : 1.0f) / static_cast<float>(kSubGrid);
             g_origFontSetScale(rdram, ctx, runtime);
         }
         // FUN_003E5D90(font): its line height (+6), a leaf. CFont::GetHeight (FUN_003F4110, returning to 0x3F4128) times
