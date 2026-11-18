@@ -76,7 +76,7 @@ class Check:
         return next((x for x in self.scripts() if x[1] == "dia_c5"), None)
 
     def global_(self, n):
-        return struct.unpack("<i", self.g.peek(SCRIPT_SPACE + 4 * n, 4))[0]
+        return struct.unpack("<i", self.g.peek(self.space() + 4 * n, 4))[0]
 
     def wait(self, what, cond, seconds, every=1.0):
         t0 = time.time()
@@ -90,6 +90,12 @@ class Check:
 
     def poke(self, addr, fmt, v):
         self.g.cmd("poke 0x%x %s" % (addr, struct.pack(fmt, v).hex()))
+
+    def space(self):
+        """the script space: *(0x48741C) - it moves with Game > Memory (SCRIPT_SPACE was its place at the PS2's)"""
+        if not getattr(self, "_space", 0):
+            self._space = self.g.u32(0x48741C)
+        return self._space or SCRIPT_SPACE
 
     def run(self, story, full):
         g = self.g = rig.Game.start(save=rig.default_save(), name="finale_check",
@@ -118,7 +124,7 @@ class Check:
             self.poke(slot + 0x200, "<I", 0)
             if story:
                 for n, v in STORY_FLAGS:
-                    self.poke(SCRIPT_SPACE + 4 * n, "<i", v)
+                    self.poke(self.space() + 4 * n, "<i", v)
             g.cmd("pause off")
             fight = self.wait("the fight", lambda: (self.mission() or (0, 0, 0, 0))[3] == FIGHT_STATE, 120)
             self.shot("1_roof_scene_done")

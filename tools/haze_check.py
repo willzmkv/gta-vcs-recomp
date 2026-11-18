@@ -47,8 +47,17 @@ def check(out, port=None, timing="0", fps="60", env=None):
          "VCS_TRACE_IM2D_DELAY": "0"}
     e.update(env or {})
     g = rig.Game.start(save=rig.default_save(), name="haze_check", port=port, env=e)
-    gi = lambda n: struct.unpack("<i", g.peek(SCRIPT_SPACE + 4 * n, 4))[0]
-    gf = lambda n: g.peekf(SCRIPT_SPACE + 4 * n, 1)[0]
+    base = []
+
+    def sp():
+        """the script space: *(0x48741C) - it moves with Game > Memory (SCRIPT_SPACE was its place at the PS2's)"""
+        if not base:
+            v = g.u32(0x48741C)
+            if v:
+                base.append(v)
+        return base[0] if base else SCRIPT_SPACE
+    gi = lambda n: struct.unpack("<i", g.peek(sp() + 4 * n, 4))[0]
+    gf = lambda n: g.peekf(sp() + 4 * n, 1)[0]
     gv = lambda n: bytes([0xCD + (n >> 8), n & 0xFF])  # a global as a script argument
 
     def wait_state(want, seconds):

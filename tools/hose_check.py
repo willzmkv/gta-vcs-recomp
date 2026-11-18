@@ -47,8 +47,17 @@ def check(out, step=144, port=47634, env=None):
     e.update(env or {})
     g = rig.Game.start(save=rig.default_save(), name="hose_check_%d" % step, port=port,
                        data_dir=os.path.join(ROOT, "build", "hose_check", "data_%d" % port), env=e)
-    gi = lambda n: struct.unpack("<i", g.peek(SCRIPT_SPACE + 4 * n, 4))[0]
-    gf = lambda n: g.peekf(SCRIPT_SPACE + 4 * n, 1)[0]
+    base = []
+
+    def sp():
+        """the script space: *(0x48741C) - it moves with Game > Memory (SCRIPT_SPACE was its place at the PS2's)"""
+        if not base:
+            v = g.u32(0x48741C)
+            if v:
+                base.append(v)
+        return base[0] if base else SCRIPT_SPACE
+    gi = lambda n: struct.unpack("<i", g.peek(sp() + 4 * n, 4))[0]
+    gf = lambda n: g.peekf(sp() + 4 * n, 1)[0]
     gv = lambda n: bytes([0xCD + (n >> 8), n & 0xFF])  # a global as a script argument
     clock = lambda: g.u32(CLOCK_MS) / 1000.0
     result = {"step": step, "env": env or {}}
