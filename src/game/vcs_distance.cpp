@@ -716,6 +716,41 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             return stars >= 1u && stars <= 6u;
         }
 
+        // Room for the police's cars. GenerateOneRandomCar (FUN_00430290) returns at once when the random cars are as many
+        // as the zone wants (0x48A96C >= the zone's density x 0x48A968 x 0x48A680) or all the counts reach the cap
+        // 0x48A9A8 - and only after that does it choose a police car (wanted level > 1, the cop cars 0x48A970 fewer than
+        // the level's +0x91A, the ped's +0x918 below +0x919: at 3 stars and more always, at 2 one in two; the model -
+        // Cheetah, Enforcer... - from FUN_00432BE8 by the level). On the PS2 the traffic turns over within 60 m, so a
+        // try gets through; with the population distance and density up the traffic stays at its number, nearly every
+        // try returned before the police, and a 3- or 4-star chase brought one or two cars (the player's report,
+        // 2026-11-18; build/analysis/decomp/gen_random_cars.c). While the police want a car, the number wanted and the
+        // cap are raised just past the counts for the spawner's tries - one more car - and applyDensity writes the
+        // frame's values back before the next frame's. VCS_CHASE_SPAWN=0 leaves them.
+        void policeRoom()
+        {
+            if (!chased())
+                return;
+            const uint32_t ped = rd32(0x004E4910u + rd8(0x004CD128u) * 0x190u);
+            const int32_t stars = static_cast<int32_t>(rd32(ped + 0x920u));
+            const int32_t cops = static_cast<int32_t>(rd32(0x0048A970u));
+            if (stars < 2 || cops >= static_cast<int32_t>(rd8(ped + 0x91Au)) || rd8(ped + 0x918u) >= rd8(ped + 0x919u))
+                return;
+            const int32_t random = static_cast<int32_t>(rd32(kRandomCars));
+            const int32_t zone = std::max<int32_t>(static_cast<int16_t>(rd16(0x004E4A54u + rd8(0x004CD128u) * 400u)), 1);
+            const float scripts = rdf(0x0048A968u);
+            if (!(scripts > 0.0f))
+                return; // a mission turned the traffic off: no police cars from it either (as on the PS2)
+            const float need = (static_cast<float>(random) + 1.5f) / (static_cast<float>(zone) * scripts);
+            if (need > rdf(kCarNumber))
+                wrf(kCarNumber, need);
+            int32_t sum = 0;
+            for (uint32_t a : {0x0048A96Cu, 0x0048A970u, 0x0048A974u, 0x0048A978u, 0x0048A980u, 0x0048A984u})
+                sum += static_cast<int32_t>(rd32(a));
+            const int32_t room = static_cast<int32_t>(poolSize(kCarPool)) - static_cast<int32_t>(kCarsKept);
+            if (static_cast<int32_t>(rd32(kMaxCars)) <= sum && sum + 1 <= room)
+                wr32(kMaxCars, sum + 1);
+        }
+
         // a reader of GenerationDistMultiplier: the frame's base (the game's value) times this reader's factor
         template <size_t I>
         PS2_GUEST_CC void genReader(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -734,6 +769,8 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                     g_births.fetch_add(static_cast<uint32_t>(peds - lastPeds), std::memory_order_relaxed);
                 lastPeds = peds;
             }
+            if (kGenReaders[I] == 0x00430290u) // GenerateOneRandomCar
+                policeRoom();
             const float cars = carDistance();
             const float offscreen = chased() ? 1.0f : cars; // (the police's ring: chased() above)
             wrf(kOffscreenSlots, 60.0f * offscreen);

@@ -223,13 +223,19 @@ namespace vcs
                 lo = std::min(lo, x);
                 hi = std::max(hi, x);
             }
-            if (lo > 1 || hi < 639 || g_otherKeys.size() + n > 256u)
+            if (lo > 1 || hi < 639)
                 return;
-            for (uint32_t i = 0; i < n; ++i)
+            // only its points on the screen's corners: all its points went in at first, and a HUD vertex that happened to
+            // share one (a big cloud sprite's, the gradient's horizon) dropped out of the HUD layer for that frame - HUD
+            // pieces and mission titles flicking back to their 4:3 places at random (the player's report, 2026-11-18)
+            for (uint32_t i = 0; i < n && g_otherKeys.size() < 64u; ++i)
             {
                 int16_t xy[2];
                 std::memcpy(xy, rdram + verts + i * 16u + 8u, 4);
-                g_otherKeys.push_back(positionKey(xy[0], xy[1]));
+                const bool cornerX = xy[0] <= 1 || (xy[0] >= 639 && xy[0] <= 641);
+                const bool cornerY = xy[1] <= 1 || (xy[1] >= 447 && xy[1] <= 449);
+                if (cornerX && cornerY)
+                    g_otherKeys.push_back(positionKey(xy[0], xy[1]));
             }
         }
 

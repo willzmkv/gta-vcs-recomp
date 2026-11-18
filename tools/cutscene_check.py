@@ -33,7 +33,7 @@ def main():
     g = rig.Game.start(save=None, name="cutscene_check", seconds=300, data_dir=os.path.join(out, "data"), env=env)
     try:
         t0 = time.time()
-        while int(g.cmd("frames")) < 25:  # the loading screens are over at ~frame 30; the palms fade in from ~50
+        while int(g.cmd("frames")) < 15:  # the loading screens are over at ~frame 30; the palms fade in from ~50
             if time.time() - t0 > 120:
                 raise RuntimeError("the game did not start")
             time.sleep(0.05)
@@ -54,7 +54,8 @@ def main():
         levels.append(round(sum(band) / max(1, len(band)), 1))
     # from the first frame the fade shows anything (the loading screens before it are bright too: start at the black)
     first_black = next((i for i, v in enumerate(levels) if v < 3.0), None)
-    shot = levels[first_black:] if first_black is not None else []
+    # (a fast boot: the burst may start with the fade already under way - then from its first frame, if still dark)
+    shot = levels[first_black:] if first_black is not None else (levels if levels and levels[0] < 40.0 else [])
     steps = [abs(b - a) for a, b in zip(shot, shot[1:])]
     worst = max(steps) if steps else 0.0
     end = max(shot[-30:]) if shot else 0.0

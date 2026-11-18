@@ -168,8 +168,9 @@ def main():
         gamectl.send("press Escape", port=g.port)
         time.sleep(1.5)
 
-        # original
+        # original (the game's font too: Oswald's letters in the help box are glyph draws of their own)
         g.cmd("setting enhance.prompts 0")
+        g.cmd("setting enhance.subtitle_font 0")
         frames(10)
         help_text("CLOTHA")
         frames(30)

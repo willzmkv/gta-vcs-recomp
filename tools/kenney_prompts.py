@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Kenney's Input Prompts (CC0) for the game's button prompts (src/game/vcs_glyph_art.cpp, "Icon style: Kenney").
 
-    python tools/kenney_prompts.py copy KENNEY_DIR     the icons the prompts use (128 px, "Double") into assets/prompts/kenney
+    python tools/kenney_prompts.py copy KENNEY_DIR     the icons the prompts use (128 px, "Double", the outline style where
+                                                     there is one) into assets/prompts/kenney
     python tools/kenney_prompts.py embed OUT.cpp       those icons as a C++ table (CMake runs it at configure), and the
                                                      subtitles' font (assets/fonts/oswald, OFL) beside them
 
@@ -47,7 +48,11 @@ def copy(kenney):
     n = 0
     for folder, names in list(PADS.items()) + [("Keyboard & Mouse", KEYS)]:
         for name in names:
-            src = os.path.join(kenney, folder, "Double", name + ".png")
+            # the pack's "color outline" style where it has one (the player's choice, 2026-11-18): face buttons, shoulders,
+            # triggers, keys and mouse; the d-pad and the sticks have only the plain one. Saved under the plain name.
+            src = os.path.join(kenney, folder, "Double", name + "_outline.png")
+            if not os.path.isfile(src):
+                src = os.path.join(kenney, folder, "Double", name + ".png")
             if not os.path.isfile(src):
                 sys.exit("[kenney] missing %s" % src)
             shutil.copyfile(src, os.path.join(ASSETS, name + ".png"))

@@ -534,7 +534,14 @@ namespace vcs::prompts
         // when it is 0 - the same text (the HUD's +0x1C), each with a widescreen (cutscene) branch
         constexpr uint32_t kSubtitleFrom = 0x0031CA80u, kSubtitleTo = 0x0031D8A8u;
         constexpr uint32_t kSubtitle2From = 0x003219E0u, kSubtitle2To = 0x00321CF8u;
-        bool inSubtitleFn(uint32_t ra) { return (ra >= kSubtitleFrom && ra < kSubtitleTo) || (ra >= kSubtitle2From && ra < kSubtitle2To); }
+        // the help box (FUN_00321CF8: SetFontStyle(1) at 0x322048 / 0x322050 before its text) in Oswald too - the player
+        // saw the help boxes still in the game's font (2026-11-18)
+        constexpr uint32_t kHelpBoxFrom = 0x00321CF8u, kHelpBoxTo = 0x003221A0u;
+        bool inSubtitleFn(uint32_t ra)
+        {
+            return (ra >= kSubtitleFrom && ra < kSubtitleTo) || (ra >= kSubtitle2From && ra < kSubtitle2To) ||
+                   (ra >= kHelpBoxFrom && ra < kHelpBoxTo);
+        }
         constexpr uint16_t kSubV = 253;
         std::atomic<int> g_subSetting{0}; // 0 the game's font, 1 Oswald
         bool g_subIn = false, g_subReady = false;
@@ -571,7 +578,9 @@ namespace vcs::prompts
                 // in the grid's measures
                 const uint16_t buttons = std::min<uint16_t>(rd16(game + 2), 0x600 / 14);
                 const uint32_t from = rd32(game + 0xC);
-                if (buttons && inRam(from, buttons * 14u))
+                // (kTable, the prompts' copy, is guest scratch below inRam's floor: the copy never happened and a help box
+                // in Oswald drew its buttons from empty records - blank gaps, 2026-11-18)
+                if (buttons && (from == kTable || inRam(from, buttons * 14u)))
                     for (uint16_t i = 0; i < buttons; ++i)
                     {
                         int16_t rec[7];
@@ -684,6 +693,22 @@ namespace vcs::prompts
             if ((GPR_U32(ctx, 4) & kRamMask) == kSubFont)
                 ctx->f[12] /= static_cast<float>(kSubGrid);
             g_origFontSetScale(rdram, ctx, runtime);
+        }
+        // FUN_003E5D90(font): its line height (+6), a leaf. CFont::GetHeight (FUN_003F4110, returning to 0x3F4128) times
+        // the global scale 0x48A1E4 - not the font's own scale, which fontSetScale divides - sizes the help box: the copy's
+        // kSubGrid x height made the box four times as tall as its Oswald text. Its other callers (the text's own line
+        // spacing goes by the font's scale) keep the copy's measure.
+        constexpr uint32_t kFontHeightField = 0x003E5D90u, kGetHeightReturn = 0x003F4128u;
+        PS2_GUEST_CC void fontHeightField(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+        {
+            const uint32_t font = GPR_U32(ctx, 4) & kRamMask;
+            uint32_t h = 0;
+            std::memcpy(&h, rdram + ((font + 6u) & kRamMask), 2);
+            h &= 0xFFFFu;
+            if (font == kSubFont && GPR_U32(ctx, 31) == kGetHeightReturn)
+                h /= static_cast<uint32_t>(kSubGrid);
+            SET_GPR_U32(ctx, 2, h);
+            ctx->pc = GPR_U32(ctx, 31);
         }
         PS2_GUEST_CC void setFontStyle(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
         {
@@ -1280,7 +1305,10 @@ namespace vcs::prompts
         {
             if (g_inSubFont && GPR_U32(ctx, 31) == kGlyphBatch)
             {
-                // (the subtitles' letters: known by their texture coordinates in classify)
+                // the subtitles' letters are known by their texture coordinates in classify; the button glyphs among them
+                // (a help box in Oswald) by the prompts' token rows, as in the game's font
+                if (active())
+                    captureFontBatch(rdram, ctx);
             }
             else if (active())
             {
@@ -1461,8 +1489,8 @@ namespace vcs::prompts
         s.page = "Enhancements";
         s.section = "Subtitles";
         s.label = "Subtitle font";
-        s.help = "The lines at the bottom of the screen - what people say in cutscenes, the mission's instructions. "
-                 "Original: the game's own letters. Oswald: a clean, tall font, sharp at any resolution, with an outline "
+        s.help = "The lines at the bottom of the screen - what people say in cutscenes, the mission's instructions - and "
+                 "the help boxes. Original: the game's own letters. Oswald: a clean, tall font, sharp at any resolution, with an outline "
                  "that keeps it readable over anything. The game's layout and colours stay.";
         s.type = settings::Type::Choice;
         s.choices = {{"Original", 0}, {"Oswald", 1}};
@@ -1637,6 +1665,7 @@ namespace vcs::prompts
         runtime.replaceFunction(kIm2DRender, &im2dRender);
         runtime.replaceFunction(kIm2DRenderIndexed, &im2dRenderIndexed);
         runtime.replaceFunction(kSetFontStyle, &setFontStyle); // (a leaf: the style stored, here too)
+        runtime.replaceFunction(kFontHeightField, &fontHeightField); // (a leaf too)
         if ((g_origFontSetScale = runtime.lookupFunction(kFontSetScale)))
             runtime.replaceFunction(kFontSetScale, &fontSetScale);
         gsHwSetGlyphClassifier(&classify);

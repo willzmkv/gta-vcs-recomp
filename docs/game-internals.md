@@ -1863,6 +1863,14 @@ Read with `tools/eedecomp.py` and the rig (`prompts subtitles` counts the switch
   becomes 4. The renderer knows a letter by its texture coordinates (the letters touch: their corners are shared, so
   positions, as the button glyphs use, could not tell them apart) and draws it from the glyph atlas in the text's
   colour.
+- **The help box too** (2026-11-18): `FUN_00321CF8` sets style 1 at 0x322048 / 0x322050 before its text; its range is
+  among the subtitle functions'. Its box is `lines (FUN_003F4308) x CFont::GetHeight (FUN_003F4138: the font's +6 via
+  FUN_003F4110 -> FUN_003E5D90, times the global scale 0x48A1E4) + 20` - the global scale, not the font's own +0x20 that
+  the text uses, so the copy's kSubGrid x height made the box four times as tall: `FUN_003E5D90` (a leaf) is replaced
+  and gives the copy's height over kSubGrid when called from GetHeight (return 0x3F4128). The button glyphs among the
+  Oswald letters come from the copy's button table, refreshed every frame from the prompts' `kTable` - both in guest
+  scratch below the prompts' `inRam` floor (0x100000), which had made the prompts find no font (every help box with
+  the PS2's buttons while Oswald was on) and the copy keep empty button records (blank gaps).
 
 ### 6o. Draw distance: the LOD scale and the two far planes (2026-11-07, Enhancements > World)
 
@@ -2505,6 +2513,15 @@ its lists; `pokef` of the scale below with screenshots).
   and moving towards the player. Removal **`FUN_00433378`** (as VC's PossiblyRemoveVehicle): out of view past **60 m**
   (70 with the camera looking down, x 1.5 extended), in view past 160 x gen. Standing still, 86 % of the new cars went
   at once; driving about half (the offscreen ones behind).
+- **The police come out of the same tries, after the traffic's gates** (2026-11-18, decompiled `FUN_00430290`,
+  `build/analysis/decomp/gen_random_cars.c`): it returns at once when the random cars `0x48A96C` reach the zone's
+  wanted number (`0x4E4A54` x `0x48A968` x `0x48A680`) or the counts reach the cap `0x48A9A8` - and only then chooses a
+  police car: wanted level > 1, the cop cars `0x48A970` below the level's `ped+0x91A` and `ped+0x918 < ped+0x919`; at 3
+  stars and more every such try, at 2 one in two (`rand % 31 > 15`); the model from `FUN_00432BE8` by the level (0xBF:
+  class 0x18). With the population distance and density up the traffic sat at its number, nearly every try returned
+  before the police, and a 3-4 star chase brought one or two cars, no Cheetahs or Enforcers (the parked vans on the
+  avenues are the road blocks, another system). `src/game/vcs_distance.cpp` `policeRoom()` raises the number and the
+  cap just past the counts for the tries while the police want a car.
 - **Where the population is made decides what the player sees** (2026-11-12, the player: "few people and few cars at
   100", then "they spawn in front of me"). With every slider at 100 the spawn rings follow the population distance:
   new peds in view at 175-300 m (CPopulation::Update's 35 x gen x the factor of 5 as the ped spot finder's nearest),
