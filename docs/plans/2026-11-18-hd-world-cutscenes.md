@@ -23,6 +23,10 @@ ends. Interiors stay as they are.
 - Phil's warehouse (Boomshine Blowout, #32): in its cutscene the game shows **both** versions (3167 the shell, 6285
   the building with its inside) - the twin rule must keep doing what the game's flags say there.
 
+## Result (2026-11-18): already so - the premise was wrong
+
+An outdoor `.CUT` cutscene does **not** set `level + 0x260`: Shakedown's opening started from outdoors ran with it 0 and the HD world drew its extra cells all through it (`[hdworld] ... +947 extra`, fallback frames 0/0/0/0/0); the intro's scripted shots likewise. The value seen at first (0xbc5aa0) was the barracks interior's, kept because the test started the mission with the trainer from inside it (`build/rig/saves/fortbaxter` loads in the barracks) - the same value as before the cutscene, and the game's own cells there were low detail too. So only a cutscene started while an interior is forced keeps the game's ~260 m (and the game's own low detail), as on the PS2. Interiors and the forced case unchanged.
+
 ## Task H3: draw the extra cells during outdoor cutscenes
 
 **Files:** `src/game/vcs_world_hd.cpp` (`update()`, `install()`, the draw check), `docs/game-internals.md` 9j,
