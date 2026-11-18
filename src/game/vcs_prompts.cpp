@@ -551,6 +551,9 @@ namespace vcs::prompts
         }
         constexpr uint16_t kSubV = 253;
         std::atomic<int> g_subSetting{0}; // 0 the game's font, 1 Oswald
+        // Enhancements > Subtitles, with Oswald: size (% of the game's), the game's drop shadow pass, a dark box behind
+        // each line (its opacity, 0..128; drawn by the renderer from the letters: GSHwGlyphHit::box), the text all white
+        std::atomic<int> g_subSize{100}, g_subShadow{1}, g_subBox{0}, g_subWhite{0};
         bool g_subIn = false, g_subReady = false;
         uint32_t g_subStylesWas = 0, g_subGame = 0;
         std::vector<uint16_t> g_subChars;    // per letter of the copy: its character (Oswald's when g_subOswald)
@@ -698,7 +701,8 @@ namespace vcs::prompts
         PS2_GUEST_CC void fontSetScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             if ((GPR_U32(ctx, 4) & kRamMask) == kSubFont)
-                ctx->f[12] *= (g_inHelpBox ? kHelpTextScale : 1.0f) / static_cast<float>(kSubGrid);
+                ctx->f[12] *= (g_inHelpBox ? kHelpTextScale : g_subSize.load(std::memory_order_relaxed) / 100.0f) /
+                              static_cast<float>(kSubGrid);
             g_origFontSetScale(rdram, ctx, runtime);
         }
         // FUN_003E5D90(font): its line height (+6), a leaf. CFont::GetHeight (FUN_003F4110, returning to 0x3F4128) times
@@ -1299,6 +1303,13 @@ namespace vcs::prompts
             g_inGameFont = g_tableIn && g_font && (GPR_U32(ctx, 4) & kRamMask) == g_font;
             g_inSubFont = g_subIn && (GPR_U32(ctx, 4) & kRamMask) == kSubFont;
             g_shadow = GPR_U32(ctx, 11) != 0;
+            // Subtitle shadow Off: the drop shadow pass of Oswald's text not drawn (print calls render twice, the shadow
+            // first; nothing reads what it returns) - the help box keeps the game's
+            if (g_inSubFont && g_shadow && !g_inHelpBox && !g_subShadow.load(std::memory_order_relaxed))
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
             g_origFontRender(rdram, ctx, runtime);
         }
 
@@ -1365,6 +1376,14 @@ namespace vcs::prompts
                     }
                     hit.shadow = false;
                     hit.tint = true;
+                    // the box behind the line and the white text: the subtitles and mission text only, which sit in the
+                    // lower half (the help box's Oswald is at the top and has a box of its own)
+                    float y0 = 1e9f;
+                    for (uint32_t i = 0; i < count; ++i)
+                        y0 = std::min(y0, xy[2 * i + 1]);
+                    const bool lower = y0 > 224.0f;
+                    hit.box = lower ? static_cast<uint8_t>(g_subBox.load(std::memory_order_relaxed)) : 0u;
+                    hit.white = lower && g_subWhite.load(std::memory_order_relaxed) != 0;
                     g_subLettersDrawn.fetch_add(1, std::memory_order_relaxed);
                     return true;
                 }
@@ -1520,6 +1539,62 @@ namespace vcs::prompts
         s.defaultValue = 50;
         s.env = "VCS_SUBTITLE_OUTLINE";
         s.onChange = [](int v) { glyphart::setSubtitleOutline(v); };
+        settings::add(s);
+
+        s = {};
+        s.key = "enhance.subtitle_size";
+        s.page = "Enhancements";
+        s.section = "Subtitles";
+        s.label = "Subtitle size";
+        s.help = "How big the subtitles are (with the Oswald font), from the game's size. The game wraps and centres the "
+                 "lines for it.";
+        s.type = settings::Type::Integer;
+        s.min = 80;
+        s.max = 150;
+        s.format = "%d%%";
+        s.defaultValue = 100;
+        s.env = "VCS_SUBTITLE_SIZE";
+        s.onChange = [](int v) { g_subSize.store(std::clamp(v, 80, 150), std::memory_order_relaxed); };
+        settings::add(s);
+
+        s = {};
+        s.key = "enhance.subtitle_shadow";
+        s.page = "Enhancements";
+        s.section = "Subtitles";
+        s.label = "Subtitle shadow";
+        s.help = "The game's drop shadow under the subtitles (with the Oswald font). Off: the outline alone.";
+        s.type = settings::Type::Choice;
+        s.choices = {{"On", 1}, {"Off", 0}};
+        s.defaultValue = 1;
+        s.env = "VCS_SUBTITLE_SHADOW";
+        s.onChange = [](int v) { g_subShadow.store(v, std::memory_order_relaxed); };
+        settings::add(s);
+
+        s = {};
+        s.key = "enhance.subtitle_background";
+        s.page = "Enhancements";
+        s.section = "Subtitles";
+        s.label = "Subtitle background";
+        s.help = "A dark box behind each subtitle line (with the Oswald font), as in modern games - readable over anything.";
+        s.type = settings::Type::Choice;
+        s.choices = {{"Off", 0}, {"Light (25%)", 25}, {"Medium (50%)", 50}, {"Dark (75%)", 75}};
+        s.defaultValue = 0;
+        s.env = "VCS_SUBTITLE_BACKGROUND";
+        s.onChange = [](int v) { g_subBox.store(std::clamp(v, 0, 100) * 128 / 100, std::memory_order_relaxed); };
+        settings::add(s);
+
+        s = {};
+        s.key = "enhance.subtitle_colour";
+        s.page = "Enhancements";
+        s.section = "Subtitles";
+        s.label = "Subtitle colour";
+        s.help = "Game's: the subtitles in the game's colours (names and key words highlighted). White: all of the text "
+                 "white (with the Oswald font).";
+        s.type = settings::Type::Choice;
+        s.choices = {{"Game's", 0}, {"White", 1}};
+        s.defaultValue = 0;
+        s.env = "VCS_SUBTITLE_COLOUR";
+        s.onChange = [](int v) { g_subWhite.store(v, std::memory_order_relaxed); };
         settings::add(s);
     }
 

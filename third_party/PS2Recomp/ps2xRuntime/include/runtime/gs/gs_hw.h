@@ -90,6 +90,10 @@ struct GSHwGlyphHit
     float u[8], v[8], dx[8];
     bool shadow;
     bool tint = false; // [gta-recomp] the primitive's own colour kept (a letter in the text's colour), not white / dark
+    // [gta-recomp] a subtitle letter: a dark box behind its line at this alpha (0..128; 0: none), drawn under the next
+    // frame's first letter from this frame's lines (GSHwBackend::subtitleBoxes); white: its bright vertices white
+    uint8_t box = 0;
+    bool white = false;
 };
 // [gta-recomp] uv: the vertices' texture coordinates in texels of the primitive's texture (u, v pairs) - a glyph known by
 // what it samples rather than where it lies (the subtitles' letters, which touch each other)

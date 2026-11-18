@@ -3166,12 +3166,109 @@ namespace
                 out[i].t = hit.v[i];
                 out[i].q = 1.0f;
                 out[i].x += hit.dx[i];
+                if (hit.tint && hit.white && out[i].r + out[i].g + out[i].b > 3 * 48) // [gta-recomp] white text, dark shadow kept
+                {
+                    out[i].r = out[i].g = out[i].b = 128;
+                    continue;
+                }
                 if (hit.tint) // (the subtitles' letters: the text's colour, its shadow's dark)
                     continue;
                 const uint8_t c = hit.shadow ? 0u : 128u;
                 out[i].r = out[i].g = out[i].b = c;
             }
             g_glyphDraws.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        // [gta-recomp] Subtitle background (Enhancements > Subtitles): a dark translucent box behind each line of the
+        // subtitles' letters (GSHwGlyphHit::box). The letters' extent is only known as they come, after the line's first
+        // one, so each frame's lines are gathered and drawn under the next frame's first letter - with that letter's
+        // state, layer and squeeze, so the box sits with the text (a new line shows its box one frame later). Each line
+        // padded by a few PS2 pixels; neighbouring lines meet halfway (no darker overlap).
+        struct SubLine
+        {
+            float x0, y0, x1, y1;
+        };
+        std::vector<SubLine> m_subLines, m_subLinesLast;
+        uint64_t m_subLinesFrame = ~0ull;
+        bool m_subBoxesDrawn = false;
+        void subtitleBoxes(const HwState &letter, const HwVertex *out, uint32_t n, bool hud, float hudPivot, float hudSqueeze,
+                           uint32_t source, uint8_t alpha)
+        {
+            if (m_subLinesFrame != m_frameIndex)
+            {
+                m_subLinesLast.swap(m_subLines);
+                m_subLines.clear();
+                m_subLinesFrame = m_frameIndex;
+                m_subBoxesDrawn = false;
+            }
+            SubLine b{1e9f, 1e9f, -1e9f, -1e9f};
+            for (uint32_t i = 0; i < n; ++i)
+            {
+                b.x0 = std::min(b.x0, out[i].x);
+                b.x1 = std::max(b.x1, out[i].x);
+                b.y0 = std::min(b.y0, out[i].y);
+                b.y1 = std::max(b.y1, out[i].y);
+            }
+            const float cy = (b.y0 + b.y1) * 0.5f;
+            bool merged = false;
+            for (SubLine &l : m_subLines)
+                if (cy > l.y0 && cy < l.y1) // the same line
+                {
+                    l.x0 = std::min(l.x0, b.x0);
+                    l.x1 = std::max(l.x1, b.x1);
+                    l.y0 = std::min(l.y0, b.y0);
+                    l.y1 = std::max(l.y1, b.y1);
+                    merged = true;
+                    break;
+                }
+            if (!merged && m_subLines.size() < 16u)
+                m_subLines.push_back(b);
+            if (m_subBoxesDrawn || m_subLinesLast.empty())
+                return;
+            m_subBoxesDrawn = true;
+            std::vector<SubLine> lines = m_subLinesLast;
+            std::sort(lines.begin(), lines.end(), [](const SubLine &a, const SubLine &c) { return a.y0 < c.y0; });
+            constexpr float pad = 4.0f;
+            for (size_t k = 0; k + 1 < lines.size(); ++k)
+                if (lines[k].y1 > lines[k + 1].y0) // overlapping cells: meet halfway
+                    lines[k].y1 = lines[k + 1].y0 = (lines[k].y1 + lines[k + 1].y0) * 0.5f;
+            HwState s = letter;
+            s.tme = 0;
+            s.texKey = 0;
+            s.tw = s.th = 0;
+            s.fst = 0;
+            s.abe = 1;
+            s.ba = 0; // (Cs - Cd) * As + Cd
+            s.bb = 1;
+            s.bc = 0;
+            s.bd = 1;
+            s.ate = 0;
+            s.fge = 0;
+            s.mode = 0;
+            s.iip = 1;
+            Frame &f = *m_frame;
+            const CmdType cmdType = hud ? CmdType::HudDraw : CmdType::Draw;
+            f.cmds.push_back({cmdType, static_cast<uint32_t>(f.draws.size())});
+            f.draws.push_back({s, static_cast<uint32_t>(f.vertices.size()), 0u, source, hudPivot, hudSqueeze});
+            for (const SubLine &l : lines)
+            {
+                const float x0 = l.x0 - pad, x1 = l.x1 + pad;
+                const float y0 = lines.size() > 1 && &l != &lines.front() ? l.y0 : l.y0 - pad * 0.5f;
+                const float y1 = lines.size() > 1 && &l != &lines.back() ? l.y1 : l.y1 + pad * 0.5f;
+                HwVertex v{};
+                v.z = out[0].z;
+                v.q = 1.0f;
+                v.a = alpha;
+                v.fog = 1.0f;
+                const float xs[6] = {x0, x1, x0, x1, x1, x0}, ys[6] = {y0, y0, y1, y0, y1, y1};
+                for (int i = 0; i < 6; ++i)
+                {
+                    v.x = xs[i];
+                    v.y = ys[i];
+                    f.vertices.push_back(v);
+                }
+                f.draws.back().count += 6;
+            }
         }
 
         void recordPrimitive(HwState s, HwVertex *out, uint32_t n, const GSPrimitiveBatch *batch, float ofx, float ofy,
@@ -3203,6 +3300,7 @@ namespace
                     out[i].a = out[n - 1].a;
                 }
             // [gta-recomp] a button prompt glyph (gsHwSetGlyphClassifier): the same primitive, drawn from the glyph atlas
+            uint8_t subBox = 0; // a subtitle letter with a box behind its line (subtitleBoxes)
             if (batch && s.tme && !s.texIsRt && batch->vertexCount == n && n <= 8u && gsDrawSourcePath(source) == 2u)
                 if (const GSHwGlyphFn glyph = g_glyphClassifier.load(std::memory_order_relaxed); glyph && g_glyphAtlas.pixels)
                 {
@@ -3217,7 +3315,10 @@ namespace
                     }
                     GSHwGlyphHit hit{};
                     if (glyph(xy, uv, n, hit))
+                    {
                         glyphDraw(s, out, n, hit);
+                        subBox = hit.box;
+                    }
                 }
             if (s.texIsRt && rtFullScale())
                 s.rtFull = isOneToOne(s, out, n) ? 1u : 0u;
@@ -3309,6 +3410,8 @@ namespace
                     return;
                 noteTarget(s.fbp, s.fbw, s.fpsm, out, n, s.scy1);
             }
+            if (subBox)
+                subtitleBoxes(s, out, n, hud, hudPivot, hudSqueeze, source, subBox);
             Frame &f = *m_frame;
             const CmdType cmdType = hud ? CmdType::HudDraw : CmdType::Draw;
             if (f.draws.empty() || f.cmds.empty() || f.cmds.back().type != cmdType || f.draws.back().source != source ||
