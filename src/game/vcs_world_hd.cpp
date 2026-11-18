@@ -273,7 +273,7 @@ namespace vcs::world_hd
             std::unordered_map<uint32_t, uint32_t> geometry; // gid -> our geometry (cell, conditional, area pieces)
             std::bitset<0x8000> ids;                  // the sector ids in its list
             uint32_t owner = 0, areaOwner = 0;         // the table entries' owner tags of ours
-            std::vector<std::array<float, 2>> hd;      // the centres of its list's detailed sectors (id < kLodIds)
+            std::vector<std::array<float, 3>> hd;      // the centres of its list's detailed sectors (id < kLodIds) and their gid
             double leaving = 0.0;                      // out of reach since (seconds): fading out, then dropped
         };
 
@@ -1045,7 +1045,7 @@ namespace vcs::world_hd
                     const uint16_t id = rd16(r) & 0x7FFFu;
                     cell->ids.set(id);
                     if (id >= 0x20u && id < kLodIds)
-                        cell->hd.push_back({half(rd16(r + 4u)), half(rd16(r + 6u))});
+                        cell->hd.push_back({half(rd16(r + 4u)), half(rd16(r + 6u)), static_cast<float>(rd16(r + 2u))});
                 }
             g_cells[key(x, y)] = std::move(cell);
             ++g_stats.loads;
@@ -1123,16 +1123,17 @@ namespace vcs::world_hd
             {
                 float x, y;
                 int tag;
+                uint16_t gid;
             };
             std::unordered_map<int64_t, std::vector<Point>> cells;
 
             static int64_t at(int gx, int gy) { return (int64_t(gx) << 32) ^ uint32_t(gy); }
-            void add(float x, float y, int tag)
+            void add(float x, float y, int tag, uint16_t gid = 0)
             {
-                cells[at(int(std::floor(x / kSize)), int(std::floor(y / kSize)))].push_back({x, y, tag});
+                cells[at(int(std::floor(x / kSize)), int(std::floor(y / kSize)))].push_back({x, y, tag, gid});
             }
-            template <typename Test = bool (*)(int)>
-            bool any(float x, float y, float radius, Test test = [](int) { return true; }) const
+            template <typename Test = bool (*)(int, uint16_t)>
+            bool any(float x, float y, float radius, Test test = [](int, uint16_t) { return true; }) const
             {
                 if (!(radius > 0.0f) || radius > 2000.0f)
                     return false;
@@ -1145,7 +1146,7 @@ namespace vcs::world_hd
                         if (it == cells.end())
                             continue;
                         for (const Point &p : it->second)
-                            if ((p.x - x) * (p.x - x) + (p.y - y) * (p.y - y) < radius * radius && test(p.tag))
+                            if ((p.x - x) * (p.x - x) + (p.y - y) * (p.y - y) < radius * radius && test(p.tag, p.gid))
                                 return true;
                     }
                 return false;
@@ -1275,10 +1276,21 @@ namespace vcs::world_hd
                 }
             for (size_t i = 0; i < extra.size(); ++i)
                 for (const auto &p : extra[i]->hd)
-                    hd.add(p[0], p[1], int(i + 1));
+                    hd.add(p[0], p[1], int(i + 1), static_cast<uint16_t>(p[2]));
             // (a cell fading out replaces nothing: the low detail is back behind it at once)
             std::bitset<0x8000> replacedNow;
             uint32_t lodHeld = 0;
+            // drawable()'s answer without its side effects (it may take an emptied entry back with our copy): whether a
+            // detailed sector of cell c could be drawn now
+            auto loadedFor = [&](const Cell *c, uint16_t gid) {
+                const uint32_t now = rd32(table + gid * 0xCu);
+                const bool mine = c->geometry.find(gid) != c->geometry.end();
+                if (!mine && !inSlotBuffers(now))
+                    return now != 0;
+                if (now == 0 && mine)
+                    return true;
+                return good(gid, now);
+            };
             auto replaced = [&](uint16_t id, uint32_t r) {
                 if (g_keepLod.test(id) || std::find(std::begin(kAlwaysKeepLod), std::end(kAlwaysKeepLod), id) != std::end(kAlwaysKeepLod))
                     return false;
@@ -1290,11 +1302,14 @@ namespace vcs::world_hd
                     return false;
                 }
                 const float x = half(rd16(r + 4u)), y = half(rd16(r + 6u)), radius = half(rd16(r + 0xAu));
-                const bool is = hd.any(x, y, radius, [&](int tag) {
+                const bool is = hd.any(x, y, radius, [&](int tag, uint16_t gid) {
                     if (tag == 0)
                         return !ids.test(id);
                     const Cell *c = extra[size_t(tag - 1)];
-                    return c->leaving == 0.0 && !c->ids.test(id);
+                    // a neighbour's detail replaces the low detail only once its geometry is there: from 300-400 m
+                    // away Phil's warehouse had neither version - 3167's entry not yet loaded (SKIPPED (entry)), 6285
+                    // left out for it (#32, 62 builds of 137 approaching from the north)
+                    return c->leaving == 0.0 && !c->ids.test(id) && loadedFor(c, gid);
                 });
                 if (!is)
                     return false;
