@@ -658,7 +658,9 @@ namespace vcs::glyphart
             std::vector<float> px;  // premultiplied RGBA, 0..1
             int x0 = 0, y0 = 0, x1 = 0, y1 = 0; // the drawn part (Kenney's icons sit in a transparent margin)
             float aspect() const { return (x1 - x0) * (1.0f - 2.0f * kIconMargin) / std::max(1, y1 - y0); }
-            static constexpr float kIconMargin = 0.07f; // of the glyph's height, above and below
+            // of the glyph's height, above and below: 0.11 makes Kenney's keycaps and buttons as tall as the ones drawn
+            // here (0.07 left them a size larger than the Classic set - the player, 2026-11-18)
+            static constexpr float kIconMargin = 0.11f;
         };
         const Icon *icon(const std::string &name)
         {

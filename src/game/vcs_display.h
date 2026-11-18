@@ -29,4 +29,8 @@ namespace vcs
 
     // Display > Cutscene black bars: the letterbox the game draws over cutscenes (FUN_002804C8). Any thread.
     void setCutsceneBars(bool on);
+
+    // Display > Cutscene framing: PS2 (true) keeps the 4:3 width while the camera's cinematic widescreen is on (Vert-,
+    // no bars over it), Wide the Hor+ view. Any thread.
+    void setCutsceneFraming(bool ps2);
 }

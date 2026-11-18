@@ -71,11 +71,26 @@ namespace vcs
 
         void store32(uint8_t *rdram, uint32_t addr, uint32_t v) { std::memcpy(rdram + (addr & kRamMask), &v, 4); }
 
+        // Cutscene framing (Display > Screen): while the camera's cinematic widescreen is on (m_WideScreenOn, TheCamera +
+        // 0x844: cutscenes and the scripts' SWITCH_WIDESCREEN; the game's aspect then 1.25), the PS2 showed the 4:3 width
+        // with bars over the top and bottom, and scenes keep actors just outside that width until they walk in - Hor+
+        // showed them waiting at the edges (Soldier: Vic standing at the right of the jet, the player's report,
+        // 2026-11-18). PS2 framing keeps the 4:3 width and takes the height from the display aspect (Vert-: a 16:9
+        // picture of what the bars left, square pixels), and the bars are not drawn over it.
+        constexpr uint32_t kCinematic = 0x006F4D14u;
+        std::atomic<bool> g_cutsceneFraming{true};
+        bool ps2Framing(const uint8_t *rdram, float r)
+        {
+            return g_cutsceneFraming.load(std::memory_order_relaxed) && r > 1.0001f && load32(rdram, kCinematic) != 0;
+        }
+
         // FUN_001ab9e0(camera a0, raster rect a1 (null: 640x448), tan(FOV / 2) f12, aspect f13)
         PS2_GUEST_CC void setViewWindow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const float r = g_widening.load(std::memory_order_relaxed);
-            if (r > 1.0001f || r < 0.9999f)
+            if (ps2Framing(rdram, r))
+                ctx->f[13] = (4.0f / 3.0f) * r; // the 4:3 width (f12 as it is), the display's height
+            else if (r > 1.0001f || r < 0.9999f)
             {
                 ctx->f[12] *= r; // horizontal extent x r
                 ctx->f[13] *= r; // vertical extent (x / aspect) unchanged
@@ -168,7 +183,7 @@ namespace vcs
         // 272, while the manager's +0x34 is set and the widescreen preference is off. Draws nothing else.
         PS2_GUEST_CC void cutsceneBars(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            if (!g_cutsceneBars.load(std::memory_order_relaxed))
+            if (!g_cutsceneBars.load(std::memory_order_relaxed) || ps2Framing(rdram, g_widening.load(std::memory_order_relaxed)))
             {
                 ctx->pc = GPR_U32(ctx, 31);
                 return;
@@ -178,6 +193,8 @@ namespace vcs
     }
 
     void setCutsceneBars(bool on) { g_cutsceneBars.store(on, std::memory_order_relaxed); }
+
+    void setCutsceneFraming(bool ps2) { g_cutsceneFraming.store(ps2, std::memory_order_relaxed); }
 
     void setAspectWidening(float r) { g_widening.store(r, std::memory_order_relaxed); }
 

@@ -491,6 +491,22 @@ namespace
         settings::add(s);
 
         s = {};
+        s.key = "display.cutscene_framing";
+        s.page = "Display";
+        s.section = "Screen";
+        s.label = "Cutscene framing";
+        s.help = "PS2: cutscenes show the width the PS2 showed and fill the widescreen screen by cutting the top and bottom, "
+                 "as its black bars did - people a scene keeps just off screen stay off screen until they walk in (the "
+                 "black bars are not drawn over it). Wide: the extra width of gameplay in cutscenes too; people waiting "
+                 "at the edges can be seen. No difference at 4:3.";
+        s.type = Type::Choice;
+        s.choices = {{"PS2", 1}, {"Wide", 0}};
+        s.defaultValue = 1;
+        s.env = "VCS_CUTSCENE_FRAMING";
+        s.onChange = [](int v) { vcs::setCutsceneFraming(v != 0); };
+        settings::add(s);
+
+        s = {};
         s.key = "display.scale";
         s.alias = "scale";
         s.page = "Graphics";

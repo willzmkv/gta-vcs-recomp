@@ -537,6 +537,11 @@ namespace vcs::prompts
         // the help box (FUN_00321CF8: SetFontStyle(1) at 0x322048 / 0x322050 before its text) in Oswald too - the player
         // saw the help boxes still in the game's font (2026-11-18)
         constexpr uint32_t kHelpBoxFrom = 0x00321CF8u, kHelpBoxTo = 0x003221A0u;
+        // Oswald is taller than the game's letters at the same scale: in the help box it read too big and touched the
+        // box's edges (the player, 2026-11-18), so its text there is drawn at this share of the subtitles' size, the box
+        // sized to match (fontSetScale / fontHeightField while g_inHelpBox: the last style set came from the help box)
+        constexpr float kHelpBoxScale = 0.82f;
+        bool g_inHelpBox = false; // game thread
         bool inSubtitleFn(uint32_t ra)
         {
             return (ra >= kSubtitleFrom && ra < kSubtitleTo) || (ra >= kSubtitle2From && ra < kSubtitle2To) ||
@@ -691,7 +696,7 @@ namespace vcs::prompts
         PS2_GUEST_CC void fontSetScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             if ((GPR_U32(ctx, 4) & kRamMask) == kSubFont)
-                ctx->f[12] /= static_cast<float>(kSubGrid);
+                ctx->f[12] *= (g_inHelpBox ? kHelpBoxScale : 1.0f) / static_cast<float>(kSubGrid);
             g_origFontSetScale(rdram, ctx, runtime);
         }
         // FUN_003E5D90(font): its line height (+6), a leaf. CFont::GetHeight (FUN_003F4110, returning to 0x3F4128) times
@@ -706,7 +711,7 @@ namespace vcs::prompts
             std::memcpy(&h, rdram + ((font + 6u) & kRamMask), 2);
             h &= 0xFFFFu;
             if (font == kSubFont && GPR_U32(ctx, 31) == kGetHeightReturn)
-                h /= static_cast<uint32_t>(kSubGrid);
+                h = static_cast<uint32_t>(std::lround(h * (g_inHelpBox ? kHelpBoxScale : 1.0f) / kSubGrid));
             SET_GPR_U32(ctx, 2, h);
             ctx->pc = GPR_U32(ctx, 31);
         }
@@ -716,6 +721,7 @@ namespace vcs::prompts
             const uint32_t ra = GPR_U32(ctx, 31);
             if (inSubtitleFn(ra))
                 g_subCalls.fetch_add(1, std::memory_order_relaxed);
+            g_inHelpBox = ra >= kHelpBoxFrom && ra < kHelpBoxTo;
             if (style == 1u && g_subReady && subtitlesOn() && inSubtitleFn(ra) && rd32(kFontStyles) == kSubFonts)
             {
                 style = 4u;
