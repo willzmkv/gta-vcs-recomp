@@ -1846,7 +1846,9 @@ Read with `tools/eedecomp.py` and the rig (`prompts subtitles` counts the switch
 - The Oswald letters (`src/game/vcs_prompts.cpp`, "the subtitles' font"): a fifth style - the font list copied to
   0x64000 with a copy of "Game" at 0x64040 whose letters hold Oswald's advances and texture coordinates on row 253,
   all its measures 4 x (the scale over 4 in the `FUN_00262570` hook: advances rounded to a quarter unit), its letters
-  28 units high (the line's 23: room for an accented capital); `FUN_003F4000(1)` from inside either message function
+  28 units high (the line's 23: room for an accented capital), its advances over 0.81 (a unit across is 0.81 of one
+  down on the screen: 480 x 272 units on the 640 x 448 picture - drawn square, the letters keep their shape);
+  `FUN_003F4000(1)` from inside either message function
   becomes 4. The renderer knows a letter by its texture coordinates (the letters touch: their corners are shared, so
   positions, as the button glyphs use, could not tell them apart) and draws it from the glyph atlas in the text's
   colour.

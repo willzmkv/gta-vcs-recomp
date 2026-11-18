@@ -582,6 +582,10 @@ namespace vcs::glyphart
         // down from the line's top); the em is kEm of the box, the baseline kBaseline down - Oswald SemiBold's Latin-1
         // reaches 1.071 em above the baseline (an accented capital) and 0.268 em below: 1.34 em, in 95 % of the box.
         constexpr float kEm = 0.71f, kBaseline = 0.785f;
+        // A font unit across is kUnitWide of one down on the screen: the 2D pass's units are 480 x 272 of the 640 x 448
+        // picture (1.333 and 1.647 pixels: game/vcs_prompts.cpp kUnitsPerAspect, which keeps the button glyphs round).
+        // Advances are in units across, the letters drawn square on the screen.
+        constexpr float kUnitWide = (640.0f / 480.0f) / (448.0f / 272.0f);
         std::atomic<int> g_subOutline{50}; // setSubtitleOutline: 0..100 % of kMaxOutline
 
         struct SubFont
@@ -612,7 +616,8 @@ namespace vcs::glyphart
             const int adv = subtitleAdvance(static_cast<uint16_t>(ch), kSubtitleGrid);
             if (!f.ok || adv < 0)
                 return -1.0f;
-            const float width = static_cast<float>(adv + 2 * kSubtitleMargin * kSubtitleGrid) / (kSubtitleCell * kSubtitleGrid);
+            // the cell as the screen shows it: units across x kUnitWide over units down
+            const float width = static_cast<float>(adv + 2 * kSubtitleMargin * kSubtitleGrid) * kUnitWide / (kSubtitleCell * kSubtitleGrid);
             if (!c)
                 return width;
             const int glyph = stbtt_FindGlyphIndex(&f.info, ch);
@@ -625,7 +630,7 @@ namespace vcs::glyphart
                                                    static_cast<unsigned char>(onEdge), perPixel, &gw, &gh, &xoff, &yoff);
             if (!sdf)
                 return width; // (a space)
-            const float penX = kSubtitleMargin * perUnit, baseY = kBaseline * h;
+            const float penX = kSubtitleMargin * perUnit * kUnitWide, baseY = kBaseline * h;
             for (int y = 0; y < gh; ++y)
                 for (int x = 0; x < gw; ++x)
                 {
@@ -923,7 +928,7 @@ namespace vcs::glyphart
             return -1;
         int advance = 0, lsb = 0;
         stbtt_GetCodepointHMetrics(&f.info, ch, &advance, &lsb);
-        return std::max(1, static_cast<int>(std::lround(advance * f.unit * kEm * kSubtitleCell * grid)));
+        return std::max(1, static_cast<int>(std::lround(advance * f.unit * kEm * kSubtitleCell * grid / kUnitWide)));
     }
     int style() { return g_style.load(std::memory_order_relaxed); }
 
