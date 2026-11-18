@@ -202,17 +202,49 @@ namespace vcs
 
         uint32_t positionKey(int x, int y) { return uint32_t(uint16_t(x)) | (uint32_t(uint16_t(y)) << 16); } // whole pixels
 
+        // Full-width Im2D drawn outside the HUD context - the sky's fill in the 2D pass when the camera looks up: one quad
+        // on the screen's corners. classify() goes by positions only, and these are a fade's: while a cutscene faded in,
+        // the sky was taken for the fade and moved into the HUD layer, and the sky stayed dark grey until the fade ended
+        // (the intro's palms; the player's report, 2026-11-17; docs/game-internals.md 6f). Their positions are no anchors
+        // in that frame: HUD primitives on them (the fade) are drawn into the frame, as VCS_HUD_NATIVE=0 draws them all.
+        // VCS_HUD_SKY=0: as before (tools/cutscene_check.py's control).
+        std::vector<uint32_t> g_otherKeys; // game thread
+
+        void noteOther(const uint8_t *rdram, uint32_t verts, uint32_t n)
+        {
+            static const bool on = !(std::getenv("VCS_HUD_SKY") && *std::getenv("VCS_HUD_SKY") == '0'); // 0: as before
+            if (!on)
+                return;
+            int16_t lo = 0x7FFF, hi = -0x7FFF;
+            for (uint32_t i = 0; i < n; ++i)
+            {
+                int16_t x;
+                std::memcpy(&x, rdram + verts + i * 16u + 8u, 2);
+                lo = std::min(lo, x);
+                hi = std::max(hi, x);
+            }
+            if (lo > 1 || hi < 639 || g_otherKeys.size() + n > 256u)
+                return;
+            for (uint32_t i = 0; i < n; ++i)
+            {
+                int16_t xy[2];
+                std::memcpy(xy, rdram + verts + i * 16u + 8u, 4);
+                g_otherKeys.push_back(positionKey(xy[0], xy[1]));
+            }
+        }
+
         void capture(uint8_t *rdram, R5900Context *ctx)
         {
             const bool maskBar = g_maskBar;
             g_maskBar = false;
-            if (!(g_inHud || g_inMenu || g_inLoading || maskBar) || !g_anchoring.load(std::memory_order_relaxed) ||
-                g_prims.size() >= 8192u)
+            if (!g_anchoring.load(std::memory_order_relaxed) || g_prims.size() >= 8192u)
                 return;
             const uint32_t verts = GPR_U32(ctx, 5) & PS2_RAM_MASK;
             const uint32_t n = GPR_U32(ctx, 6);
             if (n == 0u || n > 1024u || verts + n * 16u > PS2_RAM_SIZE)
                 return;
+            if (!(g_inHud || g_inMenu || g_inLoading || maskBar))
+                return noteOther(rdram, verts, n);
             Prim p{1e9f, 1e9f, -1e9f, -1e9f, static_cast<uint32_t>(g_primKeys.size()), n, g_inMenu || g_inLoading};
             if (maskBar)
                 p.part = Part::MaskBar;
@@ -307,7 +339,11 @@ namespace vcs
                                        : centre > 360.0f && b.x1 > 480.0f            ? GSHwAnchorRight
                                                                                      : GSHwAnchorCentre;
                 for (uint32_t k = 0; k < p.keyCount; ++k)
-                    (*anchors)[g_primKeys[p.firstKey + k]] = static_cast<uint8_t>(anchor | (p.menu ? GSHwAnchorMenu : 0u));
+                {
+                    const uint32_t key = g_primKeys[p.firstKey + k];
+                    if (std::find(g_otherKeys.begin(), g_otherKeys.end(), key) == g_otherKeys.end())
+                        (*anchors)[key] = static_cast<uint8_t>(anchor | (p.menu ? GSHwAnchorMenu : 0u));
+                }
                 if (traceFrame && find(i) == i)
                     std::fprintf(stderr, "[hud-anchor]   x %4.0f..%4.0f y %4.0f..%4.0f prims %3u part %d%s -> %s\n", b.x0, b.x1,
                                  b.y0, b.y1, b.keyCount, static_cast<int>(p.part), p.menu ? " menu" : "",
@@ -318,6 +354,7 @@ namespace vcs
             }
             g_prims.clear();
             g_primKeys.clear();
+            g_otherKeys.clear();
             ps2_render_worker::post([anchors] { ps2_render_worker::runOnGsStage([anchors] { g_anchors = anchors; }); });
         }
 

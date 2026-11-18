@@ -919,6 +919,17 @@ Found from frame dumps (`PS2X_HW_DUMP`, draw lists with depth) during the widesc
 - 3D-projected sprites - clouds (64x64 textures at z ~0.0006), coronas, the mission marker glow -
   take the same RwIm2D path but at their real depth.
 - The sky is a full-width gradient at z = 1 (n=18 strip, x -0..852); a horizon band full width too.
+- **The sky's fill and the fade share their corners** (2026-11-18, the intro's palms shot - the "dark sky" of a
+  cutscene's first frames). When the camera looks up, the 2D pass ends the sky with a lone full-screen quad of the top
+  colour (6 vertices on (0,0)-(640,448), `72 ac dd`, z 0xFFFFFE) - otherwise that colour is part of the 24-vertex
+  gradient draw. A fade-in is a full-screen black quad in the HUD context at the same corners and the same z. The
+  native HUD layer's classifier goes by vertex positions only, so while a fade was on screen it took the sky's quad for
+  the fade and moved it into the HUD layer: the picture showed the gradient's dark grey top (`20 20 20`) until the fade
+  ended, then jumped to cyan (frame dumps 185 / 200 / 215 from boot, `PS2X_HW_DUMP=<n>`; GS commands identical but
+  the split; `PS2X_GS=cpu` and `VCS_HUD_NATIVE=0` show the cyan sky fading in). Not the timecycle, not streaming: the
+  extra colours seen at the cutscene's start (game-internals 5a plan notes) were a red herring. Fix: full-width Im2D
+  drawn outside the HUD context note their positions, which are no anchors in that frame (`src/game/vcs_hud.cpp`
+  `g_otherKeys`; `VCS_HUD_SKY=0` = before); check `tools/cutscene_check.py`.
 - The colour filter / trails effect is drawn as **strips that sample the frame** itself (textures
   inside render targets, `texIsRt`), plus an alpha-only quad (FBMSK 0xFFFFFF) over x 80..560 at
   z = 0.

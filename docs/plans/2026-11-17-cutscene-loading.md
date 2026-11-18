@@ -41,6 +41,10 @@ pass"). Decompiled in `build/analysis/decomp/cutscene.c` (`tools/eedecomp.py 0x4
 
 ---
 
+## Result (2026-11-18): the dark sky was the port's HUD layer, fixed
+
+The hypothesis below was wrong. The game draws the bright sky from the first frame (`PS2X_GS=cpu`); the port's native HUD layer took the sky's full-screen fill for the fade quad (same corners) while a cutscene faded in. Fixed in `src/game/vcs_hud.cpp` (`g_otherKeys`, `VCS_HUD_SKY=0` = before), written up in game-internals 6f; `tools/cutscene_check.py` is the check (C2 is not needed for the sky). Task C3 (Vic at the airport) is still open: a model, so C2's preloading may still be its fix.
+
 ## Task C1: what draws the bright sky
 
 **Files:** scratch scripts in `build/analysis/cutscene/`; later `src/game/vcs_cutscene_load.cpp` (new) and
