@@ -186,17 +186,20 @@ def step_widepref(out, quick):
     letterbox follows Display > Cutscene black bars (game-internals.md 5a, src/game/vcs_display.cpp, 2026-11-06: the
     game's option removed the bars). Mission 50's opening cutscene, the top and bottom twelfth of the picture black with
     the bars, not without them: 16:9 with the setting On and Off, and 4:3 with it Off - the bars stay there (the setting
-    is locked On at 4:3, 2026-11-06). The hidden window is 4:3, so a 16:9 picture is letterboxed inside it."""
+    is locked On at 4:3, 2026-11-06). The hidden window is 4:3, so a 16:9 picture is letterboxed inside it. The bars are
+    checked with Display > Cutscene framing on Wide (Hor+); with PS2 framing (the default since 2026-11-18) the cutscene
+    fills the 16:9 picture with the PS2's width and no bars are drawn over it."""
     sys.path.insert(0, TOOLS)
     import rig  # noqa: E402
     import toolchain as tc  # noqa: E402
     d = os.path.abspath(os.path.join(out, "widepref"))
     os.makedirs(d, exist_ok=True)
     res = {}
-    for aspect, bars, want in (("169", "1", True), ("169", "0", False), ("43", "0", True)):
-        name = "%s_bars%s" % (aspect, bars)
+    for aspect, bars, framing, want in (("169", "1", "0", True), ("169", "0", "0", False), ("43", "0", "1", True),
+                                        ("169", "1", "1", False)):
+        name = "%s_bars%s%s" % (aspect, bars, "_ps2" if framing == "1" and aspect != "43" else "")
         g = rig.Game.start(save=rig.default_save(), name="regress_widepref_" + name,
-                           env={"VCS_ASPECT": aspect, "VCS_CUTSCENE_BARS": bars})
+                           env={"VCS_ASPECT": aspect, "VCS_CUTSCENE_BARS": bars, "VCS_CUTSCENE_FRAMING": framing})
         try:
             g.wait_ingame()
             prefs = g.u32(0x48F3D0)
