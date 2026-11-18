@@ -102,6 +102,7 @@ namespace vcs::distance
         // guest RAM the patched GenerateOneRandomCar / vehicle removal read their offscreen distances from (60, 90, 70 m;
         // game/vcs/overrides.toml) - the EE kernel's area below the game, next to vcs_physics_timing's 0x7FF00..0x7FF0C
         constexpr uint32_t kOffscreenSlots = 0x0007FF40u;
+        constexpr uint32_t kCarTries = 0x0007FF54u; // GenerateRandomCars' loop counter (game/vcs/overrides.toml; 4: six tries)
         constexpr uint32_t kRoadDensity = 0x00487498u; // bytes: a road density class's spawn chance (0, 4, 7, 15)
 
         constexpr uint32_t kPedPoolCtor = 0x00478F28u, kCarPoolCtor = 0x00478FC0u;   // (memory, size, name)
@@ -770,7 +771,16 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 lastPeds = peds;
             }
             if (kGenReaders[I] == 0x00430290u) // GenerateOneRandomCar
+            {
                 policeRoom();
+                // the tries a frame (#35): GenerateRandomCars FUN_00430148 calls it once, then loops on a counter of 4 -
+                // six tries - which game/vcs/overrides.toml reads from kCarTries (written here at the first call, before
+                // the loop reads it). Kept at the game's 4: up to 24 tries a frame at Vehicle density 100 left the
+                // standing traffic as it was (Little Havana, two runs each: ~43 cars at 0 and at 100) - the spots, not
+                // the tries, are what runs out. VCS_CAR_TRIES=<n> for experiments.
+                static const int tries = std::getenv("VCS_CAR_TRIES") ? std::clamp(std::atoi(std::getenv("VCS_CAR_TRIES")), 0, 60) : 4;
+                wr32(kCarTries, tries);
+            }
             const float cars = carDistance();
             const float offscreen = chased() ? 1.0f : cars; // (the police's ring: chased() above)
             wrf(kOffscreenSlots, 60.0f * offscreen);

@@ -276,3 +276,15 @@ value = "0xC426FF50"
 [[patches]]
 address = "0x0040ACB0"
 value = "0x00000000"
+
+# Random traffic's tries a frame (#35). GenerateRandomCars FUN_00430148 calls GenerateOneRandomCar once, then loops on a
+# counter of 4 (`addiu $s0, $zero, 4` in the first call's delay slot at 0x430228; the loop's bgez at 0x430240): six tries.
+# The counter is read from guest RAM 0x7FF54 instead - `lui $s0, 0x8` in the delay slot, `lw $s0, -0xAC($s0)` in the nop
+# after the call (0x43022C; $s0 is kept across it) - which src/game/vcs_distance.cpp writes at that first call: 4 at the
+# game's Vehicle density, more above it.
+[[patches]]
+address = "0x00430228"
+value = "0x3C100008"
+[[patches]]
+address = "0x0043022C"
+value = "0x8E10FF54"

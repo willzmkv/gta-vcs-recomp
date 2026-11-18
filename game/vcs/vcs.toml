@@ -794,6 +794,8 @@ instructions = [
   { address = "0x0040ACA8", value = "0x3C010008" },
   { address = "0x0040ACAC", value = "0xC426FF50" },
   { address = "0x0040ACB0", value = "0x00000000" },
+  { address = "0x00430228", value = "0x3C100008" },
+  { address = "0x0043022C", value = "0x8E10FF54" },
 ]
 
 [[jump_tables.table]]
