@@ -56,6 +56,10 @@ def main():
     first_black = next((i for i, v in enumerate(levels) if v < 3.0), None)
     # (a fast boot: the burst may start with the fade already under way - then from its first frame, if still dark)
     shot = levels[first_black:] if first_black is not None else (levels if levels and levels[0] < 40.0 else [])
+    # up to the sky's plateau: the fade-in only (the shot's cut to the next one, later, is a step of its own)
+    top = next((i for i, v in enumerate(shot) if v >= BRIGHT), None)
+    if top is not None:
+        shot = shot[:top + 1]
     steps = [abs(b - a) for a, b in zip(shot, shot[1:])]
     worst = max(steps) if steps else 0.0
     end = max(shot[-30:]) if shot else 0.0

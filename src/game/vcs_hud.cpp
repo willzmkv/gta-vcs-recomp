@@ -347,7 +347,11 @@ namespace vcs
                 for (uint32_t k = 0; k < p.keyCount; ++k)
                 {
                     const uint32_t key = g_primKeys[p.firstKey + k];
-                    if (std::find(g_otherKeys.begin(), g_otherKeys.end(), key) == g_otherKeys.end())
+                    // (a scope's mask bars and the screen effects keep theirs: with the sky looking up they lost the
+                    // corners and fell back to their 4:3 places - the world in the strips beside the sniper scope,
+                    // regress.py scopemask; the sky's fill then goes to the layer as before, behind the mask)
+                    if (p.part == Part::MaskBar || p.part == Part::Screen ||
+                        std::find(g_otherKeys.begin(), g_otherKeys.end(), key) == g_otherKeys.end())
                         (*anchors)[key] = static_cast<uint8_t>(anchor | (p.menu ? GSHwAnchorMenu : 0u));
                 }
                 if (traceFrame && find(i) == i)
