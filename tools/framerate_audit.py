@@ -242,7 +242,7 @@ def leave_vehicle(s):
     while he still climbs out): a warp into a new car then left it frozen."""
     def on_foot():
         ped = s.g.player()[0]
-        return not s.g.u32(ped + PED_VEHICLE) and s.g.u32(ped + PED_STATE) == 1
+        return not s.g.u32(ped + PED_VEHICLE) and not s.g.u32(ped + 0x480) and s.g.u32(ped + PED_STATE) == 1
     vehicle = s.g.u32(s.g.player()[0] + PED_VEHICLE)
     for _ in range(60):  # stopped first: out of a moving car he falls (state 0x3A), and a warp from there froze the car
         if not vehicle or math.hypot(*s.g.peekf(vehicle + MOVE_SPEED, 3)) * 50.0 < 0.3:
@@ -269,6 +269,10 @@ def vehicle_run(s, name, model, act, body_at=None, extra="", spot=CAR_SPOT):
     x, y, h = spot
     leave_vehicle(s)  # (scenario_car leaves him in its car: a teleport would bring the car along)
     s.place(x, y, heading=h)
+    # Ask for collision at the vehicle's spawn point too before reading ground height (a far teleport can land before
+    # nearby collision is streamed in, leaving the spawned vehicle frozen).
+    g.scm(S.op(S.REQUEST_COLLISION, S.f(x + 4.0), S.f(y)))
+    s.wait_sim(0.5)
     # beside him, at the height he stands: with z = -100 (find the ground) the vehicle was sometimes put 1.6 m under the
     # road and stayed frozen there
     z = s.pos()[2] + 0.5
@@ -279,8 +283,9 @@ def vehicle_run(s, name, model, act, body_at=None, extra="", spot=CAR_SPOT):
     pool = g.u32(0x487A98)
     vehicle = g.u32(pool) + (car >> 8) * 0x8C0  # CPool: slot = handle >> 8 (game-internals.md 12)
     s.wait_sim(2.0)
-    for _ in range(3):  # a warp right after getting out of the last vehicle can be lost: until he sits in this one
-        if g.u32(g.player()[0] + PED_VEHICLE) == vehicle:
+    for _ in range(5):  # a warp right after getting out of the last vehicle can be lost; W/S driving keys also require state 0x37
+        ped = g.player()[0]
+        if g.u32(ped + PED_VEHICLE) == vehicle and g.u32(ped + 0x480) == vehicle and g.u32(ped + PED_STATE) == 0x37:
             break
         g.scm(S.op(S.WARP_CHAR_INTO_CAR, S.PLAYER, S.i(car)))
         s.wait_sim(1.5)
@@ -724,9 +729,13 @@ def scenario_heat(s):
             g.cmd("poke 0x%x 02000000" % state)
         time.sleep(0.25)
     g.scm(S.op(S.SET_CHAR_COORDINATES, S.PLAYER, S.f(-1235.45), S.f(-278.9), S.f(11.6)))  # the warehouse's back
-    for i in range(120):
+    # state 3 plays the warehouse fire cutscene (~31.6 sim s if unskipped); skip with Cross (Shift) and wait in sim time
+    t3 = s.clock()
+    while s.clock() - t3 < 45.0:
         if g.u32(state) == 4:
             break
+        if g.u32(state) == 3:
+            g.cmd("press Shift 80")
         time.sleep(0.25)
     else:
         raise RuntimeError("PHI_A2 never reached the forklift state (state %d)" % g.u32(state))
