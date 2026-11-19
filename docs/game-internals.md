@@ -2527,6 +2527,28 @@ its lists; `pokef` of the scale below with screenshots).
   before the police, and a 3-4 star chase brought one or two cars, no Cheetahs or Enforcers (the parked vans on the
   avenues are the road blocks, another system). `src/game/vcs_distance.cpp` `policeRoom()` raises the number and the
   cap just past the counts for the tries while the police want a car.
+- **Standing traffic gates in `GenerateOneRandomCar`** (2026-11-19, decompiled `FUN_00430290` + Little Havana
+  forensics, #35): after `clear10` (`0x430B98`, 10 m around the spot before allocating) and building the car,
+  `FUN_00430290` runs three discard checks before `0x432134`:
+  1. `clear20A` (`0x432010..0x432070`, `FUN_00195380` with `radius = 20.0f + colModel->boundRadius`, vehicles+dummies,
+     gated by `0x24C($sp) != 0`). `0x430640..0x430798` calls `FUN_0024A2D0` (`FindPlayerVehicle`) and sets
+     `0x24C($sp) = 1` **only** when the player is on foot (`0x430798`) or in a stationary vehicle (`speed <= 0.1`,
+     `0x43076C`), and `0` whenever driving (`speed > 0.1`, `0x4306B4` / `0x43071C`). When standing still in Little
+     Havana, `clear20A` rejected 56-99% of built cars (729-804 at `Pop=0, Dens=100`; 3232-3359 at `Pop=100, Dens=100`),
+     with stopped-car blockers 77-100% in the `same_lane` on the adjacent `share_node` link at mean `19.2-22.8 m`
+     (queueing behind lights), while `clear20B` (`0x4320BC`, `boundRadius` against vehicles+peds+objects) had 0 fails.
+  2. `not_toward` (`0x4320CC..0x4320F4`): keeps only if `dot(0x80/0x84($sp), 0x90/0x94($sp)) < 0`, where `0x80/0x84($sp)`
+     (`relVel = newCarVel - playerVel`, written at `0x431CE8/0x431CEC` and never read after `0x4320F4`) and
+     `0x90/0x94($sp)` (`spotPos - playerPos`, `0x431D20/0x431D24`). At `Pop=100` (`gen = 3.0`), `nodeList` shifts
+     220 m ahead to reach 330 m spots, where 71-75% of built in-view cars face away and 55-72% of `not_toward` rejects
+     are on one-way links; `not_toward` killed 97-99% of `clear20A` survivors (829/662/1119/1130), leaving 13-18 kept
+     over ~50 s and burning 0.20-0.44 ms/frame building discarded cars.
+  - `src/game/vcs_distance.cpp` `csClear` (`0x00195380`) removes the extra `20.0f` on `clear20A` (`ra == 0x43206C`)
+    when `Population distance` or `Vehicle density` > 0 (`VCS_CAR_CLEAR20A_EXTRA=20` restores it) and relaxes
+    `not_toward` (`ra == 0x4320C4`, flipping `0x80/0x84($sp)`) in `(160 * base, 0.80 * 160 * base * carDistance()]`
+    when `carDistance() > 1.0f` (`VCS_CAR_NT_MODE=orig|unbounded`, `VCS_CAR_NT_MAX_PCT=0.80`), leaving `Pop=0, Dens=0`
+    100% original. At `Pop=100` standing in Little Havana, `random` cars rose from 17-22 to 31-39 (`300+` from 8.8-11.1
+    to 29.7-30.7) and discarded-build cost fell from 0.20-0.44 to 0.000-0.009 ms/frame.
 - **Where the population is made decides what the player sees** (2026-11-12, the player: "few people and few cars at
   100", then "they spawn in front of me"). With every slider at 100 the spawn rings follow the population distance:
   new peds in view at 175-300 m (CPopulation::Update's 35 x gen x the factor of 5 as the ped spot finder's nearest),

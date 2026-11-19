@@ -752,6 +752,87 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
                 wr32(kMaxCars, sum + 1);
         }
 
+        constexpr uint32_t kClearRange = 0x00195380u; // CWorld::FindObjectsInRange (leaf)
+        PS2Runtime::RecompiledFunction g_csClear = nullptr;
+
+        // #35: Traffic spawner gate relaxation when population distance or vehicle density is raised above 0.
+        // 1. clear20A (0x432010): when the player is on foot or stopped, FUN_00430290 checks boundRadius + 20.0f around
+        //    the new car; clear10 (10 m) and clear20B (boundRadius) already prevent overlap (just as while driving, when
+        //    0x24C($sp) == 0 skips clear20A). VCS_CAR_CLEAR20A_EXTRA=20 restores the original 20 m buffer.
+        // 2. not_toward (0x4320F4): past the game's 160 m outer ring (carDistance() > 1), cars on one-way avenues at
+        //    extended range driving away would be rejected 100% of the time; relax within (160*base, pct*160*base*k]
+        //    so distant traffic populates without spawning right at the removal edge to vanish immediately.
+        //    0x80($sp)/0x84($sp) are written at 0x431ce8/0x431cec and read only once at 0x4320cc/0x4320d4.
+        float clear20AExtra()
+        {
+            static const float v = [] {
+                if (const char *e = std::getenv("VCS_CAR_CLEAR20A_EXTRA"))
+                    return std::clamp(std::strtof(e, nullptr), 0.0f, 20.0f);
+                return 0.0f;
+            }();
+            return v;
+        }
+        enum NtMode : uint8_t { NtBand = 0, NtUnbounded, NtOrig };
+        NtMode notTowardMode()
+        {
+            static const NtMode m = [] {
+                if (const char *e = std::getenv("VCS_CAR_NT_MODE"))
+                {
+                    if (std::strcmp(e, "orig") == 0)
+                        return NtOrig;
+                    if (std::strcmp(e, "unbounded") == 0)
+                        return NtUnbounded;
+                }
+                return NtBand;
+            }();
+            return m;
+        }
+        float ntMaxPct()
+        {
+            static const float v = [] {
+                if (const char *e = std::getenv("VCS_CAR_NT_MAX_PCT"))
+                    return std::clamp(std::strtof(e, nullptr), 0.0f, 2.0f);
+                return 0.80f;
+            }();
+            return v;
+        }
+        PS2_GUEST_CC void csClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ra = GPR_U32(ctx, 31);
+            const bool entry = (ctx->pc == kClearRange);
+            if (entry && ra == 0x43206Cu &&
+                (g_population.load(std::memory_order_relaxed) > 100 || g_traffic.load(std::memory_order_relaxed) > 100))
+            {
+                const float extra = clear20AExtra();
+                if (extra < 20.0f)
+                    ctx->f[12] = std::max(0.0f, ctx->f[12] - (20.0f - extra));
+            }
+            g_csClear(rdram, ctx, runtime);
+            if (ra == 0x4320C4u && ctx->pc == 0x4320C4u && carDistance() > 1.0f && notTowardMode() != NtOrig)
+            {
+                g_rdram = rdram;
+                const uint32_t sp = GPR_U32(ctx, 29);
+                if (static_cast<int16_t>(rd16(sp + 0x1F0u)) == 0)
+                {
+                    const float vx = rdf(sp + 0x80u), vy = rdf(sp + 0x84u);
+                    const float dx = rdf(sp + 0x90u), dy = rdf(sp + 0x94u);
+                    const float dot = vx * dx + vy * dy;
+                    if (dot >= 0.0f)
+                    {
+                        const float dist = std::hypot(dx, dy);
+                        const float base = g_genBase > 0.0f ? g_genBase : 1.0f;
+                        const float ntMin = 160.0f * base;
+                        const float ntMax = 160.0f * base * carDistance() * ntMaxPct();
+                        if (dist > ntMin && (notTowardMode() == NtUnbounded || dist <= ntMax))
+                        {
+                            wrf(sp + 0x80u, dot > 0.0f ? -vx : -dx);
+                            wrf(sp + 0x84u, dot > 0.0f ? -vy : -dy);
+                        }
+                    }
+                }
+            }
+        }
+
         // a reader of GenerationDistMultiplier: the frame's base (the game's value) times this reader's factor
         template <size_t I>
         PS2_GUEST_CC void genReader(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2185,6 +2266,8 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             runtime.replaceFunction(kProcessCollision, &processCollision);
         if ((g_carGeneratorsProcess = runtime.lookupFunction(kCarGeneratorsProcess)))
             runtime.replaceFunction(kCarGeneratorsProcess, &carGeneratorsHook);
+        if ((g_csClear = runtime.lookupFunction(kClearRange)))
+            runtime.replaceFunction(kClearRange, &csClear);
         // if ((g_carGeneratorsProcess = runtime.lookupFunction(kCarGeneratorsProcess)) &&
         //     (g_findPlayerCoors = runtime.lookupFunction(kFindPlayerCoors)) &&
         //     (g_findPlayerPed = runtime.lookupFunction(kFindPlayerPed)) &&
