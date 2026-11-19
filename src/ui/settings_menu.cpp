@@ -1,21 +1,24 @@
 // See settings_menu.h.
 //
-// Layout: a fixed-size window (from the viewport alone), the page tabs, the page's sections in a scrolling child, and a
-// footer of fixed height (help text sized for the longest help of any setting, the restart note, the buttons). Nothing
-// in the window changes size with what the mouse is over: an auto-sized, centred window whose help line grew and
-// shrank with the hovered row moved the rows under a still mouse every other frame, and a click whose press and release
-// landed in different layouts was lost (2026-10-24).
+// Layout (issue #80, the launcher's Vice City / Miami Vice look): frosted icy-sky to turquoise backdrop, crisp
+// header bar with pink underline, left side page rail (active page in Flamingo Pink, matching launcher vcSubTab),
+// zebra-striped Vice City rows (drawVcRowStripe) with squared-beveled toggles (vcToggleSwitch), double-ring pink
+// sliders with < > chevrons (vcSliderTrack), < Value > cycle rows (vcCycleRow), and a white footer help card with
+// a pink left accent bar and top-right badge. Fixed layout heights so nothing ever shifts under the mouse.
 #include "ui/settings_menu.h"
 
 #include "platform/platform.h"
 #include "runtime/ps2_control.h"
 #include "settings/settings.h"
+#include "ui/ui_theme.h"
 
 #include "imgui.h"
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -30,14 +33,14 @@ namespace ui
         bool g_wasFocused = false;   // the menu window had focus last frame
         bool g_focusWindow = false;
         int g_page = 0, g_selectPage = -1;
-        std::string g_capturing;  // the Key setting waiting for a key press
+        std::string g_capturing;     // the Key setting waiting for a key press
         bool g_captureArmed = false; // every key / button was let go since the capture started (the click that began it)
         bool g_mouseHold = false;    // a binding was just made: the menu ignores the mouse until everything is let go
         std::string g_confirming;    // the Action setting waiting for its second click
         double g_confirmUntil = 0.0;
         float g_scrollTo = -1.0f;    // scrollSettingsMenu, at the next frame
-        std::string g_helpKey;    // the row whose help shows: the last one hovered or navigated to (kept in between)
-        std::string g_navFocused; // the row whose control had keyboard / gamepad focus last frame
+        std::string g_helpKey;       // the row whose help shows: the last one hovered or navigated to (kept in between)
+        std::string g_navFocused;    // the row whose control had keyboard / gamepad focus last frame
 
         using platform::keyName;
 
@@ -152,6 +155,35 @@ namespace ui
             return text;
         }
 
+        // Formats an integer setting's value using Spec::format ("%d", "%d%%", "Priority %d", ...).
+        std::string formatInt(const std::string &fmt, int v)
+        {
+            if (fmt.empty())
+                return std::to_string(v);
+            std::string out;
+            out.reserve(fmt.size() + 12);
+            for (size_t i = 0; i < fmt.size(); ++i)
+            {
+                if (fmt[i] == '%' && i + 1 < fmt.size())
+                {
+                    if (fmt[i + 1] == '%')
+                    {
+                        out.push_back('%');
+                        ++i;
+                        continue;
+                    }
+                    if (fmt[i + 1] == 'd' || fmt[i + 1] == 'i')
+                    {
+                        out += std::to_string(v);
+                        ++i;
+                        continue;
+                    }
+                }
+                out.push_back(fmt[i]);
+            }
+            return out;
+        }
+
         // A page's sections in the order their first setting was registered.
         std::vector<std::string> sections(const std::string &page)
         {
@@ -162,13 +194,288 @@ namespace ui
             return out;
         }
 
-        // One key button: its key's name, or "Press a key..." while it waits for one. `note` runs right after the button.
-        template <typename Note> void keySlot(const settings::Spec &s, float width, Note note)
+        // ---- Vice City / Miami Vice Controls (matching launcher/ui/widgets.cpp) -----------------------------------
+
+        // Squared-beveled toggle switch (launcher vcToggleSwitch): right-aligned when fullWidth > 0, inline when 0.
+        bool vcToggle(const char *id, bool &on, float fullWidth, float s)
         {
-            const int v = settings::value(s.key);
-            if (g_capturing == s.key)
+            using namespace palette;
+            const float frameH = ImGui::GetFrameHeight();
+            const float togW = 46.0f * s;
+            const float togH = 24.0f * s;
+            const float stateSize = 13.0f * s;
+            const char *stateLabel = on ? "On" : "Off";
+            ImFont *semi = fontSemibold();
+            const float labelW = semi->CalcTextSizeA(stateSize, FLT_MAX, 0.0f, "Off").x;
+            const float gap = 9.0f * s;
+            const float hitW = fullWidth > 0.0f ? fullWidth : (togW + gap + labelW);
+
+            const bool clicked = ImGui::InvisibleButton(id, ImVec2(hitW, frameH));
+            if (clicked)
+                on = !on;
+
+            const bool hovered = ImGui::IsItemHovered();
+            const bool focused = ImGui::IsItemFocused();
+            const ImVec2 rMin = ImGui::GetItemRectMin();
+            const ImVec2 rMax = ImGui::GetItemRectMax();
+            const float cy = (rMin.y + rMax.y) * 0.5f;
+            const float px0 = fullWidth > 0.0f ? (rMax.x - togW) : rMin.x;
+            const ImVec2 p0(px0, cy - togH * 0.5f);
+            const ImVec2 p1(px0 + togW, cy + togH * 0.5f);
+
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+            const float alpha = ImGui::GetStyle().Alpha;
+            const float trackRad = 6.5f * s;
+
+            // Subtle drop shadow + recessed track
+            dl->AddRectFilled(ImVec2(p0.x, p0.y + 1.5f * s), ImVec2(p1.x, p1.y + 1.5f * s),
+                              IM_COL32(0, 34, 43, static_cast<int>(55 * alpha)), trackRad);
+            const ImU32 trackCol = on ? u32(hovered ? kPink : kPinkSoft, alpha)
+                                      : u32(hovered ? kToggleOffHi : kToggleOff, alpha);
+            const ImU32 trackBd = on ? u32(kPinkBorder, 0.85f * alpha) : u32(kToggleOffBd, 0.72f * alpha);
+            dl->AddRectFilled(p0, p1, trackCol, trackRad);
+            dl->AddRect(p0, p1, trackBd, trackRad, 0, std::max(1.0f, 1.2f * s));
+
+            // Sliding soft-beveled square white knob
+            const float knobPad = 2.5f * s;
+            const float knobSz = togH - knobPad * 2.0f;
+            const float kx = on ? (p1.x - knobPad - knobSz) : (p0.x + knobPad);
+            const float ky = p0.y + knobPad;
+            const float knobRad = 3.5f * s;
+            dl->AddRectFilled(ImVec2(kx, ky + 1.5f * s), ImVec2(kx + knobSz, ky + knobSz + 1.5f * s),
+                              IM_COL32(0, 27, 36, static_cast<int>(85 * alpha)), knobRad);
+            dl->AddRectFilled(ImVec2(kx, ky), ImVec2(kx + knobSz, ky + knobSz), u32(kOnPink, alpha), knobRad);
+            dl->AddRect(ImVec2(kx, ky), ImVec2(kx + knobSz, ky + knobSz), u32(0xD0CECEu, alpha), knobRad, 0, 1.0f);
+
+            if (focused)
+                dl->AddRect(ImVec2(p0.x - 2.0f * s, p0.y - 2.0f * s), ImVec2(p1.x + 2.0f * s, p1.y + 2.0f * s),
+                            u32(kPink, 0.9f * alpha), trackRad + 2.0f * s, 0, std::max(1.5f, 1.4f * s));
+
+            // "On" / "Off" teal text beside the switch (when right-aligned)
+            if (fullWidth > 0.0f)
             {
-                ImGui::Button(s.optional ? "Press a key or button... (Esc)###k" : "Press a key... (Esc: cancel)###k", ImVec2(width, 0));
+                const ImVec2 ts = semi->CalcTextSizeA(stateSize, FLT_MAX, 0.0f, stateLabel);
+                dl->AddText(semi, stateSize, ImVec2(p0.x - gap - ts.x, cy - ts.y * 0.5f),
+                            u32(on ? kTealDark : kTealMuted, alpha), stateLabel);
+            }
+
+            return clicked;
+        }
+
+        // Vice City double-ring pink slider with < > chevrons (launcher vcSliderTrack / vcSliderRow).
+        bool vcSlider(const char *id, int &val, int minVal, int maxVal, const std::string &fmt, float width, float s,
+                      bool &overItem, bool &focusedOut)
+        {
+            using namespace palette;
+            ImFont *semi = fontSemibold();
+            const float frameH = ImGui::GetFrameHeight();
+            const float valSize = 13.5f * s;
+            const std::string maxSample = formatInt(fmt, std::abs(minVal) > std::abs(maxVal) ? minVal : maxVal);
+            const float valW = std::max(50.0f * s, semi->CalcTextSizeA(valSize, FLT_MAX, 0.0f, maxSample.c_str()).x + 6.0f * s);
+            const float chevW = 24.0f * s;
+            const float trackHitW = std::max(48.0f * s, width - valW - chevW * 2.0f - 4.0f * s);
+            const ImVec2 origin = ImGui::GetCursorScreenPos();
+            const float cy = origin.y + frameH * 0.5f;
+            const float alpha = ImGui::GetStyle().Alpha;
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+
+            bool changed = false;
+            const int step = std::max(1, (maxVal - minVal) >= 100 ? 5 : 1);
+
+            // Left '<' decrement button
+            ImGui::SetCursorScreenPos(origin);
+            ImGui::PushID(id);
+            ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+            const bool decClick = ImGui::InvisibleButton("##dec", ImVec2(chevW, frameH));
+            const bool decHover = ImGui::IsItemHovered();
+            ImGui::PopItemFlag();
+            overItem = overItem || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+            if (decClick && val > minVal)
+            {
+                val = std::max(minVal, val - step);
+                changed = true;
+            }
+            drawChevron(dl, ImVec2(origin.x + chevW * 0.5f, cy), false, s * 0.85f,
+                        u32(decHover ? kPinkHover : kTeal, alpha));
+
+            // Center slider track backed by ImGui::SliderInt (gives native drag + keyboard/gamepad Left/Right)
+            ImGui::SetCursorScreenPos(ImVec2(origin.x + chevW, origin.y));
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+            ImGui::SetNextItemWidth(trackHitW);
+            if (ImGui::SliderInt("##track", &val, minVal, maxVal, "", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_NoInput))
+                changed = true;
+            ImGui::PopStyleColor(6);
+
+            const bool hovered = ImGui::IsItemHovered();
+            const bool active = ImGui::IsItemActive();
+            const bool focused = ImGui::IsItemFocused();
+            overItem = overItem || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+            focusedOut = focusedOut || focused;
+
+            const ImVec2 rMin = ImGui::GetItemRectMin();
+            const ImVec2 rMax = ImGui::GetItemRectMax();
+            const float pad = 10.0f * s;
+            const float trackH = 7.5f * s;
+            const float tx0 = rMin.x + pad;
+            const float tx1 = std::max(tx0 + trackH, rMax.x - pad);
+            const float ty0 = cy - trackH * 0.5f;
+            const float ty1 = cy + trackH * 0.5f;
+            const float span = static_cast<float>(std::max(1, maxVal - minVal));
+            const float t = std::clamp(static_cast<float>(val - minVal) / span, 0.0f, 1.0f);
+
+            // Ice-blue empty track + teal hairline
+            dl->AddRectFilled(ImVec2(tx0, ty0), ImVec2(tx1, ty1), u32(kTrackOff, alpha), trackH * 0.5f);
+            dl->AddRect(ImVec2(tx0, ty0), ImVec2(tx1, ty1), u32(kTeal, 0.37f * alpha), trackH * 0.5f, 0, 1.0f);
+
+            // Flamingo pink active fill
+            const float knobX = tx0 + (tx1 - tx0) * t;
+            if (t > 0.002f)
+            {
+                const float fillX1 = std::max(tx0 + trackH, knobX);
+                dl->AddRectFilled(ImVec2(tx0, ty0), ImVec2(fillX1, ty1), u32(kPink, alpha), trackH * 0.5f);
+            }
+
+            // Double-ring target knob (◎) in Pink & White
+            const float outerR = (hovered || active) ? 10.0f * s : 9.0f * s;
+            dl->AddCircleFilled(ImVec2(knobX, cy + 1.2f * s), outerR, IM_COL32(128, 16, 69, static_cast<int>(70 * alpha)));
+            dl->AddCircleFilled(ImVec2(knobX, cy), outerR, u32(kOnPink, alpha));
+            dl->AddCircle(ImVec2(knobX, cy), outerR, u32(kPink, alpha), 0, std::max(1.8f, 2.1f * s));
+            dl->AddCircleFilled(ImVec2(knobX, cy), outerR * 0.48f, u32(active ? kPink : kPinkSoft, alpha));
+
+            if (focused)
+                dl->AddRect(ImVec2(origin.x, origin.y + 1.0f * s), ImVec2(origin.x + width, origin.y + frameH - 1.0f * s),
+                            u32(kPink, 0.85f * alpha), 3.0f * s, 0, std::max(1.5f, 1.3f * s));
+
+            // Right '>' increment button
+            ImGui::SetCursorScreenPos(ImVec2(origin.x + chevW + trackHitW, origin.y));
+            ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+            const bool incClick = ImGui::InvisibleButton("##inc", ImVec2(chevW, frameH));
+            const bool incHover = ImGui::IsItemHovered();
+            ImGui::PopItemFlag();
+            overItem = overItem || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+            if (incClick && val < maxVal)
+            {
+                val = std::min(maxVal, val + step);
+                changed = true;
+            }
+            drawChevron(dl, ImVec2(origin.x + chevW + trackHitW + chevW * 0.5f, cy), true, s * 0.85f,
+                        u32(incHover ? kPinkHover : kTeal, alpha));
+
+            ImGui::PopID();
+
+            // Right-aligned formatted value in Vice City teal
+            const std::string valText = formatInt(fmt, val);
+            const ImVec2 ts = semi->CalcTextSizeA(valSize, FLT_MAX, 0.0f, valText.c_str());
+            dl->AddText(semi, valSize, ImVec2(origin.x + width - ts.x, cy - ts.y * 0.5f), u32(kTeal, alpha), valText.c_str());
+
+            return changed;
+        }
+
+        // Vice City < Value > cycle control (launcher vcCycleRow): click < / > or value, or Left/Right when focused.
+        bool vcCycle(const settings::Spec &s, int v, float width, float scale, bool &overItem, bool &focusedOut)
+        {
+            using namespace palette;
+            const int n = static_cast<int>(s.choices.size());
+            if (n <= 0)
+                return false;
+            int idx = 0;
+            for (int i = 0; i < n; ++i)
+                if (s.choices[static_cast<size_t>(i)].value == v)
+                    idx = i;
+
+            const float frameH = ImGui::GetFrameHeight();
+            const float chevW = 32.0f * scale;
+            const float valW = std::max(40.0f * scale, width - chevW * 2.0f);
+            const ImVec2 origin = ImGui::GetCursorScreenPos();
+            const float cy = origin.y + frameH * 0.5f;
+            const float alpha = ImGui::GetStyle().Alpha;
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+
+            // Left '<'
+            ImGui::SetCursorScreenPos(origin);
+            ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+            const bool prevClick = ImGui::InvisibleButton("##prev", ImVec2(chevW, frameH));
+            const bool prevHover = ImGui::IsItemHovered();
+            ImGui::PopItemFlag();
+            overItem = overItem || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+
+            // Center focusable value button (Enter/A/click cycles forward; Left/Right cycles both ways)
+            ImGui::SetCursorScreenPos(ImVec2(origin.x + chevW, origin.y));
+            const bool valClick = ImGui::InvisibleButton("##val", ImVec2(valW, frameH));
+            const bool valHover = ImGui::IsItemHovered();
+            const bool focused = ImGui::IsItemFocused();
+            overItem = overItem || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+            focusedOut = focusedOut || focused;
+
+            // Right '>'
+            ImGui::SetCursorScreenPos(ImVec2(origin.x + chevW + valW, origin.y));
+            ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+            const bool nextClick = ImGui::InvisibleButton("##next", ImVec2(chevW, frameH));
+            const bool nextHover = ImGui::IsItemHovered();
+            ImGui::PopItemFlag();
+            overItem = overItem || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+
+            int nextIdx = idx;
+            const bool keyLeft = focused && (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true) ||
+                                             ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft, true));
+            const bool keyRight = focused && (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true) ||
+                                              ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight, true));
+            if (prevClick || keyLeft)
+                nextIdx = (idx + n - 1) % n;
+            else if (nextClick || valClick || keyRight)
+                nextIdx = (idx + 1) % n;
+
+            drawChevron(dl, ImVec2(origin.x + chevW * 0.5f, cy), false, scale * 0.9f,
+                        u32(prevHover ? kPinkHover : kTeal, alpha));
+            drawChevron(dl, ImVec2(origin.x + chevW + valW + chevW * 0.5f, cy), true, scale * 0.9f,
+                        u32(nextHover ? kPinkHover : kTeal, alpha));
+
+            ImFont *semi = fontSemibold();
+            const float fontSize = 14.0f * scale;
+            const std::string &label = s.choices[static_cast<size_t>(idx)].label;
+            const ImVec2 ts = semi->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, label.c_str());
+            dl->PushClipRect(ImVec2(origin.x + chevW, origin.y), ImVec2(origin.x + chevW + valW, origin.y + frameH), true);
+            dl->AddText(semi, fontSize, ImVec2(origin.x + chevW + (valW - ts.x) * 0.5f, cy - ts.y * 0.5f),
+                        u32(valHover || focused ? kTealDark : kTeal, alpha), label.c_str());
+            dl->PopClipRect();
+
+            if (focused)
+                dl->AddRect(ImVec2(origin.x, origin.y + 1.0f * scale), ImVec2(origin.x + width, origin.y + frameH - 1.0f * scale),
+                            u32(kPink, 0.85f * alpha), 3.0f * scale, 0, std::max(1.5f, 1.3f * scale));
+
+            if (nextIdx != idx)
+            {
+                settings::set(s.key, s.choices[static_cast<size_t>(nextIdx)].value);
+                return true;
+            }
+            return false;
+        }
+
+        // One key button: its key's name, or "Press a key..." while it waits for one. `note` runs right after the button.
+        template <typename Note> void keySlot(const settings::Spec &s, float width, float scale, Note note)
+        {
+            using namespace palette;
+            const int v = settings::value(s.key);
+            const bool capturing = g_capturing == s.key;
+            ImGui::PushFont(fontSemibold(), 13.0f * scale);
+            if (capturing)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, rgba(kPinkSoft));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, rgba(kPink));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, rgba(kPink));
+                ImGui::PushStyleColor(ImGuiCol_Border, rgba(kPinkBorder));
+                ImGui::PushStyleColor(ImGuiCol_Text, rgba(kOnPink));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.5f);
+                ImGui::Button(s.optional ? "Press a key or button... (Esc)###k" : "Press a key... (Esc: cancel)###k",
+                              ImVec2(width, 0));
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(5);
+                ImGui::PopFont();
                 note();
                 if (!g_captureArmed)
                 {
@@ -196,7 +503,16 @@ namespace ui
                 return;
             }
             const char *name = v == 0 ? "-" : keyName(v);
+            ImGui::PushStyleColor(ImGuiCol_Button, rgba(kRowEven, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, rgba(kRowHover));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, rgba(kPinkSoft));
+            ImGui::PushStyleColor(ImGuiCol_Border, rgba(kTealLine, 0.35f));
+            ImGui::PushStyleColor(ImGuiCol_Text, rgba(kTealDark));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
             const bool pressed = ImGui::Button((std::string(name) + "###k").c_str(), ImVec2(width, 0));
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(5);
+            ImGui::PopFont();
             note();
             if (pressed)
             {
@@ -208,92 +524,131 @@ namespace ui
                 settings::set(s.key, 0);
         }
 
-        // The label, then the setting's control. A row is hovered when the mouse is anywhere across it (label, control or
-        // the space between); clicking anywhere on a toggle's row flips it.
-        void row(const settings::Spec &s, std::string &focusedNow)
+        // One zebra-striped Vice City row: label on the left, Miami Vice control on the right.
+        void row(const settings::Spec &s, int rowIndex, float left, float right, float ctrlX, float ctrlW, float scale,
+                 std::string &focusedNow)
         {
+            using namespace palette;
             const ImGuiStyle &style = ImGui::GetStyle();
             const bool byEnv = settings::overridden(s.key);
             const bool bySetting = !byEnv && s.locked && s.locked(); // another setting decides it for now
             const bool locked = byEnv || bySetting;
-            int v = bySetting ? s.lockedValue : settings::value(s.key);
-            ImGui::TableNextRow(ImGuiTableRowFlags_None, ImGui::GetFrameHeight() + style.CellPadding.y * 2.0f);
-            ImGui::TableNextColumn();
-            const float top = ImGui::GetCursorScreenPos().y - style.CellPadding.y;
+            const int v = bySetting ? s.lockedValue : settings::value(s.key);
+
+            const float frameH = ImGui::GetFrameHeight();
+            const float padY = 5.5f * scale;
+            const float rowH = frameH + padY * 2.0f;
+            const float rowTop = ImGui::GetCursorScreenPos().y;
+            const float rowBot = rowTop + rowH;
+
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+            const ImVec2 mouse = ImGui::GetMousePos();
+            const bool hoveredRow = ImGui::IsWindowHovered() && mouse.x >= left && mouse.x <= right &&
+                                    mouse.y >= rowTop && mouse.y < rowBot;
+            const bool activeRow = g_helpKey == s.key || hoveredRow;
+
+            // Zebra stripe (launcher drawVcRowStripe)
+            const ImU32 stripeBg = activeRow ? u32(kRowHover, 0.96f)
+                                             : (rowIndex % 2 == 0 ? u32(kRowEven, 0.94f) : u32(kRowOdd, 0.91f));
+            dl->AddRectFilled(ImVec2(left, rowTop), ImVec2(right, rowBot), stripeBg);
+            if (activeRow)
+                dl->AddRectFilled(ImVec2(left, rowTop), ImVec2(left + 4.5f * scale, rowBot), u32(kPinkSoft));
+
+            // Check if this is a Mod toggle row (toggle + partner Integer slider): put toggle on the left like launcher vcModRow
+            const settings::Spec *partner = s.partner.empty() ? nullptr : findSpec(s.partner);
+            const bool isModRow = s.type == settings::Type::Toggle && partner && partner->type == settings::Type::Integer;
+
+            float labelX = left + 18.0f * scale;
+            bool overItem = false;
+            bool itemFocused = false;
+            auto noteItem = [&] {
+                overItem = overItem || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+                if (ImGui::IsItemFocused())
+                    itemFocused = true;
+            };
+
+            ImGui::PushID(s.key.c_str());
+
+            if (isModRow)
+            {
+                ImGui::BeginDisabled(locked);
+                ImGui::SetCursorScreenPos(ImVec2(left + 14.0f * scale, rowTop + padY));
+                bool on = v != 0;
+                if (vcToggle("##v", on, 0.0f, scale))
+                    settings::set(s.key, on ? 1 : 0);
+                noteItem();
+                ImGui::EndDisabled();
+                labelX = left + 14.0f * scale + 46.0f * scale + 14.0f * scale;
+            }
+
+            // Label (left column, clipped so a long label never collides with the control)
+            ImGui::PushFont(fontSemibold(), 14.0f * scale);
+            ImGui::PushClipRect(ImVec2(labelX - 2.0f * scale, rowTop), ImVec2(ctrlX - 8.0f * scale, rowBot), true);
+            ImGui::SetCursorScreenPos(ImVec2(labelX, rowTop + padY));
             ImGui::AlignTextToFramePadding();
-            if (byEnv) // greyed out with the reason beside it, so a click that does nothing doesn't look like a bug
-                ImGui::TextDisabled("%s (%s)", s.label.c_str(), s.env.c_str());
-            else if (bySetting) // the reason is in the help line (lockedNote)
-                ImGui::TextDisabled("%s", s.label.c_str());
-            else
+            if (byEnv)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, rgba(kTealFaint));
+                ImGui::Text("%s (%s)", s.label.c_str(), s.env.c_str());
+                ImGui::PopStyleColor();
+            }
+            else if (bySetting)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, rgba(kTealFaint));
                 ImGui::TextUnformatted(s.label.c_str());
+                ImGui::PopStyleColor();
+            }
+            else
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, rgba(activeRow ? kTealDark : kTeal));
+                ImGui::TextUnformatted(s.label.c_str());
+                ImGui::PopStyleColor();
+            }
             if (restartPending(s))
             {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "*");
+                ImGui::SameLine(0.0f, 5.0f * scale);
+                ImGui::PushStyleColor(ImGuiCol_Text, rgba(kPink));
+                ImGui::TextUnformatted("*");
+                ImGui::PopStyleColor();
             }
-            ImGui::TableNextColumn();
-            ImGui::PushID(s.key.c_str());
+            ImGui::PopClipRect();
+            ImGui::PopFont();
+
+            // Control (right column)
+            ImGui::SetCursorScreenPos(ImVec2(ctrlX, rowTop + padY));
             ImGui::BeginDisabled(locked);
-            ImGui::SetNextItemWidth(-FLT_MIN);
-            bool overItem = false;
-            auto noteItem = [&] { // right after the control itself (a combo's list is another window)
-                overItem = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
-                if (ImGui::IsItemFocused())
-                    focusedNow = s.key;
-            };
+
             switch (s.type)
             {
             case settings::Type::Toggle:
             {
-                bool on = v != 0;
-                const bool changed = ImGui::Checkbox(on ? "On###v" : "Off###v", &on);
-                noteItem();
-                if (changed)
-                    settings::set(s.key, on ? 1 : 0);
-                // a partner Integer: its slider in the rest of the row (a mod's priority), usable while the switch is on
-                if (const settings::Spec *second = s.partner.empty() ? nullptr : findSpec(s.partner);
-                    second && second->type == settings::Type::Integer)
+                if (isModRow)
                 {
-                    ImGui::SameLine(0.0f, style.ItemSpacing.x * 2.0f);
-                    ImGui::SetNextItemWidth(-FLT_MIN);
-                    ImGui::BeginDisabled(v == 0 || settings::overridden(second->key));
-                    int edited = settings::value(second->key);
-                    const bool moved = ImGui::SliderInt("##partner", &edited, second->min, second->max, second->format.c_str(),
-                                                        ImGuiSliderFlags_AlwaysClamp);
-                    overItem = overItem || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
-                    if (ImGui::IsItemFocused())
-                        focusedNow = s.key;
-                    if (moved)
-                        settings::set(second->key, edited);
+                    ImGui::BeginDisabled(v == 0 || settings::overridden(partner->key));
+                    int edited = settings::value(partner->key);
+                    if (vcSlider("##partner", edited, partner->min, partner->max, partner->format, ctrlW, scale, overItem,
+                                 itemFocused))
+                        settings::set(partner->key, edited);
                     ImGui::EndDisabled();
+                }
+                else
+                {
+                    bool on = v != 0;
+                    if (vcToggle("##v", on, ctrlW, scale))
+                        settings::set(s.key, on ? 1 : 0);
+                    noteItem();
                 }
                 break;
             }
             case settings::Type::Choice:
             {
-                auto current = std::find_if(s.choices.begin(), s.choices.end(), [&](const settings::Choice &c) { return c.value == v; });
-                const bool listOpen = ImGui::BeginCombo("##v", current != s.choices.end() ? current->label.c_str() : "?");
-                noteItem();
-                if (listOpen)
-                {
-                    for (const settings::Choice &c : s.choices)
-                    {
-                        if (ImGui::Selectable(c.label.c_str(), c.value == v))
-                            settings::set(s.key, c.value);
-                        if (c.value == v)
-                            ImGui::SetItemDefaultFocus();
-                    }
-                    ImGui::EndCombo();
-                }
+                vcCycle(s, v, ctrlW, scale, overItem, itemFocused);
                 break;
             }
             case settings::Type::Integer:
             {
                 int edited = v;
-                const bool changed = ImGui::SliderInt("##v", &edited, s.min, s.max, s.format.c_str(), ImGuiSliderFlags_AlwaysClamp);
-                noteItem();
-                if (changed)
+                if (vcSlider("##v", edited, s.min, s.max, s.format, ctrlW, scale, overItem, itemFocused))
                     settings::set(s.key, edited);
                 break;
             }
@@ -301,17 +656,13 @@ namespace ui
             {
                 const settings::Spec *second = s.partner.empty() ? nullptr : findSpec(s.partner);
                 const float gap = style.ItemSpacing.x;
-                const float width = second ? (ImGui::GetContentRegionAvail().x - gap) * 0.5f : -FLT_MIN;
-                keySlot(s, width, noteItem);
+                const float width = second ? (ctrlW - gap) * 0.5f : ctrlW;
+                keySlot(s, width, scale, noteItem);
                 if (second)
                 {
                     ImGui::SameLine(0.0f, gap);
                     ImGui::PushID(1);
-                    keySlot(*second, -FLT_MIN, [&] {
-                        overItem = overItem || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
-                        if (ImGui::IsItemFocused())
-                            focusedNow = s.key;
-                    });
+                    keySlot(*second, ctrlW - width - gap, scale, noteItem);
                     ImGui::PopID();
                 }
                 break;
@@ -319,8 +670,30 @@ namespace ui
             case settings::Type::Action:
             {
                 const bool confirming = g_confirming == s.key && ImGui::GetTime() < g_confirmUntil;
-                const std::string text = confirming ? "Click again to confirm" : s.button.empty() ? s.label : s.button;
-                const bool pressed = ImGui::Button((text + "###v").c_str(), ImVec2(-FLT_MIN, 0));
+                const std::string labelText = confirming ? "Click again to confirm" : (s.button.empty() ? s.label : s.button);
+                const std::string text = confirming ? labelText : ("<  " + labelText + "  >");
+                ImGui::PushFont(fontSemibold(), 13.0f * scale);
+                if (confirming)
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Button, rgba(kDangerFill));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, rgba(kDangerFillHi));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, rgba(kDangerFillHi));
+                    ImGui::PushStyleColor(ImGuiCol_Border, rgba(kRed));
+                    ImGui::PushStyleColor(ImGuiCol_Text, rgba(kDangerText));
+                }
+                else
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Button, rgba(kRowEven, 0.92f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, rgba(kRowHover));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, rgba(kPinkSoft));
+                    ImGui::PushStyleColor(ImGuiCol_Border, rgba(kTealLine, 0.30f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, rgba(kTeal));
+                }
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+                const bool pressed = ImGui::Button((text + "###v").c_str(), ImVec2(ctrlW, 0));
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(5);
+                ImGui::PopFont();
                 noteItem();
                 if (pressed)
                 {
@@ -342,19 +715,18 @@ namespace ui
             ImGui::EndDisabled();
             ImGui::PopID();
 
-            const float bottom = top + ImGui::GetFrameHeight() + style.CellPadding.y * 2.0f; // every control is one frame high
-            const ImVec2 mouse = ImGui::GetMousePos();
-            const bool hovered = ImGui::IsWindowHovered() && mouse.y >= top && mouse.y < bottom;
+            if (itemFocused)
+                focusedNow = s.key;
+
+            ImGui::SetCursorScreenPos(ImVec2(left, rowBot));
+
             const ImGuiIO &io = ImGui::GetIO();
-            // the mouse takes the help over only when it moves or clicks, so a resting cursor doesn't fight the keyboard
-            if (hovered && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
-                            g_helpKey.empty()))
+            if (hoveredRow && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
+                               g_helpKey.empty()))
                 g_helpKey = s.key;
-            if (hovered && !overItem && !locked && s.type == settings::Type::Toggle && !g_popupWasOpen &&
+            if (hoveredRow && !overItem && !locked && s.type == settings::Type::Toggle && !g_popupWasOpen &&
                 ImGui::IsMouseClicked(ImGuiMouseButton_Left))
                 settings::set(s.key, v != 0 ? 0 : 1);
-            if (g_helpKey == s.key)
-                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ImGui::GetColorU32(ImGuiCol_Header, hovered ? 0.6f : 0.35f));
         }
     }
 
@@ -391,8 +763,6 @@ namespace ui
         const bool chord = gamepadDown(platform::GAMEPAD_BACK) && gamepadDown(platform::GAMEPAD_START);
         const bool chordPressed = chord && !g_chordWasDown;
         g_chordWasDown = chord;
-        // the physical key, or one injected over the control channel (scripted checks; physical input to the game is
-        // blocked while the menu is open, so ps2control::keyPressed alone would not close it)
         const int key = settings::value("controls.menu_key");
         const bool menuKey = g_capturing.empty() && (platform::keyPressed(key) || ps2control::keyPressed(key));
         if (menuKey || chordPressed)
@@ -403,9 +773,6 @@ namespace ui
 
         if (g_releaseWait && !anyInputHeld())
             g_releaseWait = false;
-        // While a control binding waits for its key, and until the button that was bound is let go, the mouse is the
-        // binding's, not the menu's: a mouse button bound on its press would otherwise click what is under the cursor
-        // when released.
         if (g_mouseHold && !anyInputHeld())
             g_mouseHold = false;
         const settings::Spec *capturing = g_capturing.empty() ? nullptr : findSpec(g_capturing);
@@ -423,26 +790,46 @@ namespace ui
             return;
         g_page = std::clamp(g_page, 0, n - 1);
 
+        using namespace palette;
         const ImGuiViewport *vp = ImGui::GetMainViewport();
-        const float scale = std::max(1.0f, vp->Size.y / 720.0f);
-        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * scale * 1.25f);
-        ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        ImGui::SetNextWindowSize(ImVec2(std::min(vp->Size.x * 0.92f, 720.0f * scale), std::min(vp->Size.y * 0.88f, 540.0f * scale)),
-                                 ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.92f);
-        // keeps keyboard / gamepad focus after a click on the game picture behind it (not while a combo list is open:
-        // focusing the window would close it)
+        const float s = std::clamp((vp->Size.y / 720.0f) * 0.85f, 0.72f, 3.4f);
+        const float bodySize = 14.0f * s;
+
+        ImGui::PushFont(fontRegular(), bodySize);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0)); // painted with Miami sky->turquoise gradient
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_Border, rgba(kTealLine, 0.35f));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, rgba(kHeaderBg, 0.40f));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, rgba(kTeal, 0.45f));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, rgba(kPinkSoft, 0.85f));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, rgba(kPink));
+        ImGui::PushStyleColor(ImGuiCol_NavCursor, rgba(kPink));
+        ImGui::PushStyleColor(ImGuiCol_Text, rgba(kTealDark));
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f * s);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f * s, 5.5f * s));
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarRounding, 2.0f * s);
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 9.0f * s);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f * s, 5.0f * s));
+
+        const ImVec2 winSize(std::min(vp->Size.x * 0.90f, 900.0f * s), std::min(vp->Size.y * 0.88f, 590.0f * s));
+        ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f), ImGuiCond_Always,
+                                ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(winSize, ImGuiCond_Always);
+
         if (g_focusWindow || (!g_wasFocused && !g_popupWasOpen))
         {
             ImGui::SetNextWindowFocus();
             g_focusWindow = false;
         }
-        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-                                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
-                                       ImGuiWindowFlags_NoScrollWithMouse;
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                       ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
         if (ImGui::Begin("Settings", nullptr, flags))
         {
-            const ImGuiStyle &style = ImGui::GetStyle();
             // LB / RB (or Q / E with the keyboard) switch pages
             if (n > 1 && g_capturing.empty() && !g_popupWasOpen)
             {
@@ -451,120 +838,315 @@ namespace ui
                 if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false))
                     g_selectPage = (g_page + 1) % n;
             }
-
-            // the help area fits the longest help of any page, so it is the same height whatever is selected - but at
-            // most four lines (a quarter of the window or so), so the rows keep the room: a longer help is drawn smaller
-            const float wrap = ImGui::GetContentRegionAvail().x;
-            const float line = ImGui::GetTextLineHeightWithSpacing();
-            float helpHeight = line * 2.0f;
-            for (const settings::Spec &s : settings::all())
-                helpHeight = std::max(helpHeight, ImGui::CalcTextSize(helpText(s).c_str(), nullptr, false, wrap).y);
-            helpHeight = std::min(helpHeight, line * 4.0f);
-            const float footer = (1.0f + style.ItemSpacing.y) + (helpHeight + style.ItemSpacing.y) +
-                                 (ImGui::GetTextLineHeight() + style.ItemSpacing.y) + ImGui::GetFrameHeight() + style.ItemSpacing.y +
-                                 2.0f;
-
-            const int shownPage = g_page;
-            if (ImGui::BeginTabBar("pages"))
+            if (g_selectPage >= 0 && g_selectPage < n)
             {
+                if (g_selectPage != g_page)
+                    g_helpKey.clear();
+                g_page = g_selectPage;
+            }
+            g_selectPage = -1;
+
+            const ImVec2 wPos = ImGui::GetWindowPos();
+            const ImVec2 wSize = ImGui::GetWindowSize();
+            ImDrawList *wdl = ImGui::GetWindowDrawList();
+            ImFont *semi = fontSemibold();
+            ImFont *reg = fontRegular();
+
+            // ---- Frosted Miami Vice backdrop (icy sky -> turquoise gradient) --------------------------------------
+            const float midY = wPos.y + wSize.y * 0.45f;
+            wdl->AddRectFilledMultiColor(wPos, ImVec2(wPos.x + wSize.x, midY), u32(kSkyTop, 0.93f), u32(kSkyTop, 0.93f),
+                                         u32(kSkyMid, 0.92f), u32(kSkyMid, 0.92f));
+            wdl->AddRectFilledMultiColor(ImVec2(wPos.x, midY), ImVec2(wPos.x + wSize.x, wPos.y + wSize.y),
+                                         u32(kSkyMid, 0.92f), u32(kSkyMid, 0.92f), u32(kSkyBot, 0.94f), u32(kSkyBot, 0.94f));
+
+            // ---- Header bar (frosted sky with hot-pink underline under active page) -------------------------------
+            const float headerH = 48.0f * s;
+            wdl->AddRectFilled(wPos, ImVec2(wPos.x + wSize.x, wPos.y + headerH), u32(kHeaderBg, 0.88f));
+            wdl->AddLine(ImVec2(wPos.x, wPos.y + headerH), ImVec2(wPos.x + wSize.x, wPos.y + headerH), u32(kTealLine, 0.22f),
+                         1.0f);
+
+            const float titleSize = 16.5f * s;
+            const char *titleStr = "SETTINGS";
+            const ImVec2 titleTs = semi->CalcTextSizeA(titleSize, FLT_MAX, 0.0f, titleStr);
+            const float titleX = wPos.x + 20.0f * s;
+            const float titleY = wPos.y + (headerH - titleTs.y) * 0.5f;
+            wdl->AddText(semi, titleSize, ImVec2(titleX, titleY), u32(kTealDark), titleStr);
+            // Hot-pink underline (matching launcher's top nav active underline)
+            wdl->AddRectFilled(ImVec2(titleX, wPos.y + headerH - 3.5f * s),
+                               ImVec2(titleX + titleTs.x, wPos.y + headerH), u32(kPink));
+
+            const std::string &curPage = pages[static_cast<size_t>(g_page)];
+            const float subSize = 14.0f * s;
+            const std::string crumb = "/   " + curPage;
+            const ImVec2 crumbTs = semi->CalcTextSizeA(subSize, FLT_MAX, 0.0f, crumb.c_str());
+            wdl->AddText(semi, subSize,
+                         ImVec2(titleX + titleTs.x + 14.0f * s, wPos.y + (headerH - crumbTs.y) * 0.5f),
+                         u32(kTeal), crumb.c_str());
+
+            // Close button (top right)
+            const float closeSz = 30.0f * s;
+            const ImVec2 closePos(wPos.x + wSize.x - 14.0f * s - closeSz, wPos.y + (headerH - closeSz) * 0.5f);
+            ImGui::SetCursorScreenPos(closePos);
+            ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+            if (ImGui::InvisibleButton("##close", ImVec2(closeSz, closeSz)))
+                close();
+            ImGui::PopItemFlag();
+            const bool closeHover = ImGui::IsItemHovered();
+            if (closeHover)
+                wdl->AddRectFilled(closePos, ImVec2(closePos.x + closeSz, closePos.y + closeSz), u32(kPinkSoft, 0.85f));
+            const ImVec2 cc(closePos.x + closeSz * 0.5f, closePos.y + closeSz * 0.5f);
+            const float xr = 5.0f * s;
+            const ImU32 xCol = u32(closeHover ? kOnPink : kTealDark);
+            wdl->AddLine(ImVec2(cc.x - xr, cc.y - xr), ImVec2(cc.x + xr, cc.y + xr), xCol, std::max(1.4f, 1.5f * s));
+            wdl->AddLine(ImVec2(cc.x + xr, cc.y - xr), ImVec2(cc.x - xr, cc.y + xr), xCol, std::max(1.4f, 1.5f * s));
+
+            // ---- Body: left side page rail + right content pane ---------------------------------------------------
+            const float bodyTop = wPos.y + headerH;
+            const float bodyH = wSize.y - headerH;
+            const float sideW = std::clamp(192.0f * s, 150.0f * s, wSize.x * 0.27f);
+
+            wdl->AddRectFilled(ImVec2(wPos.x, bodyTop), ImVec2(wPos.x + sideW, wPos.y + wSize.y), u32(kRailBg, 0.72f));
+            wdl->AddLine(ImVec2(wPos.x + sideW, bodyTop), ImVec2(wPos.x + sideW, wPos.y + wSize.y), u32(kTealLine, 0.22f),
+                         1.0f);
+
+            const float sidePad = 10.0f * s;
+            const float resetH = 32.0f * s;
+            const float listH = std::max(60.0f * s, bodyH - resetH - sidePad * 2.0f - 8.0f * s);
+            const float itemH = 32.0f * s;
+            const float itemGap = 2.0f * s;
+            const float navFontSize = 13.5f * s;
+
+            ImGui::SetCursorScreenPos(ImVec2(wPos.x, bodyTop + 8.0f * s));
+            ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+            if (ImGui::BeginChild("pages", ImVec2(sideW - 1.0f, listH), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav))
+            {
+                ImDrawList *sdl = ImGui::GetWindowDrawList();
+                const float availW = ImGui::GetContentRegionAvail().x;
+                float navY = ImGui::GetCursorScreenPos().y;
+                const float navX = ImGui::GetCursorScreenPos().x;
+
                 for (int i = 0; i < n; ++i)
                 {
-                    const ImGuiTabItemFlags tf = g_selectPage == i ? ImGuiTabItemFlags_SetSelected : 0;
-                    if (ImGui::BeginTabItem(pages[i].c_str(), nullptr, tf))
+                    const bool sel = i == g_page;
+                    const ImVec2 p0(navX + sidePad, navY);
+                    const ImVec2 p1(navX + availW - sidePad, navY + itemH);
+                    ImGui::SetCursorScreenPos(p0);
+                    ImGui::PushID(i);
+                    const bool clicked = ImGui::InvisibleButton("##page", ImVec2(p1.x - p0.x, itemH));
+                    const bool hov = ImGui::IsItemHovered();
+                    ImGui::PopID();
+                    if (clicked && !sel)
                     {
                         g_page = i;
-                        ImGui::EndTabItem();
+                        g_helpKey.clear();
                     }
-                }
-                g_selectPage = -1;
-                ImGui::EndTabBar();
-            }
-            if (g_page != shownPage)
-                g_helpKey.clear();
-            const std::string &page = pages[g_page];
 
+                    // Active tab = solid Flamingo Pink (#FE7FB4) with white text/icon (exact match to launcher vcSubTab)
+                    if (sel)
+                        sdl->AddRectFilled(p0, p1, u32(kPinkSoft));
+                    else
+                        sdl->AddRectFilled(p0, p1, u32(hov ? kTabHover : kTabIdle, hov ? 0.94f : 0.80f));
+
+                    const ImU32 iconCol = u32(sel ? kOnPink : (hov ? kPinkHover : kTeal));
+                    const ImU32 textCol = u32(sel ? kOnPink : (hov ? kTealDark : kTeal));
+                    drawPageIcon(sdl, pages[static_cast<size_t>(i)], ImVec2(p0.x + 17.0f * s, (p0.y + p1.y) * 0.5f), 14.5f * s,
+                                 iconCol);
+                    const ImVec2 pts = semi->CalcTextSizeA(navFontSize, FLT_MAX, 0.0f, pages[static_cast<size_t>(i)].c_str());
+                    sdl->AddText(semi, navFontSize, ImVec2(p0.x + 34.0f * s, (p0.y + p1.y - pts.y) * 0.5f), textCol,
+                                 pages[static_cast<size_t>(i)].c_str());
+
+                    navY += itemH + itemGap;
+                }
+                ImGui::SetCursorScreenPos(ImVec2(navX, navY));
+                ImGui::Dummy(ImVec2(0.0f, 0.0f));
+            }
+            ImGui::EndChild();
+            ImGui::PopItemFlag();
+
+            // Reset page button at bottom of side rail
+            const ImVec2 resetPos(wPos.x + sidePad, wPos.y + wSize.y - sidePad - resetH);
+            ImGui::SetCursorScreenPos(resetPos);
+            ImGui::PushFont(semi, 12.5f * s);
+            ImGui::PushStyleColor(ImGuiCol_Button, rgba(kRowEven, 0.92f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, rgba(kRowHover));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, rgba(kPinkSoft));
+            ImGui::PushStyleColor(ImGuiCol_Border, rgba(kTealLine, 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_Text, rgba(kTeal));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+            if (ImGui::Button("Reset page to defaults", ImVec2(sideW - sidePad * 2.0f, resetH)))
+                for (const settings::Spec &sp : settings::all())
+                    if (sp.page == pages[static_cast<size_t>(g_page)] && sp.type != settings::Type::Action)
+                        settings::set(sp.key, sp.defaultValue);
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(5);
+            ImGui::PopFont();
+
+            // ---- Right pane: scrollable zebra rows + white Miami inspection/help card -----------------------------
+            const float panePadX = 16.0f * s;
+            const float panePadY = 12.0f * s;
+            const float paneX = wPos.x + sideW + panePadX;
+            const float paneW = wSize.x - sideW - panePadX * 2.0f;
+
+            // Fixed-height footer help card (matching the bottom white card with pink left bar in the launcher)
+            const float helpPadX = 16.0f * s;
+            const float helpPadY = 10.0f * s;
+            const float helpTitleSize = 12.5f * s;
+            const float helpFontSize = 13.0f * s;
+            const float helpWrap = std::max(100.0f * s, paneW - helpPadX * 2.0f);
+            const float helpLine = helpFontSize * 1.32f;
+            float helpTextH = helpLine * 2.0f;
+            for (const settings::Spec &sp : settings::all())
+                helpTextH = std::max(helpTextH, reg->CalcTextSizeA(helpFontSize, FLT_MAX, helpWrap, helpText(sp).c_str()).y);
+            helpTextH = std::min(helpTextH, helpLine * 3.0f);
+            const float wellH = helpPadY + helpTitleSize + 5.0f * s + helpTextH + helpPadY;
+            const float metaH = 18.0f * s;
+            const float footerGap = 10.0f * s;
+            const float footerTotalH = footerGap + wellH + 6.0f * s + metaH + panePadY;
+            const float rowsH = std::max(80.0f * s, bodyH - panePadY - footerTotalH);
+
+            const std::string &shownPage = pages[static_cast<size_t>(g_page)];
             std::string focusedNow;
-            ImGui::PushID(page.c_str());
-            if (ImGui::BeginChild("rows", ImVec2(0.0f, -footer), ImGuiChildFlags_NavFlattened))
+            ImGui::SetCursorScreenPos(ImVec2(paneX, bodyTop + panePadY));
+            ImGui::PushID(shownPage.c_str());
+            if (ImGui::BeginChild("rows", ImVec2(paneW, rowsH), ImGuiChildFlags_NavFlattened))
             {
                 if (g_scrollTo >= 0.0f && ImGui::GetScrollMaxY() > 0.0f)
                 {
                     ImGui::SetScrollY(g_scrollTo * ImGui::GetScrollMaxY());
                     g_scrollTo = -1.0f;
                 }
-                for (const std::string &section : sections(page))
+                const float availW = ImGui::GetContentRegionAvail().x;
+                const float secFontSize = 12.5f * s;
+                const float secH = 26.0f * s;
+                ImDrawList *cdl = ImGui::GetWindowDrawList();
+
+                for (const std::string &section : sections(shownPage))
                 {
+                    const ImVec2 secStart = ImGui::GetCursorScreenPos();
+                    const float left = secStart.x;
+                    const float right = left + availW;
+                    const float ctrlW = std::min(310.0f * s, availW * 0.48f);
+                    const float ctrlX = right - 14.0f * s - ctrlW;
+
                     if (!section.empty())
-                        ImGui::SeparatorText(section.c_str());
-                    if (ImGui::BeginTable(section.c_str(), 2, ImGuiTableFlags_SizingStretchProp))
                     {
-                        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthStretch, 0.45f);
-                        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 0.55f);
-                        for (const settings::Spec &s : settings::all())
-                            if (s.page == page && s.section == section && !s.hidden)
-                                row(s, focusedNow);
-                        ImGui::EndTable();
+                        cdl->AddRectFilled(ImVec2(left, secStart.y), ImVec2(right, secStart.y + secH), u32(kSectionBg, 0.92f));
+                        cdl->AddRectFilled(ImVec2(left, secStart.y), ImVec2(left + 4.0f * s, secStart.y + secH), u32(kPink));
+                        const ImVec2 sts = semi->CalcTextSizeA(secFontSize, FLT_MAX, 0.0f, section.c_str());
+                        cdl->AddText(semi, secFontSize, ImVec2(left + 14.0f * s, secStart.y + (secH - sts.y) * 0.5f),
+                                     u32(kTealDark), section.c_str());
+                        ImGui::SetCursorScreenPos(ImVec2(left, secStart.y + secH));
                     }
-                    ImGui::Spacing();
+
+                    int rowIdx = 0;
+                    for (const settings::Spec &sp : settings::all())
+                    {
+                        if (sp.page == shownPage && sp.section == section && !sp.hidden)
+                        {
+                            row(sp, rowIdx++, left, right, ctrlX, ctrlW, s, focusedNow);
+                        }
+                    }
+
+                    const float secEndY = ImGui::GetCursorScreenPos().y;
+                    cdl->AddRect(ImVec2(left, secStart.y), ImVec2(right, secEndY), u32(kTealLine, 0.22f), 0.0f, 0, 1.0f);
+                    ImGui::SetCursorScreenPos(ImVec2(left, secEndY + 10.0f * s));
+                    ImGui::Dummy(ImVec2(0.0f, 0.0f));
                 }
             }
             ImGui::EndChild();
             ImGui::PopID();
-            // keyboard / gamepad navigation moved to another row: its help shows
+
             if (!focusedNow.empty() && focusedNow != g_navFocused)
                 g_helpKey = focusedNow;
             g_navFocused = focusedNow;
 
-            ImGui::Separator();
+            // ---- White Miami footer help card with pink left bar & top-right badge --------------------------------
             const settings::Spec *helpSpec = nullptr;
             bool anyRestart = false;
-            for (const settings::Spec &s : settings::all())
+            for (const settings::Spec &sp : settings::all())
             {
-                if (s.page == page && s.key == g_helpKey)
-                    helpSpec = &s;
-                anyRestart = anyRestart || restartPending(s);
+                if (sp.page == shownPage && sp.key == g_helpKey)
+                    helpSpec = &sp;
+                anyRestart = anyRestart || restartPending(sp);
             }
-            if (ImGui::BeginChild("help", ImVec2(0.0f, helpHeight), ImGuiChildFlags_None, ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar))
+
+            const float wellY = bodyTop + panePadY + rowsH + footerGap;
+            wdl->AddRectFilled(ImVec2(paneX, wellY), ImVec2(paneX + paneW, wellY + wellH), u32(kRowEven, 0.96f));
+            wdl->AddRectFilled(ImVec2(paneX, wellY), ImVec2(paneX + 4.5f * s, wellY + wellH), u32(kPinkSoft));
+            wdl->AddRect(ImVec2(paneX, wellY), ImVec2(paneX + paneW, wellY + wellH), u32(kTealLine, 0.20f), 0.0f, 0, 1.0f);
+
+            // Card header: setting name on left, pink badge on right
+            const std::string cardTitle = !g_refusal.empty() ? "KEY ALREADY IN USE"
+                                                             : (helpSpec ? helpSpec->label : "SETTINGS");
+            wdl->AddText(semi, helpTitleSize, ImVec2(paneX + helpPadX, wellY + helpPadY),
+                         u32(!g_refusal.empty() ? kRed : kTealDark), cardTitle.c_str());
+
+            const char *badgeText = anyRestart ? "RESTART REQUIRED" : "DIRECT VCS.INI";
+            const float badgeFontSize = 10.5f * s;
+            const ImVec2 bts = semi->CalcTextSizeA(badgeFontSize, FLT_MAX, 0.0f, badgeText);
+            const float badgeW = bts.x + 18.0f * s;
+            const float badgeH = bts.y + 7.0f * s;
+            const ImVec2 bp0(paneX + paneW - 12.0f * s - badgeW, wellY + helpPadY - 2.0f * s);
+            const ImVec2 bp1(bp0.x + badgeW, bp0.y + badgeH);
+            wdl->AddRectFilled(bp0, bp1, u32(anyRestart ? kPink : kPinkSoft));
+            wdl->AddText(semi, badgeFontSize, ImVec2(bp0.x + (badgeW - bts.x) * 0.5f, bp0.y + (badgeH - bts.y) * 0.5f),
+                         u32(kOnPink), badgeText);
+
+            ImGui::SetCursorScreenPos(ImVec2(paneX + helpPadX, wellY + helpPadY + helpTitleSize + 5.0f * s));
+            if (ImGui::BeginChild("help", ImVec2(paneW - helpPadX * 2.0f, helpTextH), ImGuiChildFlags_None,
+                                  ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar))
             {
                 ImGui::PushTextWrapPos(0.0f);
                 if (!g_refusal.empty())
-                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Not changed: %s", g_refusal.c_str());
+                {
+                    ImGui::PushFont(semi, helpFontSize);
+                    ImGui::PushStyleColor(ImGuiCol_Text, rgba(kRed));
+                    ImGui::Text("Not changed: %s", g_refusal.c_str());
+                    ImGui::PopStyleColor();
+                    ImGui::PopFont();
+                }
                 else if (helpSpec)
                 {
                     const std::string text = helpText(*helpSpec);
-                    const float base = ImGui::GetFontSize();
-                    float size = base; // the largest size, down to 60%, at which the help fits
-                    while (size > base * 0.6f &&
-                           ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, ImGui::GetContentRegionAvail().x, text.c_str()).y > helpHeight)
-                        size -= base * 0.05f;
-                    ImGui::PushFont(nullptr, size);
+                    float size = helpFontSize;
+                    while (size > helpFontSize * 0.6f &&
+                           reg->CalcTextSizeA(size, FLT_MAX, ImGui::GetContentRegionAvail().x, text.c_str()).y > helpTextH)
+                        size -= helpFontSize * 0.05f;
+                    ImGui::PushFont(reg, size);
+                    ImGui::PushStyleColor(ImGuiCol_Text, rgba(kTeal));
                     ImGui::TextUnformatted(text.c_str());
+                    ImGui::PopStyleColor();
                     ImGui::PopFont();
                 }
                 else
-                    ImGui::TextDisabled("Point at or select a setting to see what it does.");
+                {
+                    ImGui::PushFont(reg, helpFontSize);
+                    ImGui::PushStyleColor(ImGuiCol_Text, rgba(kTealMuted));
+                    ImGui::TextUnformatted("Point at or select a setting to see what it does.");
+                    ImGui::PopStyleColor();
+                    ImGui::PopFont();
+                }
                 ImGui::PopTextWrapPos();
             }
             ImGui::EndChild();
-            if (anyRestart)
-                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "* changed: applies the next time the game starts");
-            else
-                ImGui::TextUnformatted(" ");
 
-            if (ImGui::Button("Reset page to defaults"))
-                for (const settings::Spec &s : settings::all())
-                    if (s.page == page && s.type != settings::Type::Action)
-                        settings::set(s.key, s.defaultValue);
+            // Bottom hint strip
+            const float metaY = wellY + wellH + 6.0f * s;
+            const float hintSize = 12.0f * s;
+            if (anyRestart)
+                wdl->AddText(semi, hintSize, ImVec2(paneX + 2.0f * s, metaY), u32(kTealDark),
+                             "* marked settings apply the next time the game starts");
+
             char hint[96];
-            std::snprintf(hint, sizeof(hint), "%s / Back+Start: close  Q/E, LB/RB: page", keyName(settings::value("controls.menu_key")));
-            ImGui::SameLine();
-            if (const float room = ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(hint).x; room > 0.0f)
-                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + room); // right-aligned
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("%s", hint);
+            std::snprintf(hint, sizeof(hint), "%s / Back+Start: close   Q/E, LB/RB: page",
+                          keyName(settings::value("controls.menu_key")));
+            const ImVec2 hts = semi->CalcTextSizeA(hintSize, FLT_MAX, 0.0f, hint);
+            wdl->AddText(semi, hintSize, ImVec2(paneX + paneW - hts.x - 2.0f * s, metaY), u32(kTealDark, 0.85f), hint);
         }
         g_wasFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         ImGui::End();
+        ImGui::PopStyleVar(8);
+        ImGui::PopStyleColor(9);
         ImGui::PopFont();
         g_popupWasOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
     }

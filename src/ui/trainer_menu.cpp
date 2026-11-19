@@ -10,6 +10,7 @@
 #include "runtime/ps2_control.h"
 #include "settings/settings.h"
 #include "ui/settings_menu.h"
+#include "ui/ui_theme.h"
 
 #include "imgui.h"
 
@@ -379,83 +380,94 @@ namespace ui
         }
 
         // ---- Drawing ----------------------------------------------------------------------------------------------
-        ImU32 rgba(int r, int g, int b, float a = 1.0f) { return IM_COL32(r, g, b, static_cast<int>(a * 255.0f)); }
-
-        ImVec2 textSize(float size, const char *text, float wrapWidth = 0.0f)
+        ImVec2 textSize(ImFont *font, float size, const char *text, float wrapWidth = 0.0f)
         {
-            return ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, wrapWidth, text);
+            return font->CalcTextSizeA(size, FLT_MAX, wrapWidth, text);
         }
 
-        void text(ImDrawList *dl, float size, ImVec2 at, ImU32 col, const std::string &s, bool shadow = false)
+        void text(ImDrawList *dl, ImFont *font, float size, ImVec2 at, ImU32 col, const std::string &s, bool shadow = false)
         {
             if (shadow)
-                dl->AddText(ImGui::GetFont(), size, ImVec2(at.x + size * 0.06f, at.y + size * 0.06f), rgba(0, 0, 0, 0.8f), s.c_str());
-            dl->AddText(ImGui::GetFont(), size, at, col, s.c_str());
+                dl->AddText(font, size, ImVec2(at.x + size * 0.05f, at.y + size * 0.05f), IM_COL32(0, 0, 0, 180), s.c_str());
+            dl->AddText(font, size, at, col, s.c_str());
         }
 
         void drawNotices(const ImGuiViewport *vp, float s)
         {
+            using namespace palette;
             const double now = tr::now();
             std::vector<tr::Notice> list = tr::notices(4.0);
             if (g_hideShotNotices)
                 std::erase_if(list, [](const tr::Notice &n) { return n.screenshot; });
             g_hideShotNotices = false;
+            if (list.empty())
+                return;
             ImDrawList *dl = ImGui::GetForegroundDrawList();
-            const float size = 17.0f * s, pad = 8.0f * s;
+            ImFont *semi = fontSemibold();
+            const float size = 15.0f * s, pad = 9.0f * s;
             float y = vp->Pos.y + vp->Size.y - 90.0f * s;
             const size_t first = list.size() > 4 ? list.size() - 4 : 0;
             for (size_t k = list.size(); k-- > first;)
             {
                 const float age = static_cast<float>(now - list[k].time);
                 const float a = std::clamp((4.0f - age) / 0.5f, 0.0f, 1.0f) * std::clamp(age / 0.15f, 0.0f, 1.0f);
-                const ImVec2 ts = textSize(size, list[k].text.c_str());
-                const float w = ts.x + pad * 2.0f + 4.0f * s, h = ts.y + pad * 1.5f;
+                const ImVec2 ts = textSize(semi, size, list[k].text.c_str());
+                const float w = ts.x + pad * 2.0f + 5.0f * s, h = ts.y + pad * 1.4f;
                 const ImVec2 p0(vp->Pos.x + vp->Size.x - 24.0f * s - w, y - h);
-                dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), rgba(10, 8, 18, 0.82f * a));
-                dl->AddRectFilled(p0, ImVec2(p0.x + 4.0f * s, p0.y + h), rgba(255, 70, 170, a));
-                text(dl, size, ImVec2(p0.x + 4.0f * s + pad, p0.y + pad * 0.75f), rgba(255, 255, 255, a), list[k].text);
+                const ImVec2 p1(p0.x + w, p0.y + h);
+                dl->AddRectFilled(p0, p1, u32(kRowEven, 0.95f * a));
+                dl->AddRect(p0, p1, u32(kTealLine, 0.30f * a), 0.0f, 0, 1.0f);
+                dl->AddRectFilled(p0, ImVec2(p0.x + 4.5f * s, p1.y), u32(kPinkSoft, a));
+                text(dl, semi, size, ImVec2(p0.x + 4.5f * s + pad, p0.y + (h - ts.y) * 0.5f), u32(kTealDark, a), list[k].text);
                 y -= h + 6.0f * s;
             }
         }
 
         void drawPanel(const ImGuiViewport *vp, float s, const std::vector<Row> &rows, Level &level)
         {
+            using namespace palette;
             ImDrawList *dl = ImGui::GetForegroundDrawList();
+            ImFont *reg = fontRegular();
+            ImFont *semi = fontSemibold();
             const float w = 400.0f * s;
             const float x = vp->Pos.x + 36.0f * s;
-            float y = vp->Pos.y + 48.0f * s;
-            const ImU32 pink = rgba(255, 70, 170), violet = rgba(110, 40, 210), cyan = rgba(60, 220, 240);
+            const float yStart = vp->Pos.y + 48.0f * s;
+            float y = yStart;
 
-            // header: the Vice City sunset
-            const float headerH = 66.0f * s;
-            dl->AddRectFilledMultiColor(ImVec2(x, y), ImVec2(x + w, y + headerH), pink, violet, violet, pink);
+            // header: Vice City flamingo pink gradient
+            const float headerH = 60.0f * s;
+            dl->AddRectFilledMultiColor(ImVec2(x, y), ImVec2(x + w, y + headerH), u32(kPinkSoft, 0.97f), u32(kPink, 0.97f),
+                                        u32(kPink, 0.97f), u32(kPinkSoft, 0.97f));
             const std::string title = "VCS TRAINER";
-            const float titleSize = 34.0f * s;
-            const ImVec2 ts = textSize(titleSize, title.c_str());
-            text(dl, titleSize, ImVec2(x + (w - ts.x) * 0.5f, y + (headerH - ts.y) * 0.5f), rgba(255, 255, 255), title, true);
+            const float titleSize = 25.0f * s;
+            const ImVec2 ts = textSize(semi, titleSize, title.c_str());
+            text(dl, semi, titleSize, ImVec2(x + (w - ts.x) * 0.5f, y + (headerH - ts.y) * 0.5f), u32(kOnPink), title);
             y += headerH;
 
             // the path and the position in the list
-            const float subH = 28.0f * s, rowSize = 18.0f * s;
-            dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + subH), rgba(0, 0, 0, 0.9f));
+            const float subH = 28.0f * s, rowSize = 15.0f * s;
+            dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + subH), u32(kSectionBg, 0.95f));
             std::string path;
             for (const Level &l : g_stack)
                 path += (path.empty() ? "" : "  >  ") + std::string(kPageTitles[l.page]);
             if (g_stack.size() > 2) // the last two are enough
                 path = std::string(kPageTitles[g_stack[g_stack.size() - 2].page]) + "  >  " + kPageTitles[g_stack.back().page];
-            text(dl, 15.0f * s, ImVec2(x + 12.0f * s, y + (subH - 15.0f * s) * 0.5f), cyan, path);
+            const float subFont = 12.5f * s;
+            const ImVec2 pts = textSize(semi, subFont, path.c_str());
+            text(dl, semi, subFont, ImVec2(x + 14.0f * s, y + (subH - pts.y) * 0.5f), u32(kTealDark), path);
             char count[32];
             std::snprintf(count, sizeof(count), "%d / %d", rows.empty() ? 0 : level.selected + 1, static_cast<int>(rows.size()));
-            const float cw = textSize(15.0f * s, count).x;
-            text(dl, 15.0f * s, ImVec2(x + w - 12.0f * s - cw, y + (subH - 15.0f * s) * 0.5f), rgba(220, 220, 220), count);
+            const ImVec2 cts = textSize(semi, subFont, count);
+            text(dl, semi, subFont, ImVec2(x + w - 14.0f * s - cts.x, y + (subH - cts.y) * 0.5f), u32(kTeal), count);
+            dl->AddLine(ImVec2(x, y + subH), ImVec2(x + w, y + subH), u32(kTealLine, 0.25f), 1.0f);
             y += subH;
 
-            // the rows: as many as fit above the help and the keys (12 at most)
+            // the rows: zebra-striped Vice City rows (12 at most)
             const float rowH = 32.0f * s, padX = 14.0f * s;
-            const float hs = 15.0f * s, wrapW = w - 2.0f * padX, ks = 13.0f * s;
+            const float hs = 13.5f * s, wrapW = w - 2.0f * padX, ks = 11.5f * s;
             const std::string &help = rows.empty() ? std::string() : rows[level.selected].help;
-            const float helpH = help.empty() ? 0.0f : textSize(hs, help.c_str(), wrapW).y + 20.0f * s;
-            const float below = 20.0f * s + helpH + ks + 10.0f * s + 12.0f * s; // arrows, help, keys, margin
+            const float helpH = help.empty() ? 0.0f : textSize(reg, hs, help.c_str(), wrapW).y + 20.0f * s;
+            const float below = 20.0f * s + helpH + ks + 12.0f * s + 12.0f * s;
             const int visible = std::clamp(static_cast<int>((vp->Pos.y + vp->Size.y - y - below) / rowH), 4, 12);
             level.top = std::clamp(level.top, std::max(0, level.selected - visible + 1), std::max(0, level.selected));
             level.top = std::clamp(level.top, 0, std::max(0, static_cast<int>(rows.size()) - visible));
@@ -464,37 +476,46 @@ namespace ui
             {
                 const Row &r = rows[i];
                 const bool sel = i == level.selected;
-                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + rowH), sel ? rgba(245, 245, 245, 0.97f) : rgba(8, 6, 14, 0.78f));
+                const ImU32 bg = sel ? u32(kRowHover, 0.97f)
+                                     : ((i - level.top) % 2 == 0 ? u32(kRowEven, 0.94f) : u32(kRowOdd, 0.91f));
+                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + rowH), bg);
                 if (sel)
-                    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + 5.0f * s, y + rowH), pink);
-                const ImU32 col = !r.enabled ? (sel ? rgba(120, 120, 120) : rgba(120, 120, 130)) : sel ? rgba(15, 10, 20) : rgba(240, 240, 240);
-                const float ty = y + (rowH - rowSize) * 0.5f;
-                text(dl, rowSize, ImVec2(x + padX, ty), col, r.label);
+                    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + 4.5f * s, y + rowH), u32(kPink));
+
+                ImFont *rf = semi;
+                const ImU32 col = !r.enabled ? u32(kTealFaint) : sel ? u32(kTealDark) : u32(kTeal);
+                const ImVec2 lts = textSize(rf, rowSize, r.label.c_str());
+                const float ty = y + (rowH - lts.y) * 0.5f;
+                text(dl, rf, rowSize, ImVec2(x + padX, ty), col, r.label);
                 std::string value;
                 ImU32 vcol = col;
                 switch (r.kind)
                 {
-                case Value::On: value = "ON", vcol = rgba(40, 200, 110); break;
-                case Value::Off: value = "OFF", vcol = sel ? rgba(150, 40, 60) : rgba(230, 90, 110); break;
-                case Value::Choice: value = sel ? "<  " + r.value + "  >" : r.value; break;
-                case Value::Page: value = ">"; break;
+                case Value::On: value = "ON", vcol = u32(kStateOn); break;
+                case Value::Off: value = "OFF", vcol = u32(kRed); break;
+                case Value::Choice: value = sel ? "<  " + r.value + "  >" : r.value, vcol = sel ? u32(kTealDark) : u32(kTeal); break;
+                case Value::Page: value = ">", vcol = sel ? u32(kPink) : u32(kTeal); break;
                 case Value::None: break;
                 }
                 if (!value.empty())
-                    text(dl, rowSize, ImVec2(x + w - padX - textSize(rowSize, value.c_str()).x, ty), vcol, value);
+                {
+                    const ImVec2 vts = textSize(semi, rowSize, value.c_str());
+                    text(dl, semi, rowSize, ImVec2(x + w - padX - vts.x, y + (rowH - vts.y) * 0.5f), vcol, value);
+                }
                 y += rowH;
             }
             // more above / below
             if (level.top > 0 || end < static_cast<int>(rows.size()))
             {
                 const float ah = 14.0f * s;
-                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + ah + 6.0f * s), rgba(0, 0, 0, 0.9f));
+                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + ah + 6.0f * s), u32(kSectionBg, 0.95f));
                 const float cx = x + w * 0.5f, cy = y + 3.0f * s;
-                const ImU32 on = rgba(240, 240, 240), off = rgba(90, 90, 90);
-                dl->AddTriangleFilled(ImVec2(cx - 18.0f * s, cy + ah * 0.5f), ImVec2(cx - 10.0f * s, cy), ImVec2(cx - 2.0f * s, cy + ah * 0.5f),
-                                      level.top > 0 ? on : off);
-                dl->AddTriangleFilled(ImVec2(cx + 2.0f * s, cy + ah * 0.5f - 2.0f * s), ImVec2(cx + 18.0f * s, cy + ah * 0.5f - 2.0f * s),
-                                      ImVec2(cx + 10.0f * s, cy + ah), end < static_cast<int>(rows.size()) ? on : off);
+                const ImU32 on = u32(kTealDark), off = u32(kTealFaint, 0.55f);
+                dl->AddTriangleFilled(ImVec2(cx - 18.0f * s, cy + ah * 0.5f), ImVec2(cx - 10.0f * s, cy),
+                                      ImVec2(cx - 2.0f * s, cy + ah * 0.5f), level.top > 0 ? on : off);
+                dl->AddTriangleFilled(ImVec2(cx + 2.0f * s, cy + ah * 0.5f - 2.0f * s),
+                                      ImVec2(cx + 18.0f * s, cy + ah * 0.5f - 2.0f * s), ImVec2(cx + 10.0f * s, cy + ah),
+                                      end < static_cast<int>(rows.size()) ? on : off);
                 y += ah + 6.0f * s;
             }
 
@@ -502,15 +523,21 @@ namespace ui
             if (!help.empty())
             {
                 const float h = helpH - 4.0f * s;
-                y += 4.0f * s;
-                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), rgba(0, 0, 0, 0.85f));
-                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + 2.0f * s), pink);
-                dl->AddText(ImGui::GetFont(), hs, ImVec2(x + padX, y + 8.0f * s), rgba(225, 225, 225), help.c_str(), nullptr, wrapW);
+                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), u32(kRowEven, 0.96f));
+                dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + 2.5f * s), u32(kPinkSoft));
+                dl->AddText(reg, hs, ImVec2(x + padX, y + 8.0f * s), u32(kTeal), help.c_str(), nullptr, wrapW);
                 y += h;
             }
             const std::string keys = "Up/Down: select   Left/Right: change   Enter: apply   Backspace: back";
-            dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + ks + 10.0f * s), rgba(0, 0, 0, 0.7f));
-            text(dl, ks, ImVec2(x + padX, y + 5.0f * s), rgba(170, 170, 180), keys);
+            const float keysH = ks + 12.0f * s;
+            dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + keysH), u32(kHeaderBg, 0.95f));
+            dl->AddLine(ImVec2(x, y), ImVec2(x + w, y), u32(kTealLine, 0.22f), 1.0f);
+            const ImVec2 kts = textSize(semi, ks, keys.c_str());
+            text(dl, semi, ks, ImVec2(x + padX, y + (keysH - kts.y) * 0.5f), u32(kTealMuted), keys);
+            y += keysH;
+
+            // Outer teal hairline
+            dl->AddRect(ImVec2(x, yStart), ImVec2(x + w, y), u32(kTealLine, 0.35f), 0.0f, 0, 1.0f);
         }
     }
 
@@ -542,7 +569,7 @@ namespace ui
             g_releaseWait = false;
 
         const ImGuiViewport *vp = ImGui::GetMainViewport();
-        const float s = std::clamp(vp->Size.y / 720.0f, 0.75f, 4.0f);
+        const float s = std::clamp((vp->Size.y / 720.0f) * 0.85f, 0.65f, 3.4f);
         drawNotices(vp, s);
         if (!g_open)
             return;

@@ -48,6 +48,7 @@
 #include "settings/settings.h"
 #include "ui/settings_menu.h"
 #include "ui/trainer_menu.h"
+#include "ui/ui_theme.h"
 #include "runtime/ps2_audio_out.h"
 #include "runtime/ps2_control.h"
 #include "util/sha1.h"
@@ -981,7 +982,7 @@ int main(int argc, char *argv[])
 
         PS2Runtime runtime;
         // the settings menu draws in the runtime's UI hook (registered before initialize(), which runs the init hook)
-        runtime.setDebugUiCallbacks([](PS2Runtime &, void *) {},
+        runtime.setDebugUiCallbacks([](PS2Runtime &, void *) { ui::initTheme(); },
                                     [](PS2Runtime &, void *) {
                                         altEnter();
                                         screenshotKey();
