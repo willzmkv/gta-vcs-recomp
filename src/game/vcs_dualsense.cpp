@@ -774,6 +774,8 @@ namespace vcs::dualsense
         g_released = false;
     }
 
+    void refresh() { rebuild(); }
+
     void reset()
     {
         releaseNow();

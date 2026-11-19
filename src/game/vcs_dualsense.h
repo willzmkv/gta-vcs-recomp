@@ -44,4 +44,9 @@ namespace vcs::dualsense
 
     // Clears the light bar and releases the triggers now (shutdown, the game paused in the background).
     void reset();
+
+    // Reads its settings again - also the Pad page's "Drive / Shoot with the triggers", which the trigger feel follows:
+    // switched in the game they changed nothing on the DualSense until another of its settings did (found by
+    // controls_check on a fresh vcs.ini, 2026-11-19).
+    void refresh();
 }

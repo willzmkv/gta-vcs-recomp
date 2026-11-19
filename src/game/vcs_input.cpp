@@ -1255,7 +1255,7 @@ namespace vcs::input
                  "(below). Works on any pad with triggers; on foot the buttons are unchanged.";
         s.type = Type::Toggle;
         s.defaultValue = 0;
-        s.onChange = onChange;
+        s.onChange = [](int) { rebuild(); vcs::dualsense::refresh(); }; // (the trigger feel follows it)
         settings::add(s);
 
         s = {};
@@ -1268,7 +1268,7 @@ namespace vcs::input
                  "each shot). Works on any pad with triggers; while driving the buttons are unchanged.";
         s.type = Type::Toggle;
         s.defaultValue = 0;
-        s.onChange = onChange;
+        s.onChange = [](int) { rebuild(); vcs::dualsense::refresh(); }; // (the trigger feel follows it)
         settings::add(s);
 
         s = {};
