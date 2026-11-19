@@ -57,7 +57,7 @@ existir. ## Decisões do usuário (17/11)
 | 5 Mapa | mapa, zoom, arraste, blips, legenda, destino | 4 dias |
 | 6 Testes e acabamento | `menu_check.py` reescrito, controles, saves, missões; revisão visual com o usuário | 3 dias |
 
-Total estimado: ~3 semanas → 1.0.0 por volta de 06/12/2026.
+Total estimado: ~3 semanas. **Adiado para a 2.0.0** (decisão do usuário, 19/11/2026): na 1.0.0 o F2 ganha a cara do launcher (#80).
 
 ## Riscos
 

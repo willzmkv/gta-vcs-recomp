@@ -1839,3 +1839,11 @@ value 2), but VCS has no police scanner: two sessions of the player's play with 
 (`VCS_SOUND_VOICES=1`) showed no radio sound or stream. The choice is hidden until there is one. Next, after 1.0.0: VC's
 police radio read from the player's own Vice City PC install (never shipped) and put together as VC does (crime, area,
 vehicle phrases) - the player's idea.
+
+## 2026-11-19 - The global menu moves to 2.0.0; for 1.0.0 the F2 menu takes the launcher's look
+
+The global menu (ESC / Start replacing F2 / F5, the plan in docs/plans/2026-11-17-global-menu.md, issues #48-#53) is
+weeks of work on its own; the rest of 1.0.0 is days. The player's decision: the global menu goes to 2.0.0, on the
+condition that F2 becomes as tidy and good-looking as the launcher for 1.0.0 (#80) - the launcher's palette and type,
+pages in a side list, sections as cards, the launcher's controls - while staying ImGui over the same settings registry
+(presentation only, so its checks and the gamepad navigation keep working).
