@@ -91,6 +91,8 @@ class Check:
             return g.peek(car + 0x2BA, 1)[0]
 
         g.cmd("gamepad on")
+        prev_v = int(self.setting("pad.v_layout"))
+        prev_drive = int(self.setting("pad.trigger_drive"))
         try:
             self.setting("pad.v_layout", 0)
             off = (press("rs"), press("down"), press("touchpad"))
@@ -134,8 +136,8 @@ class Check:
             ds = g.cmd("dualsense")
             self.ok("DualSense: no trigger resistance while driving", "driving=1" in ds and "trig=off" in ds, ds)
         finally:
-            self.setting("pad.trigger_drive", 0)
-            self.setting("pad.v_layout", 0)
+            self.setting("pad.trigger_drive", prev_drive)
+            self.setting("pad.v_layout", prev_v)
             g.cmd("gamepad off")
 
     def weapon_triggers(self):
@@ -147,44 +149,53 @@ class Check:
         def ds():
             return dict(re.findall(r"(\w+)=(\S+)", g.cmd("dualsense")))
 
-        self.setting("pad.trigger_shoot", 1)
-        walls = {}
-        for weapon, want in ((19, "25140006"), (21, "25440007"), (27, "25240004"), (30, "25440007"), (32, "25840007")):
-            self.give(weapon)
-            g.wait_frames(5)
-            state = ds()
-            walls[weapon] = state.get("r2")
-            if walls[weapon] != want:
-                # why: the whole state (in a vehicle, out of the game, another weapon in hand...)
-                walls[weapon] = "%s!=%s (%s)" % (walls[weapon], want, " ".join("%s=%s" % kv for kv in state.items()))
-        self.ok("trigger walls by gun: pistol, shotgun, SMG, sniper, rocket launcher", all("!" not in w for w in walls.values()),
-                str(walls))
-        self.give(19)
-        before = int(ds().get("shots", 0))
-        g.cmd("gamepad on")
-        for _ in range(3):
+        prev_shoot = int(self.setting("pad.trigger_shoot"))
+        prev_ds_triggers = int(self.setting("pad.ds_triggers"))
+        try:
+            self.setting("pad.trigger_shoot", 1)
+            # pad.trigger_shoot's onChange only rebuilds vcs_input; cycling pad.ds_triggers forces vcs::dualsense::rebuild()
+            # so triggerShoot is picked up regardless of what vcs.ini had at boot.
+            self.setting("pad.ds_triggers", 0)
+            self.setting("pad.ds_triggers", 1)
+            walls = {}
+            for weapon, want in ((19, "25140006"), (21, "25440007"), (27, "25240004"), (30, "25440007"), (32, "25840007")):
+                self.give(weapon)
+                g.wait_frames(5)
+                state = ds()
+                walls[weapon] = state.get("r2")
+                if walls[weapon] != want:
+                    # why: the whole state (in a vehicle, out of the game, another weapon in hand...)
+                    walls[weapon] = "%s!=%s (%s)" % (walls[weapon], want, " ".join("%s=%s" % kv for kv in state.items()))
+            self.ok("trigger walls by gun: pistol, shotgun, SMG, sniper, rocket launcher", all("!" not in w for w in walls.values()),
+                    str(walls))
+            self.give(19)
+            before = int(ds().get("shots", 0))
+            g.cmd("gamepad on")
+            for _ in range(3):
+                g.cmd("gamepad rt 1")
+                time.sleep(0.25)
+                g.cmd("gamepad rt 0")
+                time.sleep(0.4)
+            g.cmd("gamepad off")
+            fired = int(ds().get("shots", 0)) - before
+            self.ok("a round fired is seen (the trigger's kick)", fired >= 2, "%d of 3 pulls" % fired)
+            # out of ammo: the trigger slack (the effect Off, 0x05). The gun in hand left with one round (a second
+            # GIVE_WEAPON adds its rounds to the slot's, and may leave the weapon in hand as it was)
+            ped = g.player()[0]
+            at = ped + 0x578 + g.peek(ped + 0x789, 1)[0] * 0x1C
+            g.cmd("poke 0x%x 0100000001000000" % (at + 8))  # clip 1, ammo 1
+            g.wait_frames(3)
+            g.cmd("gamepad on")
             g.cmd("gamepad rt 1")
-            time.sleep(0.25)
+            time.sleep(1.5)
             g.cmd("gamepad rt 0")
-            time.sleep(0.4)
-        g.cmd("gamepad off")
-        fired = int(ds().get("shots", 0)) - before
-        self.ok("a round fired is seen (the trigger's kick)", fired >= 2, "%d of 3 pulls" % fired)
-        # out of ammo: the trigger slack (the effect Off, 0x05). The gun in hand left with one round (a second
-        # GIVE_WEAPON adds its rounds to the slot's, and may leave the weapon in hand as it was)
-        ped = g.player()[0]
-        at = ped + 0x578 + g.peek(ped + 0x789, 1)[0] * 0x1C
-        g.cmd("poke 0x%x 0100000001000000" % (at + 8))  # clip 1, ammo 1
-        g.wait_frames(3)
-        g.cmd("gamepad on")
-        g.cmd("gamepad rt 1")
-        time.sleep(1.5)
-        g.cmd("gamepad rt 0")
-        g.cmd("gamepad off")
-        g.wait_frames(5)
-        d = ds()
-        self.setting("pad.trigger_shoot", 0)
-        self.ok("out of ammo: the fire trigger goes slack", d.get("r2", "").startswith("05"), "r2 %s weapon %s" % (d.get("r2"), d.get("weapon")))
+            g.cmd("gamepad off")
+            g.wait_frames(5)
+            d = ds()
+            self.ok("out of ammo: the fire trigger goes slack", d.get("r2", "").startswith("05"), "r2 %s weapon %s" % (d.get("r2"), d.get("weapon")))
+        finally:
+            self.setting("pad.trigger_shoot", prev_shoot)
+            self.setting("pad.ds_triggers", prev_ds_triggers)
 
         def clut0():
             rec = g.u32(0x6EDD94)
