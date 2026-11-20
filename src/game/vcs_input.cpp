@@ -773,7 +773,8 @@ namespace vcs::input
             // look left / right (R2 / L2 on the PS2) move to the D-pad so nothing is lost.
             if (m.triggerDrive && game.driving && !blocked)
             {
-                buttons &= static_cast<uint16_t>(~(kL2 | kR2 | kLeft | kRight)); // triggers were look; D-pad L/R repurposed
+                // Only clear the gamepad's own bits so keyboard bindings and the mouse wheel keep working.
+                buttons &= static_cast<uint16_t>(~(padBits & ~(keyBits | g_mouse.wheelButton) & (kL2 | kR2 | kLeft | kRight)));
                 // the triggers instead of the pad's Cross / Square (both accelerated: the player's report, 2026-11-12);
                 // the keyboard's keep theirs
                 buttons &= static_cast<uint16_t>(~(padBits & ~keyBits & (kCross | kSquare)));
@@ -803,7 +804,8 @@ namespace vcs::input
             // does nothing (driving has its own trigger scheme).
             if (m.triggerShoot && game.onFoot && !blocked)
             {
-                buttons &= static_cast<uint16_t>(~(kL2 | kR2 | kLeft | kRight)); // triggers were weapon prev/next; D-pad L/R repurposed
+                // Only clear the gamepad's own bits so keyboard bindings (L2/R2, D-pad) and the mouse wheel keep working.
+                buttons &= static_cast<uint16_t>(~(padBits & ~(keyBits | g_mouse.wheelButton) & (kL2 | kR2 | kLeft | kRight)));
                 // A gun fires as the trigger pushes through its adaptive wall (dualsense::firePoint: where it gives way,
                 // 45-75% of the pull by the gun; it was 82%, past walls near the end: the player found them too late),
                 // so the shot breaks on a firm press, not on first touch of the resistance. Fists / melee have no wall,
@@ -835,7 +837,7 @@ namespace vcs::input
                     buttons |= kSelect;
                 if (game.driving)
                 {
-                    buttons &= static_cast<uint16_t>(~(kR3 | kLeft | kRight | (game.forks ? 0 : kDown)));
+                    buttons &= static_cast<uint16_t>(~(padBits & ~keyBits & (kR3 | kLeft | kRight | (game.forks ? 0 : kDown))));
                     if (padButton(GAMEPAD_RIGHT_STICK))
                         buttons |= kL2 | kR2; // look behind
                     if (padButton(GAMEPAD_DPAD_DOWN) && !game.forks) // (the forklift's: its forks, above)
@@ -1037,6 +1039,18 @@ namespace vcs::input
                          "Off, or with the wheel bound to a control, it does only that.";
                 s.type = Type::Toggle;
                 s.defaultValue = 1;
+                s.locked = [] {
+                    for (size_t i = 0; i < kControlCount; ++i)
+                        for (int slot = 0; slot < 2; ++slot)
+                        {
+                            const int k = settings::value(keyId(kControls[i], slot));
+                            if (k == KEY_WHEEL_UP || k == KEY_WHEEL_DOWN)
+                                return true;
+                        }
+                    return false;
+                };
+                s.lockedValue = 0;
+                s.lockedNote = "Disabled because a keyboard binding uses Wheel up or Wheel down (right-click that binding to clear it).";
                 s.onChange = onChange;
                 settings::add(s);
             }
