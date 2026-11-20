@@ -211,7 +211,7 @@ After `git pull`, run `python tools/build.py --recompile-if-needed`.
 | `python tools/backup.py create\|list\|restore` | Manage memory card backups |
 | `python tools/release.py` | Package release zip / AppImage (refuses game files) |
 
-See [AGENTS.md](AGENTS.md) for contributor rules and [docs/](docs/) for internals ([docs/game-internals.md](docs/game-internals.md)), roadmap ([docs/FORK.md](docs/FORK.md)), and active plans ([docs/plans/](docs/plans/README.md)).
+See [AGENTS.md](AGENTS.md) for contributor rules and [docs/](docs/) for internals ([docs/game-internals.md](docs/game-internals.md)) and roadmap ([docs/FORK.md](docs/FORK.md)).
 
 </details>
 

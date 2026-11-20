@@ -44,3 +44,7 @@ __pycache__/
 !/modloader/README.md
 # a game frame for the game menu's mockups (launcher --screen gamemenu): game imagery, never committed
 launcher/assets/menu_backdrop.png
+
+# Local planning and agent workflow notes (kept locally, not published)
+docs/plans/
+.caliber/
