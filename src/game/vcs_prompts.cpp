@@ -38,6 +38,7 @@
 #include "settings/settings.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -578,6 +579,138 @@ namespace vcs::prompts
             postSubCells(false);
         }
 
+        // ---- Native PS2 font Portuguese tilde support (Ã, ã, Õ, õ) ------------------------------------------------
+        // The USA PS2 build (EN/FR/DE/IT/ES) omits Ã (0xC3), ã (0xE3), Õ (0xD5) and õ (0xF5) from native fonts such
+        // as Style 0 "Fanc" (Pricedown: "MISSÃO CONCLUÍDA!" -> "MISSO CONCLUÍDA!") and Style 2 "BigT". We extend each
+        // native font's sorted letter table in guest scratch (0x66000..0x69FFF) with the missing letters using the
+        // base letter's metrics and a sentinel v row (kTildeV = 251); rectVertices restores the native base letter's
+        // (u, v) and queues a matching tilde quad sampled from the top of the same font's Ñ / ñ (or ~) glyph, flushed
+        // right after the text batch in im2dRenderIndexed. VCS_NATIVE_TILDES=0 disables this (Rule 1).
+        constexpr uint32_t kExtLettersBase = 0x00066000u; // 4 styles x 0x1000 bytes (up to 292 14-byte records each)
+        constexpr uint32_t kTildeVerts = 0x0006A000u;     // scratch Im2D vertices for pending tilde quads (<= 32 quads)
+        constexpr uint32_t kTildeIdx = 0x0006B000u;       // scratch Im2D indices
+        constexpr uint16_t kTildeV = 251;
+        constexpr size_t kMaxPendingTildes = 32;
+
+        struct TildeSlot
+        {
+            bool valid = false;
+            bool hasTilde = false;
+            bool tildeStandalone = false;
+            int16_t baseU = 0, baseV = 0, baseW = 1, baseH = 1;
+            int16_t tildeU = 0, tildeV = 0, tildeW = 1, tildeH = 1;
+        };
+        struct PendingTilde
+        {
+            uint8_t verts[64]; // 4 x 16-byte Im2D vertices
+        };
+        uint32_t g_extFont[4] = {};
+        TildeSlot g_tildeSlots[16] = {};
+        std::vector<PendingTilde> g_pendingTildes;
+        bool g_subPixel = true;
+
+        void extendNativeFonts()
+        {
+            static const bool enabled = !(std::getenv("VCS_NATIVE_TILDES") && *std::getenv("VCS_NATIVE_TILDES") == '0');
+            if (!enabled)
+                return;
+            const uint32_t styles = rd32(kFontStyles);
+            if (styles != kSubFonts && !inRam(styles, 16))
+                return;
+
+            struct Spec
+            {
+                uint16_t ch, base, baseAlt, tilde, tildeAlt;
+            };
+            static constexpr Spec kSpecs[4] = {
+                {0x00C3u, 'A', 'A', 0x00D1u, '~'},      // Ã
+                {0x00E3u, 'a', 'A', 0x00F1u, 0x00D1u},  // ã
+                {0x00D5u, 'O', 'O', 0x00D1u, '~'},      // Õ
+                {0x00F5u, 'o', 'O', 0x00F1u, 0x00D1u},  // õ
+            };
+
+            for (uint32_t st = 0; st < 4; ++st)
+            {
+                const uint32_t font = rd32(styles + st * 4u);
+                if (!inRam(font, 0x50))
+                    continue;
+                const uint32_t dstTable = kExtLettersBase + st * 0x1000u;
+                if (g_extFont[st] == font && rd32(font + 8u) == dstTable)
+                    continue;
+                const uint16_t count = rd16(font);
+                const uint32_t table = rd32(font + 8u);
+                if (count == 0 || count > 255 || !inRam(table, count * 14u))
+                    continue;
+
+                std::vector<std::array<int16_t, 7>> recs(count);
+                for (uint16_t i = 0; i < count; ++i)
+                    std::memcpy(recs[i].data(), g_rdram + table + i * 14u, 14);
+
+                auto findRec = [&](uint16_t ch) -> const std::array<int16_t, 7> * {
+                    for (uint16_t i = 0; i < count; ++i)
+                        if (static_cast<uint16_t>(recs[i][4]) == ch)
+                            return &recs[i];
+                    return nullptr;
+                };
+
+                int added = 0;
+                for (int t = 0; t < 4; ++t)
+                {
+                    const Spec &sp = kSpecs[t];
+                    if (findRec(sp.ch))
+                        continue;
+                    const auto *base = findRec(sp.base);
+                    if (!base)
+                        base = findRec(sp.baseAlt);
+                    if (!base)
+                        continue;
+                    const auto *tilde = findRec(sp.tilde);
+                    if (!tilde)
+                        tilde = findRec(sp.tildeAlt);
+                    if (!tilde)
+                        tilde = findRec('~');
+
+                    const uint32_t slot = st * 4u + static_cast<uint32_t>(t);
+                    TildeSlot &ts = g_tildeSlots[slot];
+                    ts.valid = true;
+                    ts.baseU = (*base)[5];
+                    ts.baseV = (*base)[6];
+                    ts.baseW = static_cast<int16_t>(std::max<int>(1, (*base)[0] + (*base)[1] + (*base)[2]));
+                    ts.baseH = static_cast<int16_t>(std::max<int>(1, (*base)[3]));
+                    ts.hasTilde = tilde != nullptr;
+                    if (tilde)
+                    {
+                        ts.tildeStandalone = static_cast<uint16_t>((*tilde)[4]) == '~';
+                        ts.tildeU = (*tilde)[5];
+                        ts.tildeV = (*tilde)[6];
+                        ts.tildeW = static_cast<int16_t>(std::max<int>(1, (*tilde)[0] + (*tilde)[1] + (*tilde)[2]));
+                        ts.tildeH = static_cast<int16_t>(std::max<int>(1, (*tilde)[3]));
+                    }
+
+                    std::array<int16_t, 7> syn = *base;
+                    syn[4] = static_cast<int16_t>(sp.ch);
+                    syn[5] = static_cast<int16_t>(slot * 2u);
+                    syn[6] = static_cast<int16_t>(kTildeV);
+                    recs.push_back(syn);
+                    ++added;
+                }
+
+                if (added > 0)
+                {
+                    std::sort(recs.begin(), recs.end(), [](const auto &a, const auto &b) {
+                        return static_cast<uint16_t>(a[4]) < static_cast<uint16_t>(b[4]);
+                    });
+                    for (size_t i = 0; i < recs.size(); ++i)
+                        std::memcpy(g_rdram + dstTable + i * 14u, recs[i].data(), 14);
+                    wr16(font, static_cast<uint16_t>(recs.size()));
+                    wr32(font + 8u, dstTable);
+                    g_extFont[st] = font;
+                    std::fprintf(stderr, "[prompts] native font style %u: added %d Portuguese tilde glyph(s) (%u -> %zu)\n", st,
+                                 added, count, recs.size());
+                }
+            }
+        }
+
         void subIn()
         {
             const uint32_t game = gameFont();
@@ -607,7 +740,8 @@ namespace vcs::prompts
             const uint32_t styles = rd32(kFontStyles);
             const uint16_t count = rd16(game);
             const uint32_t table = rd32(game + 8);
-            if (styles == kSubFonts || !inRam(styles, 16) || count == 0 || count > 255 || !inRam(table, count * 14u))
+            if (styles == kSubFonts || !inRam(styles, 16) || count == 0 || count > 255 ||
+                (table != kExtLettersBase + 0x1000u && !inRam(table, count * 14u)))
                 return;
             for (uint32_t i = 0; i < 4; ++i)
                 wr32(kSubFonts + i * 4u, rd32(styles + i * 4u));
@@ -712,8 +846,102 @@ namespace vcs::prompts
         {
             // the corners' (u, v) registers: (f12, f13), (f14, f15), (f18, f19), (f16, f17)
             static constexpr int kU[4] = {12, 14, 18, 16}, kV[4] = {13, 15, 19, 17};
+
+            // Native font Portuguese tilde glyph (sentinel row kTildeV): restore the base letter's (u, v) and
+            // record a matching tilde quad from the same font's Ñ / ñ glyph.
+            const float tildeTop256 = static_cast<float>(kTildeV) / 256.0f;
+            const float tildeTop512 = static_cast<float>(kTildeV) / 512.0f;
+            auto isTildeV = [&](float v) {
+                return std::fabs(v - tildeTop256) < 1e-4f || std::fabs(v - tildeTop512) < 1e-4f;
+            };
+            if (ctx->pc == kRectVertices && !g_inSubFont &&
+                (isTildeV(ctx->f[13]) || isTildeV(ctx->f[15]) || isTildeV(ctx->f[19]) || isTildeV(ctx->f[17])))
+            {
+                float uMin = ctx->f[kU[0]], uMax = ctx->f[kU[0]];
+                float vMin = ctx->f[kV[0]], vMax = ctx->f[kV[0]];
+                for (int k = 1; k < 4; ++k)
+                {
+                    uMin = std::min(uMin, ctx->f[kU[k]]);
+                    uMax = std::max(uMax, ctx->f[kU[k]]);
+                    vMin = std::min(vMin, ctx->f[kV[k]]);
+                    vMax = std::max(vMax, ctx->f[kV[k]]);
+                }
+                if (isTildeV(vMin))
+                {
+                    const float invH = vMin / static_cast<float>(kTildeV);
+                    const float invW = (uMax - uMin) > 1e-6f ? invH : (1.0f / 256.0f);
+                    // Derive exact texel-to-UV scale from the font's own atlas dimensions (256 or 512)
+                    const int slot = static_cast<int>(std::lround(uMin / invW)) / 2;
+                    if (slot >= 0 && slot < 16 && g_tildeSlots[slot].valid)
+                    {
+                        const TildeSlot &ts = g_tildeSlots[slot];
+                        const float du = uMax - uMin;
+                        const float dv = vMax - vMin;
+                        const float baseU0 = static_cast<float>(ts.baseU) * invW;
+                        const float baseV0 = static_cast<float>(ts.baseV) * invH;
+                        const uint32_t outVerts = GPR_U32(ctx, 4) & kRamMask;
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            const bool isLeft = ctx->f[kU[k]] <= uMin + 1e-4f;
+                            const bool isTop = ctx->f[kV[k]] <= vMin + 1e-4f;
+                            ctx->f[kU[k]] = isLeft ? baseU0 : (baseU0 + du);
+                            ctx->f[kV[k]] = isTop ? baseV0 : (baseV0 + dv);
+                        }
+                        g_origRectVertices(rdram, ctx, runtime);
+
+                        if (ts.hasTilde && g_pendingTildes.size() < kMaxPendingTildes && outVerts + 64u <= 0x02000000u)
+                        {
+                            PendingTilde pt;
+                            std::memcpy(pt.verts, rdram + outVerts, 64);
+                            int16_t xs[4], ys[4];
+                            int16_t x0 = 32767, x1 = -32768, y0 = 32767, y1 = -32768;
+                            for (int k = 0; k < 4; ++k)
+                            {
+                                std::memcpy(&xs[k], pt.verts + k * 16 + 8, 2);
+                                std::memcpy(&ys[k], pt.verts + k * 16 + 10, 2);
+                                x0 = std::min(x0, xs[k]);
+                                x1 = std::max(x1, xs[k]);
+                                y0 = std::min(y0, ys[k]);
+                                y1 = std::max(y1, ys[k]);
+                            }
+                            const float w = static_cast<float>(x1 - x0);
+                            const float h = static_cast<float>(y1 - y0);
+                            const int16_t tx0 = static_cast<int16_t>(std::lround(x0 + w * 0.14f));
+                            const int16_t tx1 = static_cast<int16_t>(std::lround(x1 - w * 0.14f));
+                            const int16_t ty0 = static_cast<int16_t>(std::lround(y0 - h * 0.14f));
+                            const int16_t ty1 = static_cast<int16_t>(std::lround(y0 + h * 0.06f));
+                            const float tU0 = (static_cast<float>(ts.tildeU) + ts.tildeW * 0.10f) * invW;
+                            const float tU1 = (static_cast<float>(ts.tildeU) + ts.tildeW * 0.90f) * invW;
+                            const float tV0 = static_cast<float>(ts.tildeV) * invH;
+                            const float tV1 = (static_cast<float>(ts.tildeV) + ts.tildeH * (ts.tildeStandalone ? 1.0f : 0.15f)) * invH;
+                            const uint16_t tu0 = static_cast<uint16_t>(std::clamp(static_cast<int>(std::lround(tU0 * 32768.0f)), 0, 32767));
+                            const uint16_t tu1 = static_cast<uint16_t>(std::clamp(static_cast<int>(std::lround(tU1 * 32768.0f)), 0, 32767));
+                            const uint16_t tv0 = static_cast<uint16_t>(std::clamp(static_cast<int>(std::lround(tV0 * 32768.0f)), 0, 32767));
+                            const uint16_t tv1 = static_cast<uint16_t>(std::clamp(static_cast<int>(std::lround(tV1 * 32768.0f)), 0, 32767));
+                            const int16_t midX = static_cast<int16_t>((x0 + x1) / 2);
+                            const int16_t midY = static_cast<int16_t>((y0 + y1) / 2);
+                            for (int k = 0; k < 4; ++k)
+                            {
+                                const bool left = xs[k] <= midX;
+                                const bool top = ys[k] <= midY;
+                                const uint16_t u = left ? tu0 : tu1;
+                                const uint16_t v = top ? tv0 : tv1;
+                                const int16_t x = left ? tx0 : tx1;
+                                const int16_t y = top ? ty0 : ty1;
+                                std::memcpy(pt.verts + k * 16 + 0, &u, 2);
+                                std::memcpy(pt.verts + k * 16 + 2, &v, 2);
+                                std::memcpy(pt.verts + k * 16 + 8, &x, 2);
+                                std::memcpy(pt.verts + k * 16 + 10, &y, 2);
+                            }
+                            g_pendingTildes.push_back(pt);
+                        }
+                        return;
+                    }
+                }
+            }
+
             const float top = static_cast<float>(kSubV) / 256.0f;
-            bool letter = g_inSubFont;
+            bool letter = g_subPixel && g_inSubFont;
             for (int k = 0; k < 4 && letter; ++k)
                 letter = ctx->f[kV[k]] >= top - 1e-6f; // every corner on or below the row (a letter's: top kSubV)
             if (letter && (ctx->f[13] == top || ctx->f[15] == top || ctx->f[19] == top || ctx->f[17] == top))
@@ -1262,6 +1490,24 @@ namespace vcs::prompts
                             index = i;
                 if (index < 0 || !g_resolved[index].valid || !corners(d, 4))
                     continue;
+                // In Oswald help boxes, the 23-unit button glyph sits top-aligned inside Oswald's 28-unit cell;
+                // nudge it down ~20% of its height so it aligns cleanly with the surrounding Oswald text.
+                if (g_inSubFont)
+                {
+                    int y0 = d.y[0], y1 = d.y[0];
+                    for (int i = 1; i < 4; ++i)
+                    {
+                        y0 = std::min<int>(y0, d.y[i]);
+                        y1 = std::max<int>(y1, d.y[i]);
+                    }
+                    const int16_t dy = static_cast<int16_t>(std::lround((y1 - y0) * 0.20f));
+                    if (dy != 0)
+                        for (int i = 0; i < 4; ++i)
+                        {
+                            d.y[i] = static_cast<int16_t>(d.y[i] + dy);
+                            std::memcpy(rdram + verts + (q + i) * 16u + 10u, &d.y[i], 2);
+                        }
+                }
                 d.cell = g_resolved[index].cell;
                 d.shadow = g_shadow;
                 g_drawn.push_back(d);
@@ -1338,6 +1584,7 @@ namespace vcs::prompts
 
         PS2_GUEST_CC void fontRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
+            g_pendingTildes.clear();
             g_inGameFont = g_tableIn && g_font && (GPR_U32(ctx, 4) & kRamMask) == g_font;
             g_inSubFont = g_subIn && (GPR_U32(ctx, 4) & kRamMask) == kSubFont;
             g_shadow = GPR_U32(ctx, 11) != 0;
@@ -1360,24 +1607,59 @@ namespace vcs::prompts
 
         PS2_GUEST_CC void im2dRenderIndexed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            if (g_inSubFont && GPR_U32(ctx, 31) == kGlyphBatch)
+            const bool atEntry = ctx->pc == kIm2DRenderIndexed;
+            const uint32_t ra = GPR_U32(ctx, 31);
+            const uint32_t primType = GPR_U32(ctx, 4);
+            const uint32_t origIdxPtr = GPR_U32(ctx, 7) & kRamMask;
+            const uint32_t origIdxCount = GPR_U32(ctx, 8);
+            if (atEntry)
             {
-                // the subtitles' letters are known by their texture coordinates in classify; the button glyphs among them
-                // (a help box in Oswald) by the prompts' token rows, as in the game's font
-                if (active())
-                    captureFontBatch(rdram, ctx);
-            }
-            else if (active())
-            {
-                if (GPR_U32(ctx, 31) == kGlyphBatch)
+                if (g_inSubFont && ra == kGlyphBatch)
                 {
-                    if (g_inGameFont)
+                    // the subtitles' letters are known by their texture coordinates in classify; the button glyphs among them
+                    // (a help box in Oswald) by the prompts' token rows, as in the game's font
+                    if (active())
                         captureFontBatch(rdram, ctx);
                 }
-                else
-                    captureHelpButton(rdram, ctx);
+                else if (active())
+                {
+                    if (ra == kGlyphBatch)
+                    {
+                        if (g_inGameFont)
+                            captureFontBatch(rdram, ctx);
+                    }
+                    else
+                        captureHelpButton(rdram, ctx);
+                }
             }
             g_origRenderIndexed(rdram, ctx, runtime);
+
+            if (atEntry && ctx->pc == ra && ra == kGlyphBatch && !g_pendingTildes.empty() && origIdxCount >= 6 &&
+                origIdxPtr + 12u <= 0x02000000u)
+            {
+                uint16_t pat[6] = {0, 1, 2, 2, 1, 3};
+                std::memcpy(pat, rdram + origIdxPtr, 12);
+                const size_t n = std::min(g_pendingTildes.size(), kMaxPendingTildes);
+                for (size_t q = 0; q < n; ++q)
+                {
+                    std::memcpy(rdram + kTildeVerts + q * 64u, g_pendingTildes[q].verts, 64);
+                    for (int j = 0; j < 6; ++j)
+                    {
+                        const uint16_t idx = static_cast<uint16_t>(q * 4u + (pat[j] & 3u));
+                        std::memcpy(rdram + kTildeIdx + (q * 6u + j) * 2u, &idx, 2);
+                    }
+                }
+                g_pendingTildes.clear();
+
+                SET_GPR_U32(ctx, 4, primType);
+                SET_GPR_U32(ctx, 5, kTildeVerts);
+                SET_GPR_U32(ctx, 6, static_cast<uint32_t>(n * 4u));
+                SET_GPR_U32(ctx, 7, kTildeIdx);
+                SET_GPR_U32(ctx, 8, static_cast<uint32_t>(n * 6u));
+                SET_GPR_U32(ctx, 31, ra);
+                ctx->pc = kIm2DRenderIndexed;
+                g_origRenderIndexed(rdram, ctx, runtime);
+            }
         }
 
         // ---- the renderer's side (the GS stage) ---------------------------------------------------------------------
@@ -1725,6 +2007,7 @@ namespace vcs::prompts
                 ps2_render_worker::post([w, h, pixels] { ps2_render_worker::runOnGsStage([w, h, pixels] { gsHwSetGlyphAtlas(w, h, pixels); }); });
             }
         }
+        extendNativeFonts();
         if (subtitlesOn())
         {
             subIn();
@@ -1791,8 +2074,8 @@ namespace vcs::prompts
         runtime.replaceFunction(kFontHeightField, &fontHeightField); // (a leaf too)
         if ((g_origFontSetScale = runtime.lookupFunction(kFontSetScale)))
             runtime.replaceFunction(kFontSetScale, &fontSetScale);
-        static const bool subPixel = !(std::getenv("VCS_SUBTITLE_SUBPIXEL") && *std::getenv("VCS_SUBTITLE_SUBPIXEL") == '0');
-        if (subPixel && (g_origRectVertices = runtime.lookupFunction(kRectVertices)))
+        g_subPixel = !(std::getenv("VCS_SUBTITLE_SUBPIXEL") && *std::getenv("VCS_SUBTITLE_SUBPIXEL") == '0');
+        if ((g_origRectVertices = runtime.lookupFunction(kRectVertices)))
             runtime.replaceFunction(kRectVertices, &rectVertices);
         gsHwSetGlyphClassifier(&classify);
         g_installed = true;
