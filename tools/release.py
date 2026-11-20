@@ -72,7 +72,7 @@ def repository():
 
 # the mods every release carries (the player's decision, DECISIONS.md 2026-11-17): not in the repository - a
 # release takes them from --mods (CI: the fork's `mods-pack` release asset)
-BUNDLED_MODS = ("HD Hands", "HD Hud")
+BUNDLED_MODS = ("HD Hands", "HD Hud", "PT-BR (VCS.rec)")
 
 
 def copy_mods(stage, folder):
