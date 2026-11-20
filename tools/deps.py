@@ -97,8 +97,7 @@ def _move(src, dst):
 
 
 def download(url, out):
-    with urllib.request.urlopen(url, timeout=120) as r, open(out + ".part", "wb") as f:
-        shutil.copyfileobj(r, f, 1 << 20)
+    tc.download_file(url, out + ".part", timeout=120)
     os.replace(out + ".part", out)
 
 
