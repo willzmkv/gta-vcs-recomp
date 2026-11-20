@@ -53,30 +53,47 @@ python tools/build.py --recompile <the ISO>      # generated/ is not in git: mak
    on the issue.
 6. Stop there. The player (or the main agent) reviews and merges. Do not start a second task on the same branch.
 
-## 4. The state on 2026-11-18 (what is done, what is waiting)
+## 4. The state on 2026-11-20 (what is done, what is waiting)
 
-- Done and closed: subtitles (Oswald, options, sub-pixel letters, launcher rows: #42-#44), the dark cutscene sky
-  (#38), HD world duplicates and the warehouse gap (#37, #32), cutscene HD world (#76, already so), menushape (#55).
-- Fixed, waiting for the player to check in play: police chase (#41), Vic at the airport via PS2 cutscene framing
-  (#40), the distant proxies' wrecks and seated poses (#34).
-- Investigated, not fixed: Vehicle density standing still (#35) - the cap and the spawner's tries are ruled out (numbers
-  in the issue); next suspect: the spawn's later gates and the removal.
-- Waiting for the player: #36 (needs F3 positions), the translation's read and its two decisions (#46 / #47).
-- Regression suite: scopemask (fixed), widepref (test updated), haze / hose / finale (script space from its pointer),
-  controls (card slot) pass; `saves` and `meters` fail on test automation (a translated disc's menus; PHI_A2 stops in
-  state 3) - see #54.
+- **Done and merged into `hd-world-merge`:**
+  - Subtitles (Oswald, options, sub-pixel letters, launcher rows: #42-#44), dark cutscene sky (#38), cutscene HD world (#76), `menushape` (#55).
+  - `#61` (PR #77): building switch survey across the disc + `tools/hdworld_missions.py` (6/6 mission switches verified).
+  - `#54` automation (PRs #78, #79): `saves.py` menu navigation on translated discs, `PHI_A2` state 3/4, vehicle spawn stability, `controls_check.py` trigger independence + DualSense trigger feel.
+  - `#80`: F2 settings menu and F5 trainer restyled in the launcher's Miami Vice look (Global menu `#48` moved to 2.0.0, see `docs/DECISIONS.md`).
+  - `#35` (PR #81): vehicle density standing still (`clear20A` and extended-range `not_toward` relaxed in car spawner).
+  - `#36` (PR #82, closed): HD world overlaps & dupes — same-id multi-bucket sectors (`r >= 20`, e.g. Downtown `914`/`915` opaque + glass) kept in `sameSphere()` (fallback `VCS_HD_SAME_ID_DUPES=1`), `0x8000` filtering in `detailed`/`[hddupe]`, Option B for game-list pairs, `[hdprobe]` skip reasons, `tools/hd_overlap_scan.py` ocean/freefall skip; wide night + noon scans, `hdworld_missions.py` 6/6, and `cruise.py` ThinLTO draw checks all 0.
+- **Fixed, waiting for the player to check in play (`player-test`):** police chase (#41), Vic at the airport via PS2 cutscene framing (#40), distant proxies' wrecks and seated poses (#34).
+- **Waiting for the player / main agent:** PT-BR translation review and mod packaging (#46, #47), full regression baseline rerun (#54), CI artifact check (#56), release notes (#57), RC PGO build + story playthrough (#58), merge to `main` + tag `v1.0.0` (#59), answer #31.
 
 ## 5. Tasks suited to a second agent
 
-In order of how self-contained they are (assign one at a time):
+Always assign **one** open issue at a time on a fresh branch `agent/<issue>-<short-name>` from `origin/hd-world-merge`:
 
-1. **#61 Other missions that switch buildings (survey)** - read-only research first: list the mission scripts' building
-   switches, then picture pairs (HD radius 3 vs 0). Writes a list; fixes only if a place differs.
-2. **#54 test automation** - make `tools/saves.py` work with a translated disc's menus and `framerate_audit.py`'s
-   PHI_A2 walk reach state 4. Test code only.
-3. **#35 Vehicle density standing still** - measurement first (`build/analysis/hd/cars_probe.py` in the main tree shows
-   the method: copy it), one gate at a time; a fix only with numbers that show more moving cars at 100 than at 0.
-4. **#48 Global menu phase 1** (the UI kit) - only after the player approves you for the menu; follow
-   `docs/plans/2026-11-17-global-menu.md` phase by phase, one PR per phase.
+1. **#54 Full regression suite + framerate audit (baseline verification)** - run `tools/regress.py` (no `--quick`) and `tools/framerate_audit.py --steps 15,30,60,100` on a ThinLTO build in the agent worktree now that PRs #78/#79 fixed the automation failures; report every pass/fail and update `docs/PROGRESS.md` (do not overwrite `build/regress/baseline` in the main tree).
+2. **#47 Translation PT-BR mod packaging** - only after the player finishes #46; package the loader/mod structure and checks without committing any game text (GXT/TSV).
+3. **Post-1.0.0 self-contained tasks** (after 1.0.0 ships, from `docs/plans/README.md`): HD characters checks, live mod reload, performance phases, DualSense police radio, graphics tasks `#3`-`#7` in `docs/FORK.md`.
 
-The release itself (#56-#59) and anything the player must decide stay with the player and the main agent.
+The release itself (#56-#59), `docs/DECISIONS.md`, and anything the player must decide stay with the player and the main agent.
+
+## 6. Workflow & prompt guide for future agents
+
+The two-phase workflow below worked cleanly across PRs #77-#82 and should be used for any non-trivial task:
+
+### Two-phase execution (required for C++ / engine / renderer tasks)
+1. **Phase A — Investigate & propose (no C++ edits yet):**
+   - Create a fresh branch from `origin/hd-world-merge` inside `D:\Games\vcs-agent` (never touch `D:\Games\vcs-hd-world-impl`, `D:\Games\vcsrec`, or `%LOCALAPPDATA%\VCSRecomp\mc0`).
+   - Reproduce and measure first (`build/analysis/<task>/`). Disprove hypotheses with evidence (`VCS_WATCH`, `VCS_HD_DRAWMODE`, disassembly, screenshots) rather than guessing.
+   - Report a concise table of findings + proposed fix + any design trade-off (Option A vs Option B) to the orchestrator/player and **wait for approval** before editing C++ sources.
+2. **Phase B — Implement, verify & open PR:**
+   - Apply the minimal fix following the existing code style and **Rule 1** (keep an env-var fallback switch to the old behavior and test that the fallback reproduces the old state).
+   - Update `docs/game-internals.md` (with exact addresses and how they were found) and the relevant plan file in `docs/plans/`.
+   - Build with `--quick` while iterating, then run a final **ThinLTO** build (`python tools/build.py --opt lto`) and run the final smoke/cruise checks on that ThinLTO binary.
+   - Rebase onto `origin/hd-world-merge`, push `agent/<issue>-<short-name>`, open a PR into `hd-world-merge` with root cause + before/after evidence + validation results, comment the PR link on the issue, and **stop**.
+
+### Reusable handoff prompt checklist
+When briefing a new agent, always include:
+1. **Workspace isolation:** exact worktree path (`D:\Games\vcs-agent`), build dir (`D:\Games\vcs-agent-build`), new branch name (`git switch -c agent/<N>-<name> origin/hd-world-merge`), and forbidden paths (`D:\Games\vcs-hd-world-impl`, `D:\Games\vcsrec`, `%LOCALAPPDATA%\VCSRecomp\mc0`).
+2. **Forbidden actions:** no push/merge/rebase on `hd-world-merge`/`main`, no closing issues, no game data/GXT/screenshots in git, no edits to `docs/DECISIONS.md` or `launcher/`, no running the game while the player or main agent is running it, no weakening tests.
+3. **Reading order:** `docs/plans/AGENT-HANDOFF.md`, `AGENTS.md`, the task's plan in `docs/plans/`, the relevant `docs/game-internals.md` sections, `gh issue view <N> -R willzmkv/gta-vcs-recomp`, and the target source files.
+4. **Task scope & Phase A / Phase B gate:** explicit deliverables, required checks (e.g. `hdworld_missions.py`, `cruise.py ... VCS_HD_DRAWCHECK=1`, `controls_check.py`), and stop-for-review before Phase B.
+5. **Delivery:** PR to `willzmkv/gta-vcs-recomp` base `hd-world-merge`, comment link on issue `#N`, then stop.
