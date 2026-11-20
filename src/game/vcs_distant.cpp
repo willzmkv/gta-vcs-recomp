@@ -74,7 +74,10 @@ namespace vcs::distant
         constexpr uint32_t kRandomPedVtable = 0x00490840u;
         constexpr float kPedHeight = 1.0f;          // a ped's origin above its node
         constexpr float kCrowdNear = 310.0f;        // strictly beyond the real pedestrian band (~300 m)
-        constexpr uint32_t kMaxWalkers = 60;
+        // 60 walkers past the real crowd; 160 with the crowd bands (CROWD_BANDS_PLAN.md step 3: the real crowd ends at
+        // 200 m and the walkers are all the city shows past it)
+        constexpr uint32_t kMaxWalkers = 160, kWalkers = 60;
+        constexpr float kHandDepth = 20.0f; // how far inside the walkers' band a walker waits for its handover (m)
         constexpr float kPedTemplateRange = 360.0f; // cover the extended real pedestrian band (~325 m)
         constexpr uint32_t kRegisterCorona = 0x0027DD80u;
         constexpr uint32_t kCoronaTable = 0x00512560u, kCoronaSlots = 56u, kCoronaStride = 0x30u;
@@ -95,9 +98,15 @@ namespace vcs::distant
             uint32_t model = 0;
             float side = 0.0f; // to the right of the link (walkers: a pavement's width)
             bool alive = false;
+            // the crowd bands' handover (walkers): 1 waiting to become a real ped, 2 taken (gone at the next tick), 3 turned
+            // back untaken (walks on, never waits again until back in the band); where it stood when last moved
+            uint8_t hand = 0;
+            uint16_t handFrames = 0;
+            float at[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // x, y, z, heading
         };
         Car g_cars[kMaxProxies];
         Car g_walkers[kMaxWalkers];
+        uint32_t g_wantedWalkers = 0; // this tick's (adoptPed takes a free one below it)
         std::mt19937 g_rng{0x5643u};
 
         std::mutex g_publishMutex;
@@ -140,6 +149,28 @@ namespace vcs::distant
         std::mutex g_framesMutex;
         std::shared_ptr<const FrameGroups> g_frames[8];
         std::atomic<uint64_t> g_statFrames{0}, g_statTemplates{0}, g_statAssigned{0}, g_statDrawn{0}, g_statStale{0};
+
+        // Real peds far away drawn as proxies (2026-11-12, PERFORMANCE.md 43): with the population distance raised most
+        // of the crowd stands 100-325 m out, and each one went through the game's whole draw (its skin palette, ~30 bones,
+        // its packets, the worker's skinning and copies) - not drawing them past 110 m took the render worker from 16.8
+        // to 11.2 ms and the game thread 1.6 ms lower. A random ped farther than this is drawn as a template's posed mesh
+        // at its own place instead (the distant crowds' way): the first one of each model a frame draws as the game does
+        // and becomes the template, the others skip their PreRender and Render and join its proxies (decideProxy). They stay real peds (AI,
+        // physics, paths); only their draw is cheap. VCS_PED_PROXY=<m> moves the distance, 0 turns it off. Only while
+        // the population is raised: the game draws peds to ~70 m otherwise.
+        float pedProxyDistance()
+        {
+            static const float d = [] {
+                const char *e = std::getenv("VCS_PED_PROXY");
+                return e && *e ? static_cast<float>(std::atof(e)) : 150.0f; // (110 until 2026-11-12: the switch was seen)
+            }();
+            return d;
+        }
+        bool realPedProxies() { return pedProxyDistance() > 0.0f && vcs::distance::populationRaised(); }
+        std::vector<Proxy> g_realPedProxies;        // this frame's (game thread), handed over at frameKicked
+        std::vector<uint32_t> g_realPedModels;      // the models drawn by the game this frame (their templates)
+        std::atomic<uint64_t> g_statRealProxied{0}, g_statRealDrawn{0};
+        std::atomic<uint64_t> g_statRealOrphan{0}; // real ped proxies with no template of their model (another's used)
         thread_local std::shared_ptr<const FrameGroups> t_frame;
         thread_local const FrameGroups::Group *t_group = nullptr;
 
@@ -221,6 +252,11 @@ namespace vcs::distant
                 const float d = std::hypot(n.x - cx, n.y - cy);
                 if (!usable(n) || d < lo || d > hi || (n.x - cx) * fx + (n.y - cy) * fy < 0.5f * d)
                     continue;
+                // with the crowd bands, walkers as the game spreads its own: a node's density class (flags >> 12 & 3) takes the chance the
+                // spot finders give it (rand & 15 <= {0, 4, 7, 15}: game-internals.md 12d) - busy pavements fill most
+                static constexpr uint32_t kClassChance[4] = {0, 4, 7, 15};
+                if (walker && vcs::distance::crowdBands() && (g_rng() & 15u) > kClassChance[(n.flags >> 12) & 3u])
+                    continue;
                 const uint16_t to = nextNode(nodes, count, links, i, 0xFFFFu, first);
                 if (to == 0xFFFFu || to == i)
                     continue;
@@ -234,6 +270,7 @@ namespace vcs::distant
                     c.speed = std::uniform_real_distribution<float>(1.1f, 1.7f)(g_rng);
                     c.side = std::uniform_real_distribution<float>(-2.0f, 2.0f)(g_rng);
                     c.model = g_pedModels.empty() ? 0u : g_pedModels[g_rng() % g_pedModels.size()];
+                    c.hand = 0;
                 }
                 else
                 {
@@ -288,6 +325,11 @@ namespace vcs::distant
                     c.alive = false;
                     continue;
                 }
+                if (c.alive && c.hand == 2) // a real ped stands in its place now
+                {
+                    c.alive = false;
+                    c.hand = 0;
+                }
                 if (!c.alive)
                 {
                     if (placed >= (walker ? 8u : 4u))
@@ -316,11 +358,45 @@ namespace vcs::distant
                 const float x = a.x + (b.x - a.x) * c.t + rx * c.side, y = a.y + (b.y - a.y) * c.t + ry * c.side;
                 const float z = a.z + (b.z - a.z) * c.t + height;
                 const float d = std::hypot(x - cx, y - cy);
-                if (d < lo || d > hi * 1.05f || (x - cx) * vx + (y - cy) * vy < -20.0f)
+                const float ahead = (x - cx) * vx + (y - cy) * vy;
+                if (walker && d < lo && d >= lo - kHandDepth && ahead > 0.0f && vcs::distance::crowdBands())
                 {
+                    // come in past the band in view: it waits to become a real ped (vcs_distance.cpp takes it), walking
+                    // on; not taken within ~a second (the bands full) it turns back once - never gone in plain sight. The
+                    // camera coming at it pushes it deeper: past kHandDepth it goes (below)
+                    if (c.hand == 0)
+                    {
+                        c.hand = 1;
+                        c.handFrames = 0;
+                    }
+                    if (c.hand == 1 && ++c.handFrames > 60)
+                    {
+                        std::swap(c.from, c.to);
+                        c.t = 1.0f - c.t;
+                        c.side = -c.side;
+                        c.hand = 3;
+                    }
+                    else if (c.hand == 3 && ++c.handFrames > 360) // its way back held it inside (a link along the band)
+                    {
+                        c.alive = false;
+                        c.hand = 0;
+                        continue;
+                    }
+                }
+                else if (d < lo || d > hi * 1.05f || ahead < -20.0f)
+                {
+                    // (2026-11-13: a waiting walker was kept at any distance in view, so the player drove up to it - a
+                    // posed template mesh a few metres away, legs missing, sitting in the air)
                     c.alive = false;
+                    c.hand = 0;
                     continue;
                 }
+                else
+                    c.hand = 0;
+                c.at[0] = x;
+                c.at[1] = y;
+                c.at[2] = z;
+                c.at[3] = std::atan2(-fx, fy);
                 Proxy p{};
                 const float m[16] = {rx, ry, 0.0f, 0.0f, fx, fy, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, x, y, z, 1.0f};
                 std::memcpy(p.m, m, sizeof(m));
@@ -336,6 +412,7 @@ namespace vcs::distant
             const int setting = g_setting.load(std::memory_order_relaxed), crowds = g_crowds.load(std::memory_order_relaxed);
             uint32_t nodes, count, links, peds = 0;
             std::vector<Proxy> cars, walkers;
+            g_wantedWalkers = 0; // (no walkers this tick: none offered or adopted)
             if ((setting > 0 || crowds > 0) && network(nodes, count, links, &peds))
             {
                 if (setting > 0)
@@ -350,7 +427,9 @@ namespace vcs::distant
                 {
                     float pedLo, pedHi;
                     crowdBand(pedLo, pedHi);
-                    const uint32_t wantedWalkers = std::min<uint32_t>(kMaxWalkers, static_cast<uint32_t>(crowds) * 60u / 100u);
+                    const uint32_t most = vcs::distance::crowdBands() ? kMaxWalkers : kWalkers;
+                    const uint32_t wantedWalkers = std::min<uint32_t>(most, static_cast<uint32_t>(crowds) * most / 100u);
+                    g_wantedWalkers = wantedWalkers;
                     move(g_walkers, kMaxWalkers, wantedWalkers, true, nodes, count,
                          count + peds, links, pedLo, pedHi, kPedHeight, walkers);
                 }
@@ -415,9 +494,21 @@ namespace vcs::distant
                 const uint32_t vtable = rd32(entity + 0x5Cu);
                 if (vtable != kCarVtable && vtable != kCar2Vtable)
                     return;
+                // never a wreck (status 5, entity +0x48 bits 4-8): its burnt shell became every far car of its model - a
+                // chassis without a body down the road (#34)
+                if (((rd32(entity + 0x48u) >> 4) & 0x1Fu) == 5u)
+                    return;
             }
-            else if (g_crowds.load(std::memory_order_relaxed) > 0 && isRandomPed(entity))
+            else if ((g_crowds.load(std::memory_order_relaxed) > 0 || realPedProxies()) && isRandomPed(entity))
+            {
+                // never a driver or a passenger: drawn seated (state 0x37 driving, or in a vehicle and not on foot), it
+                // gave the standing walkers of its model a sitting pose (#34; at Little Havana 14 of 15 pool peds were
+                // drivers)
+                const uint32_t state = rd32(entity + 0x8C4u);
+                if (state == 0x37u || (rd32(entity + 0x480u) != 0 && state != 1u))
+                    return;
                 ped = true;
+            }
             else
                 return;
             Rendered r{};
@@ -434,6 +525,125 @@ namespace vcs::distant
             r.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
             g_rendered.push_back(r);
             g_group = static_cast<uint16_t>(g_rendered.size());
+        }
+
+        // A random ped past pedProxyDistance() becomes a proxy at its PreRender (vtable 0x490840 +0x40, FUN_00200660):
+        // the first one of each model a frame (or a nearer one) is drawn by the game and is the template, so a template's
+        // pose is always this frame's; the others skip PreRender (their bones' pose, shadow, a gun's flash: nothing the
+        // proxy uses) and, at their Render (+0x44, FUN_00201300), the whole of it - they join the template's proxies.
+        // Marked per ped pool slot with the game frame.
+        constexpr uint32_t kPedPreRender = 0x00200660u, kPedRender = 0x00201300u;
+        PS2Runtime::RecompiledFunction g_pedPreRender = nullptr, g_pedRender = nullptr;
+        int32_t g_proxyFrame = -1;
+        int32_t g_proxySlot[512];
+        uint32_t pedSlot(uint32_t entity) { return (entity - rd32(rd32(kPedPool))) / kPedSize; }
+        // a template per model and per walking / standing: a proxy wears a pose like its own (a standing ped shown
+        // walking on the spot, then stopping as it came into the game's own draw, read as fake: the player's report)
+        uint32_t templateKey(uint32_t entity)
+        {
+            uint16_t model;
+            std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
+            return model | (pedMoving(entity) ? 0x10000u : 0u);
+        }
+        // The templates stay the same peds from frame to frame (key, ped): the first of a key a frame used to be the
+        // template, and the draw order changes - every proxy of that model took another ped's pose each frame and the
+        // far crowd flickered (the player's report, 2026-11-13). Last frame's template of a key is this frame's while
+        // it is still a random ped of that key; a proxy then waits for it, drawn later in the frame.
+        std::vector<std::pair<uint32_t, uint32_t>> g_templatesBefore, g_templatesNow;
+        std::vector<uint32_t> g_drawnPedsBefore; // the peds the last frame's draw reached (frameKicked: g_rendered)
+        uint32_t stickyTemplate(uint32_t key)
+        {
+            // still a random ped of the key, and drawn last frame (one the camera turned from takes no proxies)
+            for (const auto &t : g_templatesBefore)
+                if (t.first == key)
+                    return isRandomPed(t.second) && templateKey(t.second) == key &&
+                                   std::find(g_drawnPedsBefore.begin(), g_drawnPedsBefore.end(), t.second) != g_drawnPedsBefore.end()
+                               ? t.second
+                               : 0u;
+            return 0u;
+        }
+        bool decideProxy(uint32_t entity)
+        {
+            if (!realPedProxies() || !isRandomPed(entity))
+                return false;
+            const int32_t frame = static_cast<int32_t>(rd32(kFrameCounter));
+            if (frame != g_proxyFrame)
+            {
+                g_proxyFrame = frame;
+                g_realPedModels.clear();
+                g_templatesBefore.swap(g_templatesNow);
+                g_templatesNow.clear();
+            }
+            const uint32_t key = templateKey(entity);
+            const uint32_t sticky = stickyTemplate(key);
+            const bool known = std::find(g_realPedModels.begin(), g_realPedModels.end(), key) != g_realPedModels.end();
+            const uint32_t slot = pedSlot(entity);
+            if (slot >= 512u)
+                return false;
+            // a ped stays a proxy until 10 m nearer than where it became one (on the line it went back and forth every
+            // frame: proxy, then the game's draw)
+            const bool wasProxy = g_proxySlot[slot] >= frame - 1 && g_proxySlot[slot] <= frame;
+            const float d = wasProxy ? std::max(0.0f, pedProxyDistance() - 10.0f) : pedProxyDistance();
+            const float dx = rdf(entity + 0x30u) - rdf(kCameraPos), dy = rdf(entity + 0x34u) - rdf(kCameraPos + 4u);
+            const float dz = rdf(entity + 0x38u) - rdf(kCameraPos + 8u);
+            const bool near = dx * dx + dy * dy + dz * dz <= d * d;
+            const bool isTemplate = entity == sticky || (!sticky && !known);
+            if (near || isTemplate)
+            {
+                if (isTemplate && !known)
+                {
+                    g_realPedModels.push_back(key); // drawn by the game: this model's (and pose's) template this frame
+                    g_templatesNow.emplace_back(key, entity);
+                    g_statRealDrawn.fetch_add(1, std::memory_order_relaxed);
+                }
+                return false;
+            }
+            g_proxySlot[slot] = frame;
+            return true;
+        }
+        bool markedProxy(uint32_t entity)
+        {
+            if (!realPedProxies() || !isRandomPed(entity))
+                return false;
+            const uint32_t slot = pedSlot(entity);
+            return slot < 512u && g_proxySlot[slot] == static_cast<int32_t>(rd32(kFrameCounter)) && g_proxyFrame >= 0;
+        }
+
+        PS2_GUEST_CC void pedPreRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_rdram = rdram;
+            if (ctx->pc == kPedPreRender && decideProxy(GPR_U32(ctx, 4)))
+            {
+                ctx->pc = GPR_U32(ctx, 31); // replaced entirely (the hook rule)
+                return;
+            }
+            g_pedPreRender(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void pedRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_rdram = rdram;
+            if (ctx->pc == kPedRender)
+            {
+                const uint32_t entity = GPR_U32(ctx, 4);
+                if (markedProxy(entity))
+                {
+                    Proxy p{};
+                    readMatrix(entity, p.m);
+                    const float dx = p.m[12] - rdf(kCameraPos), dy = p.m[13] - rdf(kCameraPos + 4u), dz = p.m[14] - rdf(kCameraPos + 8u);
+                    p.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    p.id = (entity >> 4) & 0xFFFFu;
+                    uint16_t model;
+                    std::memcpy(&model, g_rdram + ((entity + 0x56u) & PS2_RAM_MASK), 2);
+                    p.model = model;
+                    p.still = !pedMoving(entity);
+                    g_realPedProxies.push_back(p);
+                    g_statRealProxied.fetch_add(1, std::memory_order_relaxed);
+                    ctx->pc = GPR_U32(ctx, 31);
+                    return;
+                }
+            }
+            g_pedRender(rdram, ctx, runtime);
         }
 
         PS2_GUEST_CC void entityRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -470,6 +680,10 @@ namespace vcs::distant
                 const uint32_t e = entries + i * entrySize;
                 const uint32_t vt = rd32(e + 0x5Cu);
                 if ((ped ? vt != kRandomPedVtable : (vt != kCarVtable && vt != kCar2Vtable)) || !rd32(e + 0x50u))
+                    continue;
+                // Never pick a parked / driverless car as a template: parked cars have m_pDriver == nullptr
+                // (+0x384 == 0) and must keep their headlights / coronas OFF.
+                if (!ped && !rd32(e + 0x384u))
                     continue;
                 const float dx = rdf(e + 0x30u) - cx, dy = rdf(e + 0x34u) - cy, dz = rdf(e + 0x38u) - cz;
                 float d = std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -689,8 +903,11 @@ namespace vcs::distant
     {
         g_renderedEntity = 0;
         g_group = 0;
+        std::vector<Proxy> realPeds;
+        realPeds.swap(g_realPedProxies);
         if (g_rendered.empty())
         {
+            g_drawnPedsBefore.clear();
             if (g_frames[itemFrame & 7u])
             {
                 std::lock_guard<std::mutex> lock(g_framesMutex);
@@ -709,6 +926,23 @@ namespace vcs::distant
             carProxies = g_published;
             pedProxies = g_publishedPeds;
         }
+        pedProxies.insert(pedProxies.end(), realPeds.begin(), realPeds.end());
+        // the templates chosen at the last frame, kept while still drawn (keptTemplate)
+        static std::vector<uint32_t> chosenBefore;
+        std::vector<uint32_t> chosenNow;
+        auto keptTemplate = [&](const Rendered &r) {
+            if (std::find(chosenBefore.begin(), chosenBefore.end(), r.entity) != chosenBefore.end())
+                return true;
+            for (const auto &t : g_templatesNow)
+                if (t.second == r.entity)
+                    return true;
+            return false;
+        };
+        struct KeepChoice
+        {
+            std::vector<uint32_t> &before, &now;
+            ~KeepChoice() { before.swap(now); }
+        } keepChoice{chosenBefore, chosenNow};
         for (int kind = 0; kind < 2; ++kind)
         {
         const bool peds = kind == 1;
@@ -718,23 +952,37 @@ namespace vcs::distant
             const Rendered &r = g_rendered[i];
             if (r.ped != peds)
                 continue;
-            auto at = std::find_if(templates.begin(), templates.end(), [&](uint32_t t) { return g_rendered[t].model == r.model; });
+            // (peds: one walking and one standing per model, when both are drawn - a proxy wears a pose like its own)
+            auto at = std::find_if(templates.begin(), templates.end(), [&](uint32_t t) {
+                return g_rendered[t].model == r.model && (!peds || g_rendered[t].moving == r.moving);
+            });
             if (at == templates.end())
                 templates.push_back(i);
             else
             {
+                // last frame's choice first (or the real proxies' template): the same ped's pose frame after frame -
+                // another each frame made the proxies flicker
                 const Rendered &was = g_rendered[*at];
-                if ((r.moving && !was.moving) || (r.moving == was.moving && r.distance > was.distance))
+                const bool rKeep = keptTemplate(r), wasKeep = keptTemplate(was);
+                if (rKeep != wasKeep)
+                {
+                    if (rKeep)
+                        *at = i;
+                }
+                else if ((r.moving && !was.moving) || (r.moving == was.moving && r.distance > was.distance))
                     *at = i;
             }
         }
+        for (uint32_t t : templates)
+            chosenNow.push_back(g_rendered[t].entity);
         std::sort(templates.begin(), templates.end(), [](uint32_t a, uint32_t b) { return g_rendered[a].model < g_rendered[b].model; });
         if (!templates.empty())
         {
             std::vector<uint32_t> &models = peds ? g_pedModels : g_models;
             models.clear();
             for (uint32_t t : templates)
-                models.push_back(g_rendered[t].model);
+                if (models.empty() || models.back() != g_rendered[t].model) // (sorted: a model's two templates together)
+                    models.push_back(g_rendered[t].model);
             const std::vector<Proxy> &proxies = peds ? pedProxies : carProxies;
             // each proxy to the template of its model, else to one chosen by its slot; those behind the camera dropped
             const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u), cz = rdf(kCameraPos + 8u);
@@ -744,11 +992,25 @@ namespace vcs::distant
             {
                 if ((p.m[12] - cx) * fx + (p.m[13] - cy) * fy + (p.m[14] - cz) * fz < -20.0f)
                     continue;
-                size_t k = 0;
-                while (k < templates.size() && g_rendered[templates[k]].model != p.model)
-                    ++k;
+                // its model's template in its own pose (walking / standing), else its model's other one
+                size_t k = 0, other = templates.size();
+                for (; k < templates.size(); ++k)
+                {
+                    const Rendered &t = g_rendered[templates[k]];
+                    if (t.model != p.model)
+                        continue;
+                    if (t.moving == !p.still)
+                        break;
+                    other = k;
+                }
                 if (k == templates.size())
+                    k = other;
+                if (k == templates.size())
+                {
                     k = ((p.id * 2654435761u) >> 8) % templates.size();
+                    if (peds && &p >= pedProxies.data() + (pedProxies.size() - realPeds.size()))
+                        g_statRealOrphan.fetch_add(1, std::memory_order_relaxed); // a real ped shown as another model
+                }
                 by[k].push_back(&p);
             }
             for (size_t k = 0; k < templates.size(); ++k)
@@ -769,11 +1031,38 @@ namespace vcs::distant
                         table->matrices[table->matrices.size() - 4u + c] += t.origin[c];
                 }
                 g_statAssigned += g.count;
+                // the template's other draws this frame - its parts with alpha (hair, see-through bits) drawn later from
+                // the sorted alpha list, after other entities, open a group of their own: the same proxies there, or
+                // every proxy lacked those parts (the player's report, 2026-11-13: parts missing on the far crowd)
+                for (uint32_t j = 0; j < g_rendered.size(); ++j)
+                {
+                    const Rendered &o = g_rendered[j];
+                    if (j == templates[k] || o.entity != t.entity || table->groups[j].count)
+                        continue;
+                    FrameGroups::Group &og = table->groups[j];
+                    float om[16];
+                    std::memcpy(om, o.m, sizeof(om));
+                    for (int c = 0; c < 3; ++c)
+                        om[12 + c] += o.origin[c];
+                    invertRigid(om, og.inverse);
+                    og.first = static_cast<uint32_t>(table->matrices.size() / 16u);
+                    og.count = g.count;
+                    for (const Proxy *p : by[k])
+                    {
+                        table->matrices.insert(table->matrices.end(), p->m, p->m + 16);
+                        for (int c = 0; c < 3; ++c)
+                            table->matrices[table->matrices.size() - 4u + c] += o.origin[c];
+                    }
+                }
             }
             g_statTemplates += templates.size();
         }
         }
         ++g_statFrames;
+        g_drawnPedsBefore.clear();
+        for (const Rendered &r : g_rendered)
+            if (r.ped)
+                g_drawnPedsBefore.push_back(r.entity);
         g_rendered.clear();
         std::lock_guard<std::mutex> lock(g_framesMutex);
         g_frames[itemFrame & 7u] = std::move(table);
@@ -784,6 +1073,95 @@ namespace vcs::distant
     {
         if (outcome >= 0 && outcome < 3)
             g_statProxy[outcome].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    bool pendingHandover(Handover &out)
+    {
+        for (uint32_t i = 0; i < g_wantedWalkers && i < kMaxWalkers; ++i)
+        {
+            const Car &c = g_walkers[i];
+            if (!c.alive || c.hand != 1 || !c.model)
+                continue;
+            out = {i, c.at[0], c.at[1], c.at[2] - kPedHeight, c.at[3], c.model, c.from, c.to, c.t};
+            return true;
+        }
+        return false;
+    }
+
+    void handoverTaken(uint32_t slot)
+    {
+        if (slot < kMaxWalkers && g_walkers[slot].hand == 1)
+            g_walkers[slot].hand = 2;
+    }
+
+    bool adoptPed(float x, float y, float heading, uint32_t model)
+    {
+        uint32_t nodes, count, links, peds = 0;
+        if (!g_rdram || !network(nodes, count, links, &peds) || !peds)
+            return false;
+        float lo, hi; // only where a walker lives (move() drops it past the band)
+        crowdBand(lo, hi);
+        const float d = std::hypot(x - rdf(kCameraPos), y - rdf(kCameraPos + 4u));
+        if (d < lo || d > hi)
+            return false;
+        uint32_t slot = kMaxWalkers;
+        for (uint32_t i = 0; i < g_wantedWalkers && i < kMaxWalkers; ++i)
+            if (!g_walkers[i].alive)
+            {
+                slot = i;
+                break;
+            }
+        if (slot == kMaxWalkers)
+            return false;
+        // the nearest pavement link (a usable node's within 20 m, the segment's nearest point), walked the ped's way; not
+        // when the ped stands more than 1.5 m off it (the walker would jump)
+        const float hx = -std::sin(heading), hy = std::cos(heading);
+        uint16_t from = 0xFFFFu, to = 0xFFFFu;
+        float bestErr = 1.5f, bestT = 0.0f, bestSide = 0.0f;
+        for (uint32_t i = count; i < count + peds; ++i)
+        {
+            const Node n = node(nodes, i);
+            if ((n.x - x) * (n.x - x) + (n.y - y) * (n.y - y) > 20.0f * 20.0f || !usable(n))
+                continue;
+            for (uint32_t k = 0; k < n.links; ++k)
+            {
+                const uint16_t m = neighbour(links, n, k);
+                if (m < count || m >= count + peds)
+                    continue;
+                const Node o = node(nodes, m);
+                // the ped's way along it: from this node to the neighbour, or back
+                const bool fwd = (o.x - n.x) * hx + (o.y - n.y) * hy >= 0.0f;
+                const Node &a = fwd ? n : o, &b = fwd ? o : n;
+                const float len = std::max(1.0f, std::hypot(b.x - a.x, b.y - a.y));
+                const float ux = (b.x - a.x) / len, uy = (b.y - a.y) / len;
+                const float t = ((x - a.x) * ux + (y - a.y) * uy) / len;
+                const float side = (x - a.x) * uy - (y - a.y) * ux; // to the right of the way (rx, ry = uy, -ux)
+                const float err = (t < 0.0f ? -t * len : t > 1.0f ? (t - 1.0f) * len : 0.0f) + std::max(0.0f, std::abs(side) - 3.0f);
+                if (err < bestErr)
+                {
+                    bestErr = err;
+                    from = static_cast<uint16_t>(fwd ? i : m);
+                    to = static_cast<uint16_t>(fwd ? m : i);
+                    bestT = std::clamp(t, 0.0f, 1.0f);
+                    bestSide = std::clamp(side, -3.0f, 3.0f);
+                }
+            }
+        }
+        if (from == 0xFFFFu)
+            return false;
+        const Node a = node(nodes, from), b = node(nodes, to);
+        const float len = std::max(1.0f, std::hypot(b.x - a.x, b.y - a.y));
+        Car &c = g_walkers[slot];
+        c.from = from;
+        c.to = to;
+        c.length = len;
+        c.t = bestT;
+        c.side = bestSide;
+        c.speed = std::uniform_real_distribution<float>(1.1f, 1.7f)(g_rng);
+        c.model = model;
+        c.hand = 0;
+        c.alive = true;
+        return true;
     }
 
     void workerItem(uint32_t itemFrame, uint16_t group)
@@ -859,10 +1237,17 @@ namespace vcs::distant
             runtime.replaceFunction(kWorldProcess, &worldProcess);
         if ((g_entityRender = runtime.lookupFunction(kEntityRender)))
             runtime.replaceFunction(kEntityRender, &entityRender);
+        std::fill(std::begin(g_proxySlot), std::end(g_proxySlot), -1);
+        if ((g_pedPreRender = runtime.lookupFunction(kPedPreRender)) && (g_pedRender = runtime.lookupFunction(kPedRender)))
+        {
+            runtime.replaceFunction(kPedPreRender, &pedPreRender);
+            runtime.replaceFunction(kPedRender, &pedRender);
+        }
         if ((g_preRenderLists = runtime.lookupFunction(kPreRenderLists)))
             runtime.replaceFunction(kPreRenderLists, &preRenderLists);
-        if ((g_registerCorona = runtime.lookupFunction(kRegisterCorona)))
-            runtime.replaceFunction(kRegisterCorona, &registerCorona);
+        // Do not hook RegisterCorona: allow authentic game corona registration without stride/scaling corruption.
+        // if ((g_registerCorona = runtime.lookupFunction(kRegisterCorona)))
+        //     runtime.replaceFunction(kRegisterCorona, &registerCorona);
 
         // proxies -> ok frame=<n> count=<n>, the templates / proxy draw counters, then "x,y,z,distance" for the first eight
         ps2control::addCommand("proxies", [](const std::string &, ps2control::Reply reply) {
@@ -889,7 +1274,10 @@ namespace vcs::distant
                                " added=" + std::to_string(g_statAdded.load()) + " assigned=" + std::to_string(g_statAssigned.load()) +
                                " drawn=" + std::to_string(g_statDrawn.load()) + " proxydraws=" + std::to_string(g_statProxy[0].load()) + "/" +
                                std::to_string(g_statProxy[1].load()) + "/" + std::to_string(g_statProxy[2].load()) +
-                               " stale=" + std::to_string(g_statStale.load());
+                               " stale=" + std::to_string(g_statStale.load()) +
+                               " realproxied=" + std::to_string(g_statRealProxied.load()) +
+                               " realtemplates=" + std::to_string(g_statRealDrawn.load()) +
+                               " realorphans=" + std::to_string(g_statRealOrphan.load());
             for (size_t i = 0; i < p.size() && i < 8; ++i)
             {
                 char b[96];

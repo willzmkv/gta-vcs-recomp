@@ -83,6 +83,7 @@ namespace rhi
             void setTexture(uint32_t, Texture *, Sampler *) override {}
             void setConstants(uint32_t, Buffer &) override {}
             void draw(uint32_t, uint32_t) override {}
+            void drawInstanced(uint32_t, uint32_t, uint32_t) override {}
             void drawIndexed(uint32_t, uint32_t, int32_t) override {}
             void pushMarker(const char *) override {}
             void popMarker() override {}

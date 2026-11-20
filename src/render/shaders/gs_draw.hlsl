@@ -29,6 +29,9 @@ cbuffer Draw : register(b0)
                            // w: render-target texel scale y
     int4 blendCPremul;     // C (0 As, 1 Ad, 2 FIX), premultiply (0 none, 1 rgb *= C, 2 rgb *= 1 + C)
     float4 fogColor;       // rgb 0..255
+    float4 filterSize;     // a filtered read (atstArefAfailRt.w == 3, sampleRtFiltered): xy the footprint of one target
+                           // PS2 pixel in source texels (the tent's half-width), zw the source's size in texels (clamp)
+    float4 filterDest;     // a filtered read: xy the target's own scale (target pixels per PS2 pixel)
 };
 
 struct VSIn
@@ -138,19 +141,45 @@ struct LitIn
     float3 nrm : NORMAL;     // skinned normal
 };
 
-// VCS lit / skinned models (VU1 0x0030 with stages 0x5a5 / 0x0da / 0x4ff / 0x2b6): see docs/game-internals.md
-VSOut vs_lit(LitIn i)
+// VCS lit / skinned models (VU1 0x0030 with stages 0x5a5 / 0x0da / 0x4ff / 0x2b6): see docs/game-internals.md.
+// m: the GS window matrix rows, c: the clip-test matrix rows, l: the light direction rows (nat 0-3, 8-11, 12-14)
+VSOut litVertex(LitIn i, float4 m[4], float4 c4[4], float4 l[3])
 {
     VSOut o = (VSOut)0;
-    const float4 S = nat[0] * i.pos.x + nat[1] * i.pos.y + nat[2] * i.pos.z + nat[3];
-    const float4 C = nat[8] * i.pos.x + nat[9] * i.pos.y + nat[10] * i.pos.z + nat[11];
+    const float4 S = m[0] * i.pos.x + m[1] * i.pos.y + m[2] * i.pos.z + m[3];
+    const float4 C = c4[0] * i.pos.x + c4[1] * i.pos.y + c4[2] * i.pos.z + c4[3];
     nativePosition(S, C, nat[4].xyz * i.uv.x + nat[5].xyz * i.uv.y + nat[6].xyz * i.uv.z, o);
-    const float4 d = max(nat[12] * i.nrm.x + nat[13] * i.nrm.y + nat[14] * i.nrm.z, 0.0);
+    const float4 d = max(l[0] * i.nrm.x + l[1] * i.nrm.y + l[2] * i.nrm.z, 0.0);
     const float4 c = trunc(min(nat[20], nat[15] * d.x + nat[16] * d.y + nat[17] * d.z + nat[18] * d.w + nat[19]));
     o.col = float4(c.rgb, nat[21].x) / 255.0;
     o.colFlat = o.col;
     o.fog = nativeFog(nat[7], S.w);
     return o;
+}
+
+VSOut vs_lit(LitIn i)
+{
+    float4 m[4] = {nat[0], nat[1], nat[2], nat[3]};
+    float4 c[4] = {nat[8], nat[9], nat[10], nat[11]};
+    float4 l[3] = {nat[12], nat[13], nat[14]};
+    return litVertex(i, m, c, l);
+}
+
+// Instanced (the distant proxies, DISTANT_LIFE.md): one draw of a template's part for many proxies. Per instance the 11
+// rows that differ - window matrix, clip-test matrix, light directions - in that order; the rest from nat.
+#define VCS_LIT_INSTANCES 64
+cbuffer NativeInstances : register(b2)
+{
+    float4 inst[VCS_LIT_INSTANCES * 11];
+};
+
+VSOut vs_lit_inst(LitIn i, uint id : SV_InstanceID)
+{
+    const uint b = id * 11;
+    float4 m[4] = {inst[b], inst[b + 1], inst[b + 2], inst[b + 3]};
+    float4 c[4] = {inst[b + 4], inst[b + 5], inst[b + 6], inst[b + 7]};
+    float4 l[3] = {inst[b + 8], inst[b + 9], inst[b + 10]};
+    return litVertex(i, m, c, l);
 }
 
 Texture2D<float4> tex : register(t0);
@@ -263,6 +292,48 @@ float4 sampleBilinear(float2 uv)
     return lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
 }
 
+// A filtered read of a render target (atstArefAfailRt.w == 3): the reflection map's copy of the frame with "Car
+// reflections: Smooth" (gs_hw.cpp gsHwSetTargetFilter). Instead of the GS's four taps out of the ~5 x 3.5 frame pixels
+// a map texel stands for, a tent filter over the texel's footprint and its neighbours' (half-width filterSize.xy,
+// source texels) at the source's own resolution: a car panel's reflection, one map texel, follows the picture smoothly
+// as the camera moves instead of jumping with whatever single pixel lands on the tap (docs/game-internals.md 6g). At
+// most 16 taps per axis (every pixel up to ~1440p, a stride above).
+// Only the target pixels that are ever read get the filter: the paint reads the map one target pixel per PS2 texel
+// (fetchTexel: the pixel at the texel's centre), so a map drawn above 1x has ~16k such pixels of its 100k+; the others
+// take the GS's four taps (filterDest.xy: the target's own scale). Filtering all of them cost ~1.1 ms per copy at 4x3
+// (GTX 1080 Ti), this ~0.2 ms (the GS's own read: 0.04).
+static float2 g_pixel; // SV_Position of the pixel being shaded (ps_main)
+
+float4 sampleRtFiltered(float2 uv)
+{
+    const float2 ds = max(filterDest.xy, 1.0);
+    const float2 P = floor(g_pixel);
+    const float2 t = floor((P + 0.5) / ds); // the PS2 texel this target pixel is in
+    [branch] if (any(floor((t + 0.5) * ds) != P))
+        return sampleBilinear(uv); // not the pixel a texel read takes
+    const float2 s = rtScale2();
+    const float2 halfSize = max(filterSize.xy, 0.5);
+    uint tw, th;
+    tex.GetDimensions(tw, th);
+    const int2 maxPx = min(int2(tw, th), int2(ceil(filterSize.zw * s))) - 1;
+    const int2 p0 = clamp(int2(ceil((uv - halfSize + rtOrigin.xy) * s - 0.5)), int2(0, 0), maxPx);
+    const int2 p1 = clamp(int2(floor((uv + halfSize + rtOrigin.xy) * s - 0.5)), p0, maxPx);
+    const int2 step = max(int2(1, 1), (p1 - p0 + 16) / 16);
+    float4 sum = 0.0;
+    float weights = 0.0;
+    [loop] for (int y = p0.y; y <= p1.y; y += step.y)
+    {
+        const float wy = max(0.0, 1.0 - abs((float(y) + 0.5) / s.y - rtOrigin.y - uv.y) / halfSize.y);
+        [loop] for (int x = p0.x; x <= p1.x; x += step.x)
+        {
+            const float w = wy * max(0.0, 1.0 - abs((float(x) + 0.5) / s.x - rtOrigin.x - uv.x) / halfSize.x);
+            sum += tex.Load(int3(x, y, 0)) * w;
+            weights += w;
+        }
+    }
+    return weights > 0.0 ? sum * (255.0 / weights) : fetchTexel(int2(floor(uv)));
+}
+
 float4 sampleTex(float2 uv)
 {
 #if SAMPLE_MODE == 2
@@ -280,6 +351,10 @@ float4 sampleTex(float2 uv)
     [branch] if (atstArefAfailRt.w == 2)
     {
         r = sampleRtFull(uv);
+    }
+    else if (atstArefAfailRt.w == 3)
+    {
+        r = sampleRtFiltered(uv); // only the full shader (SAMPLE_MODE 0) has it: drawSampleMode picks that one
     }
     else if (linearIipFgeAte.x == 2)
     {
@@ -316,6 +391,7 @@ struct PSOut
 PSOut ps_main(VSOut i)
 {
     PSOut o;
+    g_pixel = i.pos.xy;
     // GS Z is Z24/Z32 / 2^n: written directly (going through GL's NDC rounded near values and collapsed far ones; with
     // D3D / Vulkan's 0..1 depth the rasterised value is the same: SHADER_DEPTH 0)
 #if SHADER_DEPTH

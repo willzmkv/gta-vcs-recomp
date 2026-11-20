@@ -70,10 +70,35 @@ def repository():
     return m.group(1) if m else ""
 
 
+# the mods every release carries (the player's decision, DECISIONS.md 2026-11-17): not in the repository - a
+# release takes them from --mods (CI: the fork's `mods-pack` release asset)
+BUNDLED_MODS = ("HD Hands", "HD Hud")
+
+
+def copy_mods(stage, folder):
+    """The bundled mods from folder (a modloader/ or its parent) into the release's modloader/."""
+    base = os.path.join(folder, "modloader") if os.path.isdir(os.path.join(folder, "modloader")) else folder
+    for mod in BUNDLED_MODS:
+        src = os.path.join(base, mod)
+        if not os.path.isdir(src):
+            tc.fail("the bundled mod %r is not in %s" % (mod, base), "release_mods")
+        dst = os.path.join(stage, "modloader", mod)
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        print("[release] bundled mod: %s" % mod)
+
+
 def copy_source(stage, ref, worktree):
     if worktree:
         names = git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
         for name in filter(None, (n.decode("utf-8") for n in names)):
+            if name in ("launcher.ini", ".vcs-build-dir") or name.startswith("docs/superpowers/"):
+                continue
+            if name.startswith("modloader/"):
+                sub = name[len("modloader/"):].split("/")[0]
+                if sub not in BUNDLED_MODS + ("modloader.ini", "README.md"):
+                    continue
             src = os.path.join(tc.ROOT, name)
             if not os.path.isfile(src):
                 continue  # deleted in the working tree
@@ -180,8 +205,51 @@ def self_test(stage):
         print("[release]   " + line)
     if code != 0:
         tc.fail("the release's launcher failed its self-test (above): nothing was written", "release_selftest")
-    # the self-test ran doctor.py, which may leave build/ (the Visual Studio environment cache): not part of a release
+    # the self-test ran doctor.py, which may leave build/ (an environment cache): not part of a release
     shutil.rmtree(os.path.join(stage, "build"), ignore_errors=True)
+
+
+# C++ runtimes Windows doesn't have: the launcher links them in (MSVC's static runtime, llvm-mingw's -static)
+FOREIGN_RUNTIME_DLLS = ("libc++", "libunwind", "libwinpthread", "libgcc", "libstdc++", "vcruntime", "msvcp", "concrt")
+
+
+def pe_imports(path):
+    """The DLL names a PE32+ executable imports (its import directory), standard library only."""
+    import struct
+    with open(path, "rb") as f:
+        data = f.read()
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    sections_count, optional_size = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from("<H", data, pe + 20)[0]
+    optional = pe + 24
+    if struct.unpack_from("<H", data, optional)[0] != 0x20B:
+        tc.fail(path + " is not a 64-bit Windows program", "release_launcher")
+    import_rva = struct.unpack_from("<I", data, optional + 112 + 8)[0]  # data directory 1: imports
+    sections = [struct.unpack_from("<IIII", data, optional + optional_size + 40 * i + 8)
+                for i in range(sections_count)]  # virtual size, virtual address, raw size, raw offset
+
+    def offset(rva):
+        for vsize, vaddr, rsize, raw in sections:
+            if vaddr <= rva < vaddr + max(vsize, rsize):
+                return raw + rva - vaddr
+        raise ValueError("RVA %x outside the sections" % rva)
+
+    names, entry = [], offset(import_rva) if import_rva else None
+    while entry is not None:
+        name_rva = struct.unpack_from("<I", data, entry + 12)[0]
+        if not name_rva:
+            break
+        start = offset(name_rva)
+        names.append(data[start:data.index(b"\0", start)].decode("ascii", "replace"))
+        entry += 20
+    return names
+
+
+def check_launcher_imports(launcher):
+    """A launcher that needs a C++ runtime DLL the release doesn't carry (a build without -static) starts nowhere."""
+    foreign = [n for n in pe_imports(launcher) if n.lower().startswith(FOREIGN_RUNTIME_DLLS)]
+    if foreign:
+        tc.fail("the launcher needs %s, which Windows doesn't have: build it with the C++ runtime linked in "
+                "(launcher/CMakeLists.txt)" % ", ".join(foreign), "release_launcher")
 
 
 def zip_time(ref, worktree):
@@ -336,6 +404,8 @@ def main():
     ap.add_argument("--out", default=DIST)
     ap.add_argument("--platform", choices=("windows", "linux"), default="windows" if tc.IS_WINDOWS else "linux")
     ap.add_argument("--allow-new-glibc", action="store_true", help="Linux: a launcher built on a newer system (tests)")
+    ap.add_argument("--mods", help="a folder holding modloader/HD Hands and HD Hud: the mods every release carries")
+    ap.add_argument("--standalone-exe", action="store_true", help="Windows: also emit a single self-extracting VCSLauncher .exe with the project embedded")
     a = ap.parse_args()
     if (a.platform == "windows") != tc.IS_WINDOWS:
         tc.fail("a %s release is made on %s (its launcher is built here)" % (a.platform, a.platform), "release_platform")
@@ -378,9 +448,12 @@ def main():
 
     print("[release] %s: source %s" % (name, "working tree" if a.worktree else ref))
     copy_source(stage, ref, a.worktree)
+    if a.mods:
+        copy_mods(stage, a.mods)
     with open(os.path.join(stage, "VERSION"), "w", encoding="utf-8") as f:
         f.write(version + "\n")
     launcher = a.launcher or build_launcher()
+    check_launcher_imports(launcher)
     shutil.copy2(launcher, os.path.join(stage, "VCSLauncher.exe"))
     print("[release] python %s (embeddable)" % a.python)
     bundle_python(stage, a.python)
@@ -411,6 +484,22 @@ def main():
     with open(out + ".sha256", "w", encoding="utf-8") as f:
         f.write("%s  %s\n" % (digest, os.path.basename(out)))
     print("[release] ok: %s (%.0f MB, sha256 %s)" % (out, os.path.getsize(out) / (1 << 20), digest[:16]))
+    if a.standalone_exe:
+        sfx_out = os.path.join(a.out, "VCS.rec-Launcher-%s.exe" % version)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            for rel in files + ["RELEASE.json"]:
+                info = zipfile.ZipInfo.from_file(os.path.join(stage, rel), rel)
+                info.date_time = when
+                with open(os.path.join(stage, rel), "rb") as f:
+                    z.writestr(info, f.read(), zipfile.ZIP_DEFLATED, 9)
+        payload_bytes = buf.getvalue()
+        with open(launcher, "rb") as f_exe, open(sfx_out, "wb") as f_out:
+            f_out.write(f_exe.read())
+            f_out.write(payload_bytes)
+            f_out.write(len(payload_bytes).to_bytes(8, "little"))
+            f_out.write(b"VCSREC_ZIP_PAYLOAD")
+        print("[release] standalone exe ok: %s (%.1f MB)" % (sfx_out, os.path.getsize(sfx_out) / (1 << 20)))
     tc.event(result="ok", path=out, version=version)
 
 

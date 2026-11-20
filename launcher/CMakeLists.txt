@@ -32,7 +32,12 @@ set(VCS_LAUNCHER_COMMON
     screens/sheets.cpp
     screens/overlays.cpp
     screens/gallery.cpp
+    screens/gamemenu.cpp
     model/tasks.cpp
+    model/game_config.cpp
+    model/hardware.cpp
+    model/scskiller.cpp
+    model/sound.cpp
     model/process.cpp
     model/disc_check.cpp
     model/json.cpp
@@ -40,24 +45,57 @@ set(VCS_LAUNCHER_COMMON
 )
 
 if(WIN32)
-    # the shader, compiled at build time into headers (no runtime compiler, shader errors are build errors)
-    file(GLOB VCS_FXC_CANDIDATES "C:/Program Files (x86)/Windows Kits/10/bin/10.*/x64/fxc.exe")
-    list(SORT VCS_FXC_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
-    find_program(VCS_FXC fxc HINTS ${VCS_FXC_CANDIDATES})
-    if(NOT VCS_FXC AND VCS_FXC_CANDIDATES)
-        list(GET VCS_FXC_CANDIDATES 0 VCS_FXC)
-    endif()
-    if(NOT VCS_FXC)
-        message(FATAL_ERROR "fxc.exe (Windows SDK) not found: install the Windows 10/11 SDK")
-    endif()
+    # the shader, compiled at build time into headers (no runtime compiler, shader errors are build errors): Windows'
+    # own d3dcompiler_47.dll through tools/hlsl_dxbc.py, fxc's DXBC without the Windows SDK
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     foreach(stage vs ps)
         add_custom_command(
             OUTPUT "${VCS_LAUNCHER_SHADERS}/ui_${stage}.h"
-            COMMAND "${VCS_FXC}" /nologo /O3 /T ${stage}_4_0 /E ${stage}_main /Vn g_ui_${stage} /Fh "${VCS_LAUNCHER_SHADERS}/ui_${stage}.h" "${VCS_UI_HLSL}"
-            DEPENDS "${VCS_UI_HLSL}"
-            COMMENT "fxc ui.hlsl ${stage}_main"
+            COMMAND "${Python3_EXECUTABLE}" -I "${VCS_ROOT}/tools/hlsl_dxbc.py" --profile ${stage}_4_0 --entry ${stage}_main
+                    --name g_ui_${stage} --out "${VCS_LAUNCHER_SHADERS}/ui_${stage}.h" "${VCS_UI_HLSL}"
+            DEPENDS "${VCS_UI_HLSL}" "${VCS_ROOT}/tools/hlsl_dxbc.py"
+            COMMENT "hlsl_dxbc ui.hlsl ${stage}_main"
             VERBATIM)
     endforeach()
+
+    # Game DXBC shaders for SCSKiller Pipeline Precompiler (D3D12 PSO + D3D11 Shader Cache builder)
+    file(MAKE_DIRECTORY "${VCS_LAUNCHER_SHADERS}/dxbc")
+    set(VCS_GAME_DXBC_HEADERS "")
+    function(vcs_game_dxbc source entry profile name header)
+        set(src "${VCS_ROOT}/src/render/${source}")
+        set(out "${VCS_LAUNCHER_SHADERS}/dxbc/${header}")
+        set(defines "")
+        foreach(d IN LISTS ARGN)
+            list(APPEND defines -D ${d})
+        endforeach()
+        add_custom_command(
+            OUTPUT "${out}"
+            COMMAND "${Python3_EXECUTABLE}" -I "${VCS_ROOT}/tools/hlsl_dxbc.py" --profile ${profile}
+                    --entry ${entry} --name ${name} --out "${out}" ${defines} "${src}"
+            DEPENDS "${src}" "${VCS_ROOT}/tools/hlsl_dxbc.py"
+            COMMENT "hlsl_dxbc (scskiller) ${source} ${entry}"
+            VERBATIM)
+        list(APPEND VCS_GAME_DXBC_HEADERS "${out}")
+        set(VCS_GAME_DXBC_HEADERS ${VCS_GAME_DXBC_HEADERS} PARENT_SCOPE)
+    endfunction()
+    vcs_game_dxbc(shaders/present.hlsl vs_main vs_5_0 kPresentVS present_vs.h)
+    vcs_game_dxbc(shaders/present.hlsl ps_main ps_5_0 kPresentPS present_ps.h)
+    vcs_game_dxbc(shaders/gs_draw.hlsl vs_main vs_5_0 kGsDrawVS gs_draw_vs.h)
+    vcs_game_dxbc(shaders/gs_draw.hlsl vs_world vs_5_0 kGsWorldVS gs_world_vs.h)
+    vcs_game_dxbc(shaders/gs_draw.hlsl vs_lit vs_5_0 kGsLitVS gs_lit_vs.h)
+    vcs_game_dxbc(shaders/gs_draw.hlsl vs_lit_inst vs_5_0 kGsLitInstVS gs_lit_inst_vs.h)
+    foreach(mode RANGE 0 6)
+        vcs_game_dxbc(shaders/gs_draw.hlsl ps_main ps_5_0 kGsDrawPS${mode} gs_draw_ps${mode}.h DUAL_SOURCE=0 SAMPLE_MODE=${mode})
+        vcs_game_dxbc(shaders/gs_draw.hlsl ps_main ps_5_0 kGsDrawPS${mode}Dual gs_draw_ps${mode}_dual.h DUAL_SOURCE=1 SAMPLE_MODE=${mode})
+        vcs_game_dxbc(shaders/gs_draw.hlsl ps_main ps_5_0 kGsDrawPS${mode}NoZ gs_draw_ps${mode}_noz.h DUAL_SOURCE=0 SAMPLE_MODE=${mode} SHADER_DEPTH=0)
+        vcs_game_dxbc(shaders/gs_draw.hlsl ps_main ps_5_0 kGsDrawPS${mode}DualNoZ gs_draw_ps${mode}_dual_noz.h DUAL_SOURCE=1 SAMPLE_MODE=${mode} SHADER_DEPTH=0)
+    endforeach()
+    vcs_game_dxbc(shaders/gs_util.hlsl vs_main vs_5_0 kGsQuadVS gs_quad_vs.h)
+    vcs_game_dxbc(shaders/gs_util.hlsl ps_blit ps_5_0 kGsBlitPS gs_blit_ps.h)
+    vcs_game_dxbc(shaders/gs_util.hlsl ps_fill_color ps_5_0 kGsFillColorPS gs_fill_color_ps.h)
+    vcs_game_dxbc(shaders/gs_util.hlsl ps_fill_depth ps_5_0 kGsFillDepthPS gs_fill_depth_ps.h)
+    vcs_game_dxbc(shaders/ui.hlsl vs_main vs_5_0 kUiVS ui_vs.h)
+    vcs_game_dxbc(shaders/ui.hlsl ps_main ps_5_0 kUiPS ui_ps.h)
 
     add_executable(VCSLauncher WIN32
         ${VCS_LAUNCHER_COMMON}
@@ -68,12 +106,16 @@ if(WIN32)
         model/system_win32.cpp
         "${VCS_LAUNCHER_SHADERS}/ui_vs.h"
         "${VCS_LAUNCHER_SHADERS}/ui_ps.h"
+        ${VCS_GAME_DXBC_HEADERS}
         launcher.rc
     )
     # the resource compiler doesn't report the files it embeds: a redrawn icon would otherwise not rebuild
     set_source_files_properties(launcher.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/launcher.ico")
     target_link_libraries(VCSLauncher PRIVATE d3d11 dxgi dwrite dwmapi ole32 shell32 uuid winmm advapi32)
     target_compile_definitions(VCSLauncher PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MINGW)  # mingw-w64's headers default to Windows 7; the Windows SDK's (and the launcher) to Windows 10
+        target_compile_definitions(VCSLauncher PRIVATE _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+    endif()
 else()
     # Linux. Everything comes from the distribution (python3 tools/build.py --check-deps lists the packages):
     # pkg-config modules for the window systems, fonts and D-Bus; Vulkan headers (the loader is opened at run time);
@@ -210,7 +252,10 @@ if(NOT _vcs_version_numbers)
     message(FATAL_ERROR "VERSION must start with major.minor.patch (it holds '${VCS_VERSION}')")
 endif()
 target_compile_definitions(VCSLauncher PRIVATE VCS_VERSION_MAJOR=${CMAKE_MATCH_1} VCS_VERSION_MINOR=${CMAKE_MATCH_2}
-                           VCS_VERSION_PATCH=${CMAKE_MATCH_3} "VCS_VERSION_TEXT=\"${VCS_VERSION}\"")
+                           VCS_VERSION_PATCH=${CMAKE_MATCH_3})
+# the text from a header: a quoted define on the command line loses its quotes in llvm-windres (llvm-mingw)
+file(CONFIGURE OUTPUT "${VCS_LAUNCHER_SHADERS}/launcher_version.h" CONTENT "#define VCS_VERSION_TEXT \"${VCS_VERSION}\"
+")
 
 target_include_directories(VCSLauncher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${VCS_ROOT}/src" "${VCS_LAUNCHER_SHADERS}")
 # next to tools/ and the source, where a release has it (the launcher finds the repository from its own folder)
@@ -219,4 +264,9 @@ if(MSVC)
     # one self-contained exe: the static C++ runtime, nothing to install
     set_property(TARGET VCSLauncher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
     target_compile_options(VCSLauncher PRIVATE /W3 /utf-8)
+elseif(MINGW)
+    # llvm-mingw: the same - libc++, libunwind and winpthread linked in, only the system's UCRT left (tools/release.py
+    # checks the imports); wWinMain needs -municode
+    target_compile_options(VCSLauncher PRIVATE -Wall -Wno-missing-field-initializers -Wno-unknown-pragmas)
+    target_link_options(VCSLauncher PRIVATE -municode -static $<$<CONFIG:Release>:-s>)
 endif()

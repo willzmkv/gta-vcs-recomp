@@ -93,7 +93,7 @@ def check(out, port=None):
     os.makedirs(out, exist_ok=True)
     shot = lambda n: (g.cmd("screenshot " + os.path.join(out, n + ".png")), tour.picture_stats(os.path.join(out, n + ".png")))[1]
     res, waits = {}, []
-    g = rig.Game.start(save=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"), name="shakedown", port=port,
+    g = rig.Game.start(save=rig.default_save(), name="shakedown", port=port,
                        env={"VCS_TIMING": "1", "VCS_FPS": "144"})
     try:
         g.wait_ingame()

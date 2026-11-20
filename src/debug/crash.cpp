@@ -16,6 +16,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <dbghelp.h>
+#include "win_symbols.h"
 #elif defined(__linux__)
 #include <dlfcn.h>
 #include <execinfo.h>
@@ -58,7 +59,7 @@ namespace vcs
                 DWORD64 disp = 0;
                 IMAGEHLP_LINE64 line{sizeof(line)};
                 DWORD lineDisp = 0;
-                const bool haveSym = SymFromAddr(process, frame.AddrPC.Offset, &disp, sym);
+                const bool haveSym = symFromAddr(process, frame.AddrPC.Offset, &disp, sym);
                 const bool haveLine = SymGetLineFromAddr64(process, frame.AddrPC.Offset, &lineDisp, &line);
                 std::fprintf(stderr, "[crash]   #%02d %016llx %s+0x%llx %s:%lu\n", i,
                              static_cast<unsigned long long>(frame.AddrPC.Offset), haveSym ? sym->Name : "?",

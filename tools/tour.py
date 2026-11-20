@@ -155,7 +155,7 @@ def main():
     ap.add_argument("--step", type=float, default=250.0)
     ap.add_argument("--settle", type=float, default=2.5)
     ap.add_argument("--hour", type=int, default=12)
-    ap.add_argument("--save", default=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"))
+    ap.add_argument("--save", default=rig.default_save())
     ap.add_argument("--limit", type=int, default=0, help="stop after N points")
     ap.add_argument("--every", type=int, default=1, help="take every K-th point (quick subset)")
     ap.add_argument("--slow-ms", type=float, default=40.0)

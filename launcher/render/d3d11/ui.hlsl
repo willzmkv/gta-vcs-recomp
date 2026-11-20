@@ -21,6 +21,7 @@ cbuffer Frame : register(b0)
 };
 
 Texture2D<float> glyph_atlas : register(t0);
+Texture2D<float4> image_atlas : register(t1);
 SamplerState atlas_sampler : register(s0);
 
 static const uint KIND_RECT = 0;
@@ -29,6 +30,7 @@ static const uint KIND_SHADOW = 2;
 static const uint KIND_LINE = 3;
 static const uint KIND_ARC = 4;
 static const uint KIND_QUAD = 5;
+static const uint KIND_IMAGE = 6;
 
 struct Instance
 {
@@ -84,7 +86,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID, Instance inst)
     o.position = float4(p * (2.0 / viewport_size) * float2(1, -1) + float2(-1, 1), 0, 1);
     o.pixel = p;
     float2 t = (p - inst.rect.xy) / max(inst.rect.zw - inst.rect.xy, 1e-5);
-    o.uv = lerp(inst.uv.xy, inst.uv.zw, t) * atlas_inv_size;
+    o.uv = lerp(inst.uv.xy, inst.uv.zw, t) * (inst.kind == KIND_IMAGE ? float2(1.0, 1.0) : atlas_inv_size);
     o.rect = inst.rect;
     o.radii = inst.radii;
     o.color0 = inst.color0;
@@ -266,6 +268,18 @@ float4 shade(VSOut i)
         float a = rounded_box_shadow(p, half_size, min(i.radii.x, min(half_size.x, half_size.y)), sigma) * i.color0.a;
         a = saturate(a + dither(i.pixel));
         return float4(i.color0.rgb * a, a);
+    }
+
+    if (i.kind == KIND_IMAGE)
+    {
+        float d = sd_round_box(p, half_size, i.radii);
+        float outer = saturate(0.5 - d);
+        float border = i.params.x;
+        float inner = saturate(0.5 - (d + border));
+        float4 tex = image_atlas.SampleLevel(atlas_sampler, i.uv, 0);
+        float4 fill_pm = float4(tex.rgb * i.color0.rgb, tex.a) * i.color0.a;
+        float4 border_pm = float4(i.border_color.rgb * i.border_color.a, i.border_color.a);
+        return lerp(border_pm, fill_pm, border > 0 ? inner : 1.0) * outer;
     }
 
     // rounded rectangle: a gradient fill inside a border; half a pixel either side of the edge is the AA band

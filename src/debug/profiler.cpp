@@ -20,6 +20,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <dbghelp.h>
+#include "win_symbols.h"
 #include <string>
 #elif defined(__linux__)
 #include <csignal>
@@ -92,6 +93,12 @@ namespace vcs
             return nullptr;
         }
 
+        // the word at a suspended thread's stack pointer. Not inlined: clang's __try (clang-cl and llvm-mingw alike)
+        // only catches a fault raised inside a call, not one in the __try body's own instructions.
+        [[gnu::noinline]] DWORD64 stackWord(DWORD64 rsp)
+        {
+            return *reinterpret_cast<const volatile DWORD64 *>(rsp);
+        }
         // up to n return addresses of a suspended thread's stack from its context. A fault while unwinding (a thread
         // caught where its unwind data does not describe the stack yet) ends the walk instead of the process. Only
         // through vcs.exe's code: a frame in another module (a system DLL) ends the walk.
@@ -108,7 +115,7 @@ namespace vcs
                     PRUNTIME_FUNCTION fe = lookupFunction(u.Rip, &imageBase);
                     if (!fe)
                     {
-                        u.Rip = *reinterpret_cast<const DWORD64 *>(u.Rsp); // a leaf: the return address on top
+                        u.Rip = stackWord(u.Rsp); // a leaf: the return address on top
                         u.Rsp += 8;
                     }
                     else
@@ -248,7 +255,7 @@ namespace vcs
                 sym->MaxNameLen = 255;
                 DWORD64 displacement = 0;
                 GeneratedInfo info;
-                const bool known = SymFromAddr(GetCurrentProcess(), host, &displacement, sym) != 0;
+                const bool known = symFromAddr(GetCurrentProcess(), host, &displacement, sym) != 0;
                 info.generated = !known || std::strncmp(sym->Name, "FUN_", 4) == 0 || std::strstr(sym->Name, "::FUN_") != nullptr;
                 if (known && sym->Size && displacement == 0)
                     info.size = sym->Size;
@@ -276,7 +283,7 @@ namespace vcs
                 sym->SizeOfStruct = sizeof(SYMBOL_INFO);
                 sym->MaxNameLen = 255;
                 DWORD64 displacement = 0;
-                return SymFromAddr(GetCurrentProcess(), addr, &displacement, sym) ? std::string(sym->Name) : std::string("?");
+                return symFromAddr(GetCurrentProcess(), addr, &displacement, sym) ? std::string(sym->Name) : std::string("?");
             };
             std::map<std::vector<uintptr_t>, uint64_t> stacks; // frames (innermost first) -> samples
             std::unordered_map<uint32_t, uint64_t> hits;    // guest function -> samples
@@ -497,7 +504,7 @@ namespace vcs
                     sym->MaxNameLen = 255;
                     DWORD64 displacement = 0;
                     std::string name;
-                    if (SymFromAddr(GetCurrentProcess(), rip, &displacement, sym))
+                    if (symFromAddr(GetCurrentProcess(), rip, &displacement, sym))
                         name = sym->Name;
                     else
                     {
@@ -527,7 +534,7 @@ namespace vcs
                         sym->SizeOfStruct = sizeof(SYMBOL_INFO);
                         sym->MaxNameLen = 255;
                         DWORD64 displacement = 0;
-                        if (!SymFromAddr(GetCurrentProcess(), rip, &displacement, sym) || !std::strstr(sym->Name, linesOf))
+                        if (!symFromAddr(GetCurrentProcess(), rip, &displacement, sym) || !std::strstr(sym->Name, linesOf))
                             continue;
                         IMAGEHLP_LINE64 line{};
                         line.SizeOfStruct = sizeof(line);

@@ -17,6 +17,7 @@
 #include <thread>
 #include <xmmintrin.h>
 #include <cstring>  // [gta-recomp] libstdc++ (Linux) does not bring it in
+#include "runtime/ps2_host_std.h"
 
 namespace ps2_render_worker
 {
@@ -50,7 +51,7 @@ namespace ps2_render_worker
             // statistics (mutex)
             uint64_t items = 0u, frames = 0u, postWaits = 0u, postWaitNs = 0u;
             uint64_t fences[kReasons]{}, fenceWaits[kReasons]{}, fenceWaitNs = 0u;
-            std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
+            std::chrono::steady_clock::time_point lastLog = ps2x::hostNow();
         };
 
         // Never destroyed: the worker may still be parked on it while static destructors run at exit.
@@ -67,7 +68,7 @@ namespace ps2_render_worker
         uint64_t nowNs()
         {
             return static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                std::chrono::duration_cast<std::chrono::nanoseconds>(ps2x::hostNow().time_since_epoch()).count());
         }
 
         uint32_t framesAhead()
@@ -277,7 +278,7 @@ namespace ps2_render_worker
             }();
             if (!log)
                 return;
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             if (now - s.lastLog < std::chrono::seconds(5))
                 return;
             const double secs = std::chrono::duration<double>(now - s.lastLog).count();
@@ -492,7 +493,7 @@ namespace ps2_render_worker
         std::unique_lock<std::mutex> lock(g.mutex);
         g.drainWaiters.fetch_add(1u, std::memory_order_seq_cst);
         while (!done())
-            g.doneCv.wait_for(lock, std::chrono::milliseconds(1)); // (the stage notifies when idle; the timeout is a guard)
+            ps2x::waitFor(g.doneCv, lock, std::chrono::milliseconds(1)); // (the stage notifies when idle; the timeout is a guard)
         g.drainWaiters.fetch_sub(1u, std::memory_order_seq_cst);
     }
 

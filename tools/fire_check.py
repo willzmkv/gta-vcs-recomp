@@ -5,7 +5,7 @@
 
 Reported by the player (2026-11-03): no flames at all - the flame-thrower's, a molotov's, a burning car's. One hidden run
 per variant (default: `as-is`, and `ps2-memory` with VCS_STREAMING_MB=0) from the card copy (default the rig's user copy)
-at gamefiles_check's street, noon, the player invincible: a car 7 m ahead set to health 200 (it burns below 250) and
+at the police spot (tools/spots.py), noon, the player invincible: a car 7 m ahead set to health 200 (it burns below 250) and
 photographed every 0.6 s (`<variant>_car_N.png`); the flame-thrower (type 33) fired
 (`<variant>_flame_N.png`); a molotov (type 17) thrown (`<variant>_molotov_N.png`), every 0.4 s - all with the game's
 camera behind him (the free camera takes the controls: no shots). Pass = the game alive and fire on screen: fire-coloured
@@ -21,8 +21,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import gamefiles_check  # noqa: E402
 import rig  # noqa: E402
+import spots  # noqa: E402
 import toolchain as tc  # noqa: E402
 
 SET_CAR_HEALTH = 0x014C
@@ -57,16 +57,24 @@ def facing(g):
 
 def run(out, name, env, save):
     g = rig.Game.start(save=save, name='fire_' + name, seconds=240, env=env)
-    x, y, heading = gamefiles_check.STREET
+    # the player's control scheme is theirs (vcs.ini): this run takes the PS2's - mouse fires, no trigger schemes.
+    # Set through the control channel, a hidden run's settings last for the run only (2026-11-17: with the Modern
+    # scheme chosen the checks saw no fire at all)
+    pinned = {'pad.trigger_shoot': 0, 'pad.trigger_drive': 0, 'pad.free_aim': 0}
     shots = []
     try:
         g.wait_ingame(timeout=180)
+        for key, value in pinned.items():
+            g.cmd('setting %s %d' % (key, value))
         g.set_time(12)
         g.weather(0)
         g.invincible(True)
-        for _ in range(4):
-            g.teleport(x, y, -100.0, heading=heading)
-            time.sleep(3)
+        # the police spot (tools/spots.py): the game's camera behind Vic on a street. gamefiles_check's street left the
+        # camera looking straight down on the sand with the car out of the picture (2026-11-17), and the sand's colour
+        # passed for fire at the old exposure of 120
+        spots.wait_after_load()
+        spots.put(g, 'police', camera=False)
+        time.sleep(3)
         S = rig.Scm
         (px, py, pz), (fx, fy) = facing(g)
         cx, cy = px + fx * 7.0, py + fy * 7.0

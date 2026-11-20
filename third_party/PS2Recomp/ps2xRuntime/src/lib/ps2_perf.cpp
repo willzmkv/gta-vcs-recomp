@@ -20,6 +20,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "runtime/ps2_host_std.h"
 
 namespace ps2perf
 {
@@ -39,7 +40,7 @@ namespace ps2perf
         uint64_t nowNs()
         {
             return static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                std::chrono::duration_cast<std::chrono::nanoseconds>(ps2x::hostNow().time_since_epoch()).count());
         }
 
         struct Sample

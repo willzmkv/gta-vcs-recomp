@@ -19,6 +19,14 @@ namespace vcs::memory
     // Where the upper memory starts (the PS2's 32 MB), and the first byte after the streaming heap there: what is free for
     // the port beyond it (resident model replacements, T10 step 4). 0 when the game's heap is used.
     constexpr uint32_t kExtendedBase = 0x02000000u;
+    // The HD world's extra cells (game/vcs_world_hd.cpp): their pieces and the drawn lists, past the streaming heap's
+    // largest size and below the 2 MB reserve at the top (runtime/ps2_memory.h: 128 MB on the host).
+    constexpr uint32_t kHdWorldBase = 0x04000000u;
+    constexpr uint32_t kHdWorldSize = 0x03000000u;
+    // The world sectors' cached packets (the heap 0x6F3DB8, 512 KB in the main heap on the PS2: full, every sector's
+    // packet is built again each frame into the frame's packet buffer) - 8 MB here with Streaming memory above the PS2's.
+    constexpr uint32_t kPacketHeapBase = 0x07000000u;
+    constexpr uint32_t kPacketHeapSize = 0x00800000u;
     uint32_t extendedUsedEnd();
     // The Streaming memory setting in MB (0: the PS2's heap, inside the main heap). Above 0 the main heap keeps the PS2's
     // 5.4 MB, which the larger pools use (game/vcs_distance.cpp).

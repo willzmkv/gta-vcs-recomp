@@ -19,6 +19,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "runtime/ps2_host_std.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -90,7 +91,7 @@ namespace ps2control
                 c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             struct Named { const char *name; int key; };
             static const Named named[] = {
-                {"return", platform::KEY_ENTER}, {"enter", platform::KEY_ENTER}, {"start", platform::KEY_ENTER}, {"shift", platform::KEY_LEFT_SHIFT}, {"shiftkey", platform::KEY_LEFT_SHIFT},
+                {"return", platform::KEY_ENTER}, {"enter", platform::KEY_ENTER}, {"start", platform::KEY_ESCAPE}, {"shift", platform::KEY_LEFT_SHIFT}, {"shiftkey", platform::KEY_LEFT_SHIFT}, // [gta-recomp] "start": Start's default key (Escape)
                 {"cross", platform::KEY_LEFT_SHIFT}, {"space", platform::KEY_SPACE}, {"square", platform::KEY_SPACE}, {"triangle", platform::KEY_F}, {"ctrl", platform::KEY_LEFT_CONTROL},
                 {"controlkey", platform::KEY_LEFT_CONTROL}, {"circle", platform::KEY_LEFT_CONTROL}, {"escape", platform::KEY_ESCAPE}, {"esc", platform::KEY_ESCAPE},
                 {"backspace", platform::KEY_BACKSPACE}, {"back", platform::KEY_BACKSPACE}, {"select", platform::KEY_BACKSPACE}, {"tab", platform::KEY_TAB}, {"up", platform::KEY_UP},
@@ -219,7 +220,7 @@ namespace ps2control
                 }
                 const int ms = arg.empty() ? 150 : std::max(1, std::atoi(arg.c_str()));
                 setInjected(key, true);
-                g_releases.push_back({key, std::chrono::steady_clock::now() + std::chrono::milliseconds(ms), command});
+                g_releases.push_back({key, ps2x::hostNow() + std::chrono::milliseconds(ms), command});
             }
             else if (verb == "perf")
                 command->reply.set_value("ok " + ps2perf::summaryLine());
@@ -339,7 +340,7 @@ namespace ps2control
         for (ScreenshotRequest &shot : shots)
             shoot(shot.path, std::move(shot.done));
         g_injectedEdge.fill(false);
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         for (size_t i = 0; i < g_releases.size();)
         {
             if (g_releases[i].at > now)

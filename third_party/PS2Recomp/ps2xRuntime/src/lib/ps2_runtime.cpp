@@ -47,6 +47,7 @@
 #include <mutex>
 #include <sstream>
 #include <ctime> // [gta-recomp] clock_gettime (PS2X_HOST_SPIKES)
+#include "runtime/ps2_host_std.h"
 
 namespace ps2_stubs
 {
@@ -411,13 +412,13 @@ static void traceVu1Program(uint32_t startPc, uint64_t kicks, uint32_t endPc)
         return;
     struct Stat { uint64_t runs = 0, kicks = 0, zeroKick = 0; uint32_t lastEnd = 0; };
     static std::map<uint32_t, Stat> stats;
-    static auto last = std::chrono::steady_clock::now();
+    static auto last = ps2x::hostNow();
     Stat &st = stats[startPc];
     ++st.runs;
     st.kicks += kicks;
     st.zeroKick += kicks == 0u ? 1u : 0u;
     st.lastEnd = endPc;
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = ps2x::hostNow();
     if (now - last < std::chrono::seconds(5))
         return;
     last = now;
@@ -551,7 +552,7 @@ namespace
 
     int64_t presentNowNs()
     {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(ps2x::hostNow().time_since_epoch()).count();
     }
 
     // the display registers as they are now; the frame ends after the GS work posted before it
@@ -619,7 +620,7 @@ bool ps2WaitHostTick()
     ps2perf::PhaseScope waiting(ps2perf::Phase::Wait);
     std::unique_lock<std::mutex> lock(g_tickMutex);
     // the 100 ms timeout is a guard (a main thread held up: a window being dragged), not pacing
-    g_tickCv.wait_for(lock, std::chrono::milliseconds(100), [] { return g_hostTick != g_tickTaken; });
+    ps2x::waitFor(g_tickCv, lock, std::chrono::milliseconds(100), [] { return g_hostTick != g_tickTaken; });
     g_tickTaken = g_hostTick;
     return true;
 }
@@ -680,12 +681,12 @@ void PS2Runtime::presentGpuVBlank(uint64_t vsyncTick)
     if (s_fps)
     {
         static uint64_t s_lastFb = 0, s_flips = 0, s_vblanks = 0;
-        static auto s_since = std::chrono::steady_clock::now();
+        static auto s_since = ps2x::hostNow();
         const uint64_t fb = m_memory.gs().dispfb1 ^ (m_memory.gs().dispfb2 << 1);
         s_flips += fb != s_lastFb;
         s_lastFb = fb;
         ++s_vblanks;
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         const double secs = std::chrono::duration<double>(now - s_since).count();
         if (secs >= 2.0)
         {
@@ -1026,9 +1027,9 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
         static constexpr uint64_t kEeHz = 294912000u;
         static constexpr uint64_t kMaxExtra = kEeHz / 20u; // 50 ms per batch
         static constexpr uint64_t kMaxLag = kEeHz;         // 1 s
-        static Clock::time_point origin = Clock::now();
+        static Clock::time_point origin = ps2x::hostNow();
         static uint64_t given = 0u; // EE-cycle equivalents handed to the IOP since `origin`
-        const auto hostNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - origin).count();
+        const auto hostNs = std::chrono::duration_cast<std::chrono::nanoseconds>(ps2x::hostNow() - origin).count();
         const uint64_t hostCycles = static_cast<uint64_t>(static_cast<double>(hostNs) * (kEeHz / 1e9));
         given += cycles;
         if (hostCycles > given + kMaxLag)
@@ -2135,7 +2136,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     }
 
     static const bool traceVu0 = std::getenv("PS2X_TRACE_VU0") != nullptr;
-    const auto statStart = traceVu0 ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const auto statStart = traceVu0 ? ps2x::hostNow() : std::chrono::steady_clock::time_point{};
     // [gta-recomp] the native for a start pc is looked up (code compared / hashed) again only after VU0 code memory
     // changed: per call that memcmp of the program was ~1% of the game thread
     struct NativeSlot
@@ -2206,8 +2207,8 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         if (traceVu0)
         {
             static std::map<uint32_t, std::pair<uint64_t, double>> stats;
-            static auto last = std::chrono::steady_clock::now();
-            const auto now = std::chrono::steady_clock::now();
+            static auto last = ps2x::hostNow();
+            const auto now = ps2x::hostNow();
             auto &st = stats[startPC];
             ++st.first;
             st.second += std::chrono::duration<double, std::milli>(now - statStart).count();
@@ -3237,12 +3238,12 @@ void PS2Runtime::run()
         const double spikeCpu1 = spikeMs > 0.0 ? threadCpuMs() : 0.0;
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
-        const auto uploadStart = std::chrono::steady_clock::now();
+        const auto uploadStart = ps2x::hostNow();
         UploadFrame(frameTex, shownTex, this, presentWidth, presentHeight);
         spikeT[2] = SpikeClock::now();
         if (spikeMs > 0.0)
             spikeCpuFrames = threadCpuMs() - spikeCpu1;
-        ps2perf::hostFrame(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadStart).count()); // [gta-recomp]
+        ps2perf::hostFrame(std::chrono::duration<double, std::milli>(ps2x::hostNow() - uploadStart).count()); // [gta-recomp]
 
         // [gta-recomp] display aspect: 4:3 (the PS2's TV), the widescreen ratio for 3D frames (render/presenter.h)
         float aspect = present::displayAspect(!hwRenderer() || hwRenderer()->presenter().showing3d());

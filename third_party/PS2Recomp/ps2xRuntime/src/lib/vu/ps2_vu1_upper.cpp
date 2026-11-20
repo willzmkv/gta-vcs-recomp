@@ -525,7 +525,7 @@ namespace
     }
 
     // A sum / difference / product of two VU floats: clamping the float result gives the same value as the
-    // interpreter's exact (long double) check — the result is zero / denormal / overflowing exactly when the exact
+    // interpreter's exact (double) check — the result is zero / denormal / overflowing exactly when the exact
     // one is, with the same sign (round toward zero).
     inline float fastPlainResult(float value)
     {
@@ -533,7 +533,7 @@ namespace
     }
 
     // acc ± a·b: the float result can differ from the exact one near zero, so decide as
-    // normalizeFmacExactResult does, on the exact value (long double = double here).
+    // normalizeFmacExactResult does, on the exact value (a double, as the interpreter's).
     inline float fastExactResult(float value, double exact)
     {
         uint32_t bits;

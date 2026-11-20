@@ -7,6 +7,7 @@ using BYTE = unsigned char; // fxc's /Fh headers declare `const BYTE name[]`
 #include "dxbc/gs_draw_vs.h"
 #include "dxbc/gs_world_vs.h"
 #include "dxbc/gs_lit_vs.h"
+#include "dxbc/gs_lit_inst_vs.h"
 #include "dxbc/gs_draw_ps0.h"
 #include "dxbc/gs_draw_ps0_dual.h"
 #include "dxbc/gs_draw_ps1.h"
@@ -48,6 +49,7 @@ using BYTE = unsigned char; // fxc's /Fh headers declare `const BYTE name[]`
 #include "spirv/gs_draw_vs.h"
 #include "spirv/gs_world_vs.h"
 #include "spirv/gs_lit_vs.h"
+#include "spirv/gs_lit_inst_vs.h"
 #include "spirv/gs_draw_ps0.h"
 #include "spirv/gs_draw_ps0_dual.h"
 #include "spirv/gs_draw_ps1.h"
@@ -121,6 +123,7 @@ namespace render
                 {{kGsDrawPS5NoZ, sizeof(kGsDrawPS5NoZ)}, {kGsDrawPS5DualNoZ, sizeof(kGsDrawPS5DualNoZ)}},
                 {{kGsDrawPS6NoZ, sizeof(kGsDrawPS6NoZ)}, {kGsDrawPS6DualNoZ, sizeof(kGsDrawPS6DualNoZ)}},
             },
+            {kGsLitInstVS, sizeof(kGsLitInstVS)},
         };
         if (backend == rhi::Backend::D3D11 || backend == rhi::Backend::D3D12) // (DXBC runs on D3D12 as it is)
             return dxbc;
@@ -156,6 +159,7 @@ namespace render
                 {{kGsDrawPS5NoZ_spv, sizeof(kGsDrawPS5NoZ_spv)}, {kGsDrawPS5DualNoZ_spv, sizeof(kGsDrawPS5DualNoZ_spv)}},
                 {{kGsDrawPS6NoZ_spv, sizeof(kGsDrawPS6NoZ_spv)}, {kGsDrawPS6DualNoZ_spv, sizeof(kGsDrawPS6DualNoZ_spv)}},
             },
+            {kGsLitInstVS_spv, sizeof(kGsLitInstVS_spv)},
         };
         if (backend == rhi::Backend::Vulkan)
             return spirv;

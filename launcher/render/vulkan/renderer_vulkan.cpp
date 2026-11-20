@@ -184,7 +184,7 @@ namespace render
             VkCommandBuffer commands = VK_NULL_HANDLE;
             VkFence fence = VK_NULL_HANDLE;
             VkSemaphore acquired = VK_NULL_HANDLE;
-            Buffer instances, staging;
+            Buffer instances, staging, imageStaging;
             bool submitted = false;
         };
 
@@ -234,6 +234,11 @@ namespace render
             int atlasSize = 0;
             uint32_t atlasGeneration = 0;
             bool atlasFresh = false; // created, never written: its layout is UNDEFINED
+
+            VkImage imageAtlasImage = VK_NULL_HANDLE;
+            VkImageView imageAtlasView = VK_NULL_HANDLE;
+            VkDeviceMemory imageAtlasMemory = VK_NULL_HANDLE;
+            uint32_t imageAtlasGeneration = 0;
 
             Frame frames[kFramesInFlight];
             int frame = 0;
@@ -833,12 +838,13 @@ namespace render
             if (VkResult r = vk.vkCreateSampler(d.device, &s, nullptr, &d.sampler); r != VK_SUCCESS)
                 return fail(error, "vkCreateSampler", r);
 
-            // the bindings tools/hlsl_spirv.py gives the registers: texture t0 -> 16, sampler s0 -> 32
-            VkDescriptorSetLayoutBinding bindings[2]{};
+            // the bindings tools/hlsl_spirv.py gives the registers: texture t0 -> 16, texture t1 -> 17, sampler s0 -> 32
+            VkDescriptorSetLayoutBinding bindings[3]{};
             bindings[0] = {16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-            bindings[1] = {32, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+            bindings[1] = {17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+            bindings[2] = {32, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
             VkDescriptorSetLayoutCreateInfo sl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-            sl.bindingCount = 2;
+            sl.bindingCount = 3;
             sl.pBindings = bindings;
             if (VkResult r = vk.vkCreateDescriptorSetLayout(d.device, &sl, nullptr, &d.setLayout); r != VK_SUCCESS)
                 return fail(error, "vkCreateDescriptorSetLayout", r);
@@ -851,7 +857,7 @@ namespace render
             if (VkResult r = vk.vkCreatePipelineLayout(d.device, &pl, nullptr, &d.pipelineLayout); r != VK_SUCCESS)
                 return fail(error, "vkCreatePipelineLayout", r);
 
-            VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1}};
+            VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1}};
             VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
             dp.maxSets = 1;
             dp.poolSizeCount = 2;
@@ -976,6 +982,20 @@ namespace render
             d.atlasSize = 0;
         }
 
+        void destroyImageAtlas()
+        {
+            if (d.imageAtlasView)
+                vk.vkDestroyImageView(d.device, d.imageAtlasView, nullptr);
+            if (d.imageAtlasImage)
+                vk.vkDestroyImage(d.device, d.imageAtlasImage, nullptr);
+            if (d.imageAtlasMemory)
+                vk.vkFreeMemory(d.device, d.imageAtlasMemory, nullptr);
+            d.imageAtlasView = VK_NULL_HANDLE;
+            d.imageAtlasImage = VK_NULL_HANDLE;
+            d.imageAtlasMemory = VK_NULL_HANDLE;
+            d.imageAtlasGeneration = 0;
+        }
+
         void destroy()
         {
             if (d.device)
@@ -985,6 +1005,7 @@ namespace render
                 {
                     destroyBuffer(f.instances);
                     destroyBuffer(f.staging);
+                    destroyBuffer(f.imageStaging);
                     if (f.acquired)
                         vk.vkDestroySemaphore(d.device, f.acquired, nullptr);
                     if (f.fence)
@@ -993,6 +1014,7 @@ namespace render
                         vk.vkDestroyCommandPool(d.device, f.pool, nullptr);
                     f = Frame();
                 }
+                destroyImageAtlas();
                 destroyAtlas();
                 destroyTargets();
                 if (d.swapchain)
@@ -1118,6 +1140,50 @@ namespace render
             atlas.dirtyX1 = atlas.dirtyY1 = 0;
         }
 
+        void uploadImageAtlas(Frame &f, VkCommandBuffer cmd)
+        {
+            if (d.imageAtlasImage && d.imageAtlasGeneration == imageAtlas.generation)
+                return;
+            vk.vkDeviceWaitIdle(d.device);
+            destroyImageAtlas();
+            const bool hasImages = !imageAtlas.pixels.empty() && imageAtlas.width > 0 && imageAtlas.height > 0;
+            const int w = hasImages ? imageAtlas.width : 1;
+            const int h = hasImages ? imageAtlas.height : 1;
+            if (!createImage(VK_FORMAT_R8G8B8A8_UNORM, w, h,
+                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, d.imageAtlasImage,
+                             d.imageAtlasMemory, d.imageAtlasView))
+            {
+                destroyImageAtlas();
+                return;
+            }
+            d.imageAtlasGeneration = imageAtlas.generation;
+            VkDescriptorImageInfo image{VK_NULL_HANDLE, d.imageAtlasView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, d.descriptorSet, 17, 0, 1,
+                                       VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &image, nullptr, nullptr};
+            vk.vkUpdateDescriptorSets(d.device, 1, &write, 0, nullptr);
+
+            const size_t bytes = size_t(w) * size_t(h) * 4;
+            if (!ensureBuffer(f.imageStaging, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+                return;
+            if (hasImages)
+                std::memcpy(f.imageStaging.mapped, imageAtlas.pixels.data(), bytes);
+            else
+                std::memset(f.imageStaging.mapped, 0, bytes);
+            imageBarrier(cmd, d.imageAtlasImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkBufferImageCopy region{};
+            region.bufferRowLength = uint32_t(w);
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageOffset = {0, 0, 0};
+            region.imageExtent = {uint32_t(w), uint32_t(h), 1};
+            vk.vkCmdCopyBufferToImage(cmd, f.imageStaging.buffer, d.imageAtlasImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            imageBarrier(cmd, d.imageAtlasImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            if (hasImages)
+                rendererStats.uploadBytes += bytes;
+        }
+
         void rebuild()
         {
             // driver reset, GPU gone: start over from what the CPU has
@@ -1218,6 +1284,7 @@ namespace render
         VkCommandBuffer cmd = f.commands;
         vk.vkBeginCommandBuffer(cmd, &begin);
         uploadAtlas(f, cmd);
+        uploadImageAtlas(f, cmd);
 
         const size_t count = draw.instances.size();
         const bool drawing = count && d.atlasImage &&

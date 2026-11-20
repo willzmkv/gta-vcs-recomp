@@ -18,15 +18,23 @@ set(PS2X_BUILD_ANALYZER ${VCS_BUILD_TOOLS} CACHE BOOL "" FORCE)
 set(PS2X_BUILD_TEST OFF CACHE BOOL "" FORCE)
 set(PS2X_BUILD_STUDIO OFF CACHE BOOL "" FORCE)
 
-# Linux (docs/LINUX.md): clang 19+ only - the same compiler as clang-cl on Windows, and PS2_GUEST_CC needs its
-# preserve_none. Linked with lld (ThinLTO). Compile and ThinLTO jobs follow the memory: a unity batch of generated
-# code takes up to ~2 GB to compile.
-if(NOT WIN32)
+# Linux (docs/LINUX.md) and Windows' llvm-mingw (DECISIONS.md 2026-11-03): clang 19+ only - the same compiler as
+# clang-cl, and PS2_GUEST_CC needs its preserve_none. Linked with lld (ThinLTO).
+if(NOT MSVC)
     if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19)
-        message(FATAL_ERROR "Linux builds need clang 19 or newer (found ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}). "
-                            "python tools/build.py picks it up when installed (docs/LINUX.md)")
+        message(FATAL_ERROR "The game needs clang 19 or newer (found ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}). "
+                            "python tools/build.py picks it up (docs/LINUX.md; Windows: llvm-mingw, downloaded)")
     endif()
     add_link_options(-fuse-ld=lld)
+endif()
+# llvm-mingw: mingw-w64's headers default to Windows 7, the Windows SDK's to Windows 10 - the same APIs as clang-cl's
+# build. Every program is linked -static: libc++, libunwind and winpthread inside, only the system's UCRT left.
+if(MINGW)
+    add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
+    add_link_options(-static)
+endif()
+# Linux: compile and ThinLTO jobs follow the memory - a unity batch of generated code takes up to ~2 GB to compile.
+if(NOT WIN32)
     cmake_host_system_information(RESULT _vcs_mem_mb QUERY TOTAL_PHYSICAL_MEMORY)
     cmake_host_system_information(RESULT _vcs_cores QUERY NUMBER_OF_LOGICAL_CORES)
     math(EXPR _vcs_jobs "${_vcs_mem_mb} / 2048")
@@ -58,6 +66,42 @@ list(FILTER VCS_SOURCES EXCLUDE REGEX "/src/(platform|rhi|render)/")
 # VU1 microprograms compiled to C++ by tools/vu1_recomp.py (from the user's ELF; see game/vcs/vu1_uploads.txt)
 if(EXISTS "${CMAKE_SOURCE_DIR}/generated/vu1/vu1_compiled.cpp")
     list(APPEND VCS_SOURCES "${CMAKE_SOURCE_DIR}/generated/vu1/vu1_compiled.cpp")
+endif()
+# Worker copies of the animation node code (tools/anim_worker_gen.py, from generated/ee; src/game/vcs_anim.cpp): made
+# again when the generated code or the tool changes
+set(VCS_ANIM_WORKER OFF)
+if(VCS_HAVE_GENERATED)
+    find_package(Python3 COMPONENTS Interpreter) # (tools/build.py passes its own; without one: no worker copies)
+endif()
+if(VCS_HAVE_GENERATED AND Python3_FOUND)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/tools/anim_worker_gen.py" "${VCS_GENERATED_DIR}/register_functions.cpp")
+    execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/anim_worker_gen.py" "${VCS_GENERATED_DIR}"
+                            "${CMAKE_SOURCE_DIR}/generated/anim/anim_worker.cpp"
+                    RESULT_VARIABLE _vcs_anim_result OUTPUT_VARIABLE _vcs_anim_out ERROR_VARIABLE _vcs_anim_out)
+    message(STATUS "${_vcs_anim_out}")
+    if(_vcs_anim_result EQUAL 0 AND EXISTS "${CMAKE_SOURCE_DIR}/generated/anim/anim_worker.cpp")
+        list(APPEND VCS_SOURCES "${CMAKE_SOURCE_DIR}/generated/anim/anim_worker.cpp")
+        set(VCS_ANIM_WORKER ON)
+    endif()
+endif()
+
+# Kenney's Input Prompts (assets/prompts/kenney, CC0) for the button prompts, embedded in the game: made again when an
+# icon or the tool changes (tools/kenney_prompts.py); without Python an empty table (the prompts' classic drawing)
+if(VCS_HAVE_GENERATED)
+    set(_vcs_prompt_icons_cpp "${CMAKE_BINARY_DIR}/generated_assets/prompt_icons.cpp")
+    file(GLOB _vcs_prompt_icons CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/assets/prompts/kenney/*.png"
+                                                    "${CMAKE_SOURCE_DIR}/assets/fonts/oswald/*.ttf")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tools/kenney_prompts.py" ${_vcs_prompt_icons})
+    if(Python3_FOUND)
+        execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/kenney_prompts.py" embed "${_vcs_prompt_icons_cpp}"
+                        OUTPUT_VARIABLE _vcs_icons_out ERROR_VARIABLE _vcs_icons_out)
+        message(STATUS "${_vcs_icons_out}")
+    endif()
+    if(NOT EXISTS "${_vcs_prompt_icons_cpp}")
+        file(WRITE "${_vcs_prompt_icons_cpp}" "#include <cstddef>\nnamespace vcs::glyphart\n{\n    struct EmbeddedIcon\n    {\n        const char *name;\n        const unsigned char *data;\n        size_t size;\n    };\n    extern const EmbeddedIcon kPromptIcons[] = {{nullptr, nullptr, 0}};\n    extern const size_t kPromptIconCount = 0;\n    extern const unsigned char *const kSubtitleFont = nullptr;\n    extern const size_t kSubtitleFontSize = 0;\n}\n")
+    endif()
+    list(APPEND VCS_SOURCES "${_vcs_prompt_icons_cpp}")
 endif()
 
 set(PS2X_RUNNER_SOURCE_DIR "${VCS_GENERATED_DIR}" CACHE PATH "" FORCE)
@@ -91,16 +135,37 @@ if(VCS_HAVE_GENERATED)
     target_include_directories(ps2EntryRunner PRIVATE "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(ps2EntryRunner PRIVATE vcs_host) # main.cpp: settings menu (Dear ImGui), presenter aspect
     # Windows: our manifest in place of the linker's, for the UTF-8 code page (non-ASCII folders; src/vcs.manifest)
+    # ... and the exe's icon and version information (src/vcs.rc): VERSION in the repository root, as a header only
+    # the resource file sees - a compile definition would rebuild every generated file at each new version
     if(WIN32)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/VERSION")
+        file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION" VCS_VERSION LIMIT_COUNT 1)
+        string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)" _vcs_version_numbers "${VCS_VERSION}")
+        if(NOT _vcs_version_numbers)
+            message(FATAL_ERROR "VERSION must start with major.minor.patch (it holds '${VCS_VERSION}')")
+        endif()
+        file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/vcs_version/vcs_version.h" CONTENT "#define VCS_VERSION_MAJOR ${CMAKE_MATCH_1}
+#define VCS_VERSION_MINOR ${CMAKE_MATCH_2}
+#define VCS_VERSION_PATCH ${CMAKE_MATCH_3}
+#define VCS_VERSION_TEXT \"${VCS_VERSION}\"
+")
         target_sources(ps2EntryRunner PRIVATE "${CMAKE_SOURCE_DIR}/src/vcs.rc")
+        # the resource compiler doesn't report the files it embeds
         set_source_files_properties("${CMAKE_SOURCE_DIR}/src/vcs.rc" TARGET_DIRECTORY ps2EntryRunner
-            PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/vcs.manifest")
-        target_link_options(ps2EntryRunner PRIVATE /MANIFEST:NO)
+            PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/vcs.manifest;${CMAKE_SOURCE_DIR}/src/vcs.ico;${CMAKE_BINARY_DIR}/vcs_version/vcs_version.h"
+                       INCLUDE_DIRECTORIES "${CMAKE_BINARY_DIR}/vcs_version")
+        if(MSVC)
+            target_link_options(ps2EntryRunner PRIVATE /MANIFEST:NO)  # lld in mingw mode makes none of its own
+        endif()
     endif()
     # Our own sources aren't generated code; keep them out of the unity batches.
     set_source_files_properties(${VCS_SOURCES} "${CMAKE_SOURCE_DIR}/src/main.cpp"
         TARGET_DIRECTORY ps2EntryRunner
         PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE SKIP_PRECOMPILE_HEADERS TRUE)
+    if(VCS_ANIM_WORKER)
+        set_source_files_properties("${CMAKE_SOURCE_DIR}/src/game/vcs_anim.cpp" TARGET_DIRECTORY ps2EntryRunner
+            PROPERTIES COMPILE_DEFINITIONS VCS_ANIM_WORKER=1)
+    endif()
 else()
     message(STATUS "No generated code in ${VCS_GENERATED_DIR}: building tools only. Run python tools/build.py --recompile.")
 endif()
@@ -120,6 +185,20 @@ if(VCS_RUNTIME_DEBUG_INFO AND MSVC)
         target_link_options(ps2EntryRunner PRIVATE /DEBUG)
         target_link_libraries(ps2EntryRunner PRIVATE dbghelp)
     endif()
+elseif(VCS_RUNTIME_DEBUG_INFO AND MINGW)
+    # llvm-mingw: CodeView in a PDB, as clang-cl's /Z7 /DEBUG - dbghelp (src/debug: crash handler, profiler) and
+    # tools/minidbg.py read it the same way
+    foreach(t ps2_runtime ps2_iop)
+        if(TARGET ${t})
+            target_compile_options(${t} PRIVATE -g -gcodeview)
+        endif()
+    endforeach()
+    if(VCS_HAVE_GENERATED)
+        set_source_files_properties(${VCS_SOURCES} "${CMAKE_SOURCE_DIR}/src/main.cpp"
+            TARGET_DIRECTORY ps2EntryRunner PROPERTIES COMPILE_OPTIONS "-g;-gcodeview")
+        target_link_options(ps2EntryRunner PRIVATE -g -Wl,--pdb=)
+        target_link_libraries(ps2EntryRunner PRIVATE dbghelp)
+    endif()
 elseif(VCS_RUNTIME_DEBUG_INFO)
     # Linux: line tables for the crash handler / profiler (src/debug, symbolized with llvm-symbolizer); frame pointers
     # for their backtraces
@@ -133,4 +212,10 @@ elseif(VCS_RUNTIME_DEBUG_INFO)
             TARGET_DIRECTORY ps2EntryRunner PROPERTIES COMPILE_OPTIONS "-gline-tables-only;-fno-omit-frame-pointer")
         target_link_options(ps2EntryRunner PRIVATE -rdynamic)
     endif()
+endif()
+# llvm-mingw: the profiler's __try / __except (src/debug/profiler.cpp) need the Microsoft extensions clang-cl has on
+# (here, after the debug info's COMPILE_OPTIONS above, which would replace them)
+if(MINGW AND VCS_HAVE_GENERATED)
+    set_property(SOURCE "${CMAKE_SOURCE_DIR}/src/debug/profiler.cpp" TARGET_DIRECTORY ps2EntryRunner APPEND PROPERTY
+                 COMPILE_OPTIONS -fms-extensions)
 endif()

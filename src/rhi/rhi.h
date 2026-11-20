@@ -259,9 +259,26 @@ namespace rhi
         bool (*createSurface)(void *instance, uint64_t *surface) = nullptr;  // VkInstance -> VkSurfaceKHR
     };
 
+    // A graphics card the game can draw with (Graphics > Graphics card; GitHub issue 112: a laptop started the game on
+    // its integrated chip). `id` names it in vcs.ini and DeviceDesc::gpu: made from the PCI vendor / device ids (and
+    // which of several identical cards), so the same card has the same id under D3D11 and Vulkan and across starts.
+    struct Gpu
+    {
+        std::string name;        // as the driver names it ("NVIDIA GeForce GTX 1080 Ti"); " #2" on a second identical card
+        uint32_t vendorId = 0;   // PCI
+        uint32_t deviceId = 0;
+        bool integrated = false; // the CPU's chip (D3D11: DXCore's IsIntegrated, Windows 10 2004+; Vulkan: the device type)
+        int id = 0;              // > 0
+    };
+    int gpuId(uint32_t vendorId, uint32_t deviceId, int ordinal); // ordinal: 0, or n for the n+1th identical card
+    // The cards, the fastest first (D3D11: DXGI's high-performance ranking; Vulkan: discrete before integrated). D3D11
+    // where it is built (Windows), else Vulkan; software renderers left out. Empty when none can be listed.
+    std::vector<Gpu> listGpus();
+
     struct DeviceDesc
     {
         Backend backend = defaultBackend();
+        int gpu = 0; // a Gpu::id; 0 or an id no card has: the fastest (the first of listGpus)
         void *nativeWindow = nullptr; // D3D11 / D3D12: the HWND
         VulkanWindow vulkan;          // Vulkan
         uint32_t width = 0;
@@ -299,6 +316,9 @@ namespace rhi
         virtual std::unique_ptr<Texture> createTextureLevels(const TextureDesc &desc, const void *const *levels, uint32_t levelCount) = 0;
         // Whether block-compressed textures can be made (D3D11: always, feature level 11; Vulkan: textureCompressionBC).
         virtual bool blockCompression() const { return true; }
+        // The card's own memory in bytes (DXGI's dedicated video memory; Vulkan's device-local heaps), 0 when unknown:
+        // what the texture packs' cache is sized by (render/texture_replacements.h).
+        virtual uint64_t videoMemory() const { return 0; }
         // True when createTexture (one level, with data, not a target) and createTextureLevels may be called from any
         // thread while the owner draws (D3D11: device creation calls are free-threaded; Vulkan: the image is made there
         // and its first contents staged, then recorded into the set-up commands at the owner's next submit).
@@ -323,6 +343,8 @@ namespace rhi
         virtual void setTexture(uint32_t slot, Texture *texture, Sampler *sampler) = 0; // pixel shader
         virtual void setConstants(uint32_t slot, Buffer &buffer) = 0;                    // vertex + pixel shader
         virtual void draw(uint32_t vertexCount, uint32_t firstVertex = 0) = 0;
+        // the vertices `instanceCount` times; the vertex shader tells them apart by SV_InstanceID (0..instanceCount-1)
+        virtual void drawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex = 0) = 0;
         virtual void drawIndexed(uint32_t indexCount, uint32_t firstIndex = 0, int32_t baseVertex = 0) = 0;
 
         virtual void pushMarker(const char *name) = 0; // debugger / profiler annotations
@@ -361,4 +383,8 @@ namespace rhi
     std::unique_ptr<Device> createD3D12Device(const DeviceDesc &desc, std::string &error);
     std::unique_ptr<Device> createVulkanDevice(const DeviceDesc &desc, std::string &error);
     std::unique_ptr<Device> createNullDevice(const DeviceDesc &desc, std::string &error);
+    std::vector<Gpu> listD3D11Gpus();  // listGpus() for each backend
+    std::vector<Gpu> listVulkanGpus();
+    // Fills in the ids (and " #2" names) of a list in its final order: shared by the backends so they agree.
+    void numberGpus(std::vector<Gpu> &gpus);
 }

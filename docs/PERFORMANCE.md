@@ -21,8 +21,8 @@ Before this work the game could not run above 100 fps in any setting (independen
 did not hold 60 in original timing. Original timing (30 / 60) is unchanged: reference scenes identical throughout.
 Where the slowest frames are now: heavy views (~1,950 draws: a rooftop facing the city) at ~120 fps, the game thread
 (6.2 ms + 1.6 ms submitting the chain) and the render worker (6.2 ms) both near the limit. Memory: the RSL replay's
-recordings grow with the blocks seen (~1.3 GB private after 15 minutes of driving, then flat - keyed by address, so
-bounded by the world; predates this work).
+recordings grew with the blocks seen (~1.3 GB private after 15 minutes of driving) - and, other than was written here
+("then flat - keyed by address, so bounded by the world"), never stopped: section 31, bounded since 2026-11-10.
 
 ## How it is measured
 
@@ -290,6 +290,14 @@ city (1325, -325) 196 / 203 -> 216 / 222 (render worker 5.0 -> 3.3 ms), the othe
 - Memory grows while new places are visited (529 -> 1,587 MB over the 24-minute soak) and converges when they repeat
   (three rounds of the same 8 spots: +260, +89, +45 MB): caches filling (texture and mesh caches are LRU-bounded; the
   RSL recordings ~115 MB of it), not a leak.
+  **Correction (2026-11-12):** the RSL recordings (`g_recordings`, src/game/vcs_rsl_world.cpp) were never dropped -
+  one per (kind, address, length), ~32 KB each. With the detailed city drawn far (its sector packets move about their
+  heap) a 5-minute loop of the cruise route left 28,000 of them (+180 MB a minute) and a 3-hour soak reached 6.3 GB;
+  without it the climb was slower (1.1 -> 2.75 GB in an hour of soak). They are now capped at 16,384, the least
+  recently met half dropped when over (a dropped one is recorded again when next met): the loop stays at 1.6-1.7 GB
+  (it was 3.4 GB at 11 minutes), cruise 144.7 fps against 145.0 before.
+  RSL recordings ~115 MB of it), not a leak. (Wrong for the recordings, as GitHub issue 115 showed: over 16 spots
+  moved between every 30 s they grew by as much on the second round as on the first - section 31.)
 
 ### 15. The helicopter's dust at high internal resolutions (2026-10-30)
 
@@ -659,7 +667,10 @@ readback waits, swapchain acquire, texture creation (section 25), the specialise
   the city's overdraw was shaded and textured. Pixel shaders without it (`drawPSNoDepth`, SHADER_DEPTH=0): the game's
   frame 10.7 -> 9.3 ms of GPU. Reference scenes: static ones as before (0.02, and the map's player arrow), moving ones
   within run-to-run noise, the ground decals intact. Default with Vulkan; on D3D11 since 2026-11-03, when the shader
-  depth turned out to hide the game's fire (game-internals.md 6m; `PS2X_HW_SHADER_DEPTH=1` / `0` forces either way).
+  depth turned out to hide the game's fire (game-internals.md 6u; `PS2X_HW_SHADER_DEPTH=1` / `0` forces either way).
+  within run-to-run noise, the ground decals intact. Default with Vulkan; D3D11 kept the shader depth until a Windows
+  scenes compare (`PS2X_HW_SHADER_DEPTH=1` / `0` forces either way) - dropped there too on 2026-11-04 for issue 4 (fire
+  hidden on AMD GPUs; DECISIONS.md).
 - **Constants written only when they change** (`gs_hw` `updateConstants`): 45% of the draw constants' and 63% of the
   native constants' writes were the same bytes as the draw before; each was a ring slice and a descriptor push.
   Descriptor writes ~2,900 -> ~1,700 a frame. `PS2X_HW_CB_DEDUPE=0`.
@@ -744,7 +755,7 @@ changes.
 observer's per-block work, and natives that keep the guest clock's accounting (a native step must charge the cycles the
 original would have run, or the game's timing moves - worth checking for the natives already in).
 
-### 29. Optional PCSX2 PNG texture packs (2026-10-31)
+### 38. Optional PCSX2 PNG texture packs (2026-10-31)
 
 The shared texture cache can replace a sampled texture with a PCSX2-named PNG (`docs/TEXTURE_PACKS.md`). Pixel
 and palette hashing only runs for cache misses whose format/size occurs in the pack; matches/misses are memoized.
@@ -774,7 +785,7 @@ loads including later reloads after changing views, no per-VBlank churn or failu
 protected even when it exceeds the budget. All 160 PNGs decode in the standalone check; pack pixels total 805 MiB
 at RGBA8 before mips, so loading on demand matters.
 
-### 30. The player's mods while driving: larger streaming memory, VC cars, an HD pack (2026-11-03)
+### 39. The player's mods while driving: larger streaming memory, VC cars, an HD pack (2026-11-03)
 
 The player saw the game lose a lot of speed with their mods (FORK.md T10). `cruise.py run` (144 fps cap, D3D11, the
 quick build, `build/rig/saves/fortbaxter`), each from its own card copy, the mods through test folders of junctions
@@ -800,7 +811,7 @@ quick build, `build/rig/saves/fortbaxter`), each from its own card copy, the mod
   measured the same way.
 - Outputs: `build/cruise/t10_{nomods,30only,cars,cars_noaa,tex,mods}`, `t10b_{tex,mods}` (after the pack change).
 
-### 31. PC mods: their conversion at boot, an HD weapon's frame cost (2026-11-03)
+### 40. PC mods: their conversion at boot, an HD weapon's frame cost (2026-11-03)
 
 - **Conversion at boot** (src/game/vcs_stream.cpp): the mod loader converts PC `.dff` / `.txd` once, on the stream
   thread, before the game's first read, while the game waits. One file at a time, the player's mods took ~5.3 s
@@ -821,7 +832,7 @@ quick build, `build/rig/saves/fortbaxter`), each from its own card copy, the mod
   (decoding), the GS stage and the worker. The VC cars pay the same way (section 30). Next, in the native path: one draw
   for consecutive batches of one mesh with the same state and constants (their meshes joined, or one buffer per
   element), measured here and on the cruise.
-- Since then (2026-11-03): the rasterised depth on D3D11 (game-internals.md 6m) took most of the HD weapons' cost - it
+- Since then (2026-11-03): the rasterised depth on D3D11 (game-internals.md 6u) took most of the HD weapons' cost - it
   was GPU overdraw without early depth rejection: chainsaw 208 -> 189 fps, minigun 188 -> 172 (was 188 -> 135 and
   181 -> 155); the joined draws (section 32) the rest of the per-draw cost.
 
@@ -875,6 +886,443 @@ not something to run on several threads as it is.
   124-127 fps (7.2 ms game), Downtown 76 fps (12.2 ms), the rest of the route 124-240 fps.
 - Next, if needed: the clump animation natively and on worker threads (`build/analysis/t2_agents/anim.md`: ~0.8-1.4 ms
   in the densest frames), PGO for the release.
+### 29. Windows: llvm-mingw against clang-cl (2026-11-03)
+
+The same commit built both ways (DECISIONS.md 2026-11-03): clang-cl 23 + MSVC's STL (14.29) and llvm-mingw 20261020
+(clang 23.1.4, libc++, UCRT). The compiler version is the same, so this measures the ABI, the C++ library and the
+linker driver. `tools/bench.py`, 60 fps, the i7-7700K desktop with its usual background load; game thread ms.
+
+| Spot | clang-cl quick | llvm-mingw quick | clang-cl ThinLTO, median of 5 | llvm-mingw ThinLTO, median of 5 |
+|---|---|---|---|---|
+| fortbaxter | 4.9 | 4.7 | 5.10 | 5.35 (+5%) |
+| city_575_175 | 3.6 | 3.6 | 3.70 | 3.95 (+7%) |
+| city_-675_1425 | 5.2 | 5.2 | 5.62 | 5.60 (0%) |
+| city_1325_-325 | 4.3 | 4.1 | 4.83 | 5.45 (+13%) |
+| city_-1425_-575 | 4.6 | 4.8 | 4.88 | 6.22 (+28%) |
+| drive | 6.9 | 7.0 | 7.70 | 8.77 (+14%; worker / GS stage +14% too) |
+
+The quick builds (one round each) are level. The ThinLTO rounds alternated (clang-cl, llvm-mingw, ...) so the
+machine's drift falls on both, and llvm-mingw is slower in nearly every round; single rounds spread by 20-60%.
+
+The sampling profiler over a whole bench run (57k samples each, `VCS_PROFILE=5`) puts the difference in the C++
+library and its calls into Windows, not in the generated code (guest share 22.0% / 21.6%):
+
+| Host function, share of the game thread's samples | clang-cl | llvm-mingw |
+|---|---|---|
+| `std::chrono::steady_clock::now` | 0.00% (inline: QueryPerformanceCounter) | 1.07% (libc++'s, out of line) |
+| `RtlSleepConditionVariableSRW` (waiting) | 0.41% | 1.59% |
+| `NtGetWriteWatch` | 0.02% | 0.49% |
+| `memcmp` | 0.00% (inlined) | 0.38% |
+| `GetLastError`, `RtlNtStatusToDosError`, `system_clock::now`, `GetSystemTimePreciseAsFileTime` | 0.09% | 0.70% (libc++'s timed condition-variable waits) |
+
+About 4% of all samples, which is ~12% of the game thread's busy time (it works ~5 of 16.7 ms): the size of the gap.
+Not the cause: C++ exceptions (the scheduler's `EeDispatcherTransfer`: the quick builds are level), TLS (llvm-mingw
+uses native TLS), libc++ hardening (off: `_LIBCPP_HARDENING_MODE_DEFAULT` is NONE).
+
+**The gap, closed (same day).** `VCS_PROFILE_CALLERS` named the callers, and a 30-line test program
+(`wait_until` / `wait_for` / `steady_clock::now` in a loop, built both ways) showed what libc++ does on Windows:
+
+- Its timed waits (`__libcpp_condvar_timedwait`) convert the deadline to `system_clock` and truncate what is left to
+  whole milliseconds, so with under 1 ms left `SleepConditionVariableSRW(0)` returns at once and the wait loops:
+  305 wake-ups in one 1 ms `wait_until` (MSVC's STL rounds up: 1). The EE scheduler's pacing waits
+  (`processPendingEvents`, `waitForNextEvent`) spun their last millisecond every time, and the GS stage drain's
+  `wait_for(1 ms)` guard was a busy loop - that was the `system_clock::now`, `GetLastError` and
+  `RtlSleepConditionVariableSRW` samples, and a core taken from the worker threads' hyperthread siblings.
+- `steady_clock::now` is out of line with two 64-bit divisions: 34 ns against MSVC's 15 (inline, a multiply for the
+  10 MHz counter). The hot caller: the IOP catch-up in `advanceIopEeCycles`, from `checkpointDue`.
+- `recursive_mutex` is a CRITICAL_SECTION (MSVC's: an SRW lock): the GS front end's state lock, taken for every GIF
+  packet, packed kick and native submit, 0.67% of the GS stage's samples in `RtlEnter/LeaveCriticalSection`.
+- Not differences: `memcmp` is UCRT's `memcpy` named by the nearest export (no symbols for ucrtbase); the memcpy family
+  adds up the same (GS stage 1.1% clang-cl, 1.0% llvm-mingw). `GetWriteWatch`: the same folds (~300 per 5 s) at the
+  same cost (0.17 / 0.18 ms each, `PS2X_WRITE_WATCH_LOG=1`) - the profile's difference was noise.
+
+`runtime/ps2_host_std.h` (PS2RECOMP_PATCHES.md): `ps2x::hostNow()` (QueryPerformanceCounter, the frequency read once,
+the same values as `steady_clock::now`), `waitUntil` / `waitFor` (`SleepConditionVariableSRW` with the timeout rounded
+up, on the native handles) and `RecursiveMutex` (a `std::mutex` - an SRW lock - with an owner and a depth). On Windows
+with libc++ only; with MSVC's STL and on Linux they are the standard ones. The runtime and `src/game` read the clock
+through `hostNow`; the timed waits on the game thread, the GS stage, the render worker and the streamer go through
+`waitUntil` / `waitFor`.
+
+ThinLTO, median of 5 alternating rounds each, game / worker / GS stage ms:
+
+| Spot | clang-cl | llvm-mingw, the clock and waits | llvm-mingw, + the lock |
+|---|---|---|---|
+| fortbaxter | 4.05 / 1.75 / 1.60 | 4.05 / 1.80 / 1.65 | 4.03 (-0.5%) / 1.77 / 1.65 |
+| city_575_175 | 3.05 / 0.50 / 0.50 | 3.15 / 0.50 / 0.55 | 3.12 (+2.3%) / 0.50 / 0.55 |
+| city_-675_1425 | 4.67 / 0.88 / 0.72 | 4.85 / 0.82 / 0.72 | 4.67 (0%) / 0.80 / 0.68 |
+| city_1325_-325 | 3.60 / 2.68 / 3.42 | 3.70 / 2.80 / 3.52 | 3.68 (+2.2%) / 2.80 / 3.58 |
+| city_-1425_-575 | 4.22 / 0.75 / 0.57 | 4.30 / 0.65 / 0.60 | 4.40 (+4.3%) / 0.72 / 0.60 |
+| drive | 6.05 / 4.02 / 4.30 | 6.18 / 4.30 / 4.70 | 5.93 (-2.0%) / 4.18 (+4%) / 4.53 (+5%) |
+
+(The clang-cl column is the last set of rounds; the first set's was within 0.1 ms of it. Both builds are ~20% faster
+than the morning's table above: the machine's background load, not the code - the clang-cl build has no change on
+its path.) The game thread is level, -2% to +4% by spot inside the round-to-round spread; the worker and the GS stage
+are within ~5% while driving (0.15-0.2 ms, the same as the spread between rounds). So llvm-mingw became the default
+(DECISIONS.md 2026-11-03). Left, if it ever matters: the GS stage's remaining few percent (no single symbol stands out
+in its profile any more), and the IOP host's / SIF RPC's `recursive_mutex`es (rare calls with the native IOP).
+
+### 30. Density and draw distance: what they cost (2026-11-07)
+
+`tools/world_check.py` (quick build, hidden, pinned to 30 fps; the spot city_-675_1425 at noon; perf means of 3
+one-second readings). The numbers move with what walks past, so read them as a size, not a figure:
+- **Defaults**: the module reads two pools and writes nothing (values already equal): no measurable cost; scenes with
+  it on and off (`VCS_WORLD_DETAIL_HOOKS=0`) give identical static frames.
+- **Pedestrian density 300%**: about 50% more peds (22-24 -> 34-36); game thread within the spread (7.7 -> 8.0 ms in
+  one run, 8.5 -> 7.9 in another).
+- **Draw distance**, game / worker / GS stage ms and draws over three runs: 100% 6.0-8.2 / 2.1-4.2 / 1.8-3.3, 530-1330
+  draws; 300% 7.2-8.7 / 3.5-5.8 / 2.5-4.5, 1080-1870 draws. Roughly +1 ms game thread, +1.5 ms worker, +1 ms GS stage
+  at 300% with people about; in an emptied street +9% draws. The packet buffer's peak while driving stays 170-220 KB
+  of 921 KB (the game drops sectors below 74 KB free), so the setting is applied as it is, with no step back.
+- Not measured yet: the cost with the optimised (`lto`) build and at 144 fps (bench.py with `VCS_DRAW_DISTANCE=300`).
+
+### 31. Memory: the RSL recordings get a limit (GitHub issue 115, 2026-11-10)
+
+**The report.** Task Manager showing `vcs.exe` at 5,291 MB on a PC with 8 GB and an Intel HD 4000 (which takes its
+video memory from the same 8 GB); a screenshot only - no log, and not how long the game had run.
+
+**The cause.** The RSL replay's recordings (FULLY_NATIVE.md steps 3-5: a marked world / model block processed once,
+its UNPACKs, MSCALs with their meshes and DIRECTs kept and replayed) are keyed by the block's guest address and
+length, and nothing ever dropped one. The summary at the top and section 14 took them for bounded by the world. They
+are not: the game streams a model back in at another address, and the packets it builds itself land at other places
+in the packet buffer, so new keys keep coming for as long as the player moves about. `g_recordings` only grew; the
+game thread's maps for the skip test (a page snapshot and a confirmation per key, the "flattenable" notes) with it.
+
+**Measured** with `tools/memcheck.py` (new): the Fort Baxter card, hidden, 60 fps frame-rate independent timing, an
+AI-driven car moved to the next of 16 spots across the map every 30 s; two games side by side; quick build, the dev
+machine's `build/vcs.ini` (3x). The figure is the private working set, Task Manager's Memory column, in MB:
+
+| run | start | 5 min | 10 min | 15 min | trend over the second half |
+|---|---|---|---|---|---|
+| no limit (as it was) | 245 | 525 | 630 | 842 | +39.9 MB a minute |
+| recordings off (`VCS_RSL_WORLD=0 VCS_RSL_MODELS=0`) | 205 | 298 | 295 | 316 | +0.2 |
+| limit 256 MB (the default now) | 241 | 442 | 587 | 631 | +5.1 (the limit was reached after about 8 minutes) |
+| limit 64 MB | 243 | 445 | 423 | 451 | +3.2 |
+
+Without a limit: 23,872 recordings after 15 minutes, ~23 KB of the process's memory each (14 KB of it their own
+data as the heap holds it), and no sign of settling: the second round over the same 16 spots added 85% as many as the
+first. 2.3 GB an hour on this route; a player's own
+driving streams less than a move every 30 s, so 5.3 GB is a session of a few hours.
+
+**The limit** (`src/game/vcs_rsl_world.cpp`, `trimRecordings`). Each recording knows its bytes (as the heap holds
+them) and the chain that last used it. At the end of a chain, when the recordings hold more than
+`VCS_RSL_RECORDINGS_MB` (256; 0: no limit, as before), the least recently used are chosen until three quarters of the
+limit are left - none that was used in the last 120 chains, so a limit smaller than what one place needs (~36 MB
+standing in the city) does not drop and record the same blocks every frame.
+
+Dropping takes two steps, because of step 4's skip: the game thread sends a block without its bytes when its pages
+are unchanged since a copy the worker confirmed its recording for, and the worker's fall-back without a recording
+reads the block from guest RAM - while the game thread runs on. So the worker first takes its confirmation back (an
+entry in the confirmations it hands over at each chain's end); the game thread applies it at its next kick, before
+any skip decision, and names the batch in that chain's table. From that chain on nothing skips the block unless the
+worker confirmed it again, which is a use - and a use keeps the recording. At the end of that chain the ones still
+marked are freed, 0.2 ms of them a chain (thousands of recordings, each as many frees as it has ops: 256 at once
+took up to 10 ms in a quick build). The game thread's own maps are bounded with it: a withdrawn confirmation is erased
+(`FlatMap` got an erase that moves the run back), and past 16,384 page snapshots those no chain asked for in 1,800
+chains go, with their "flattenable" note - such a block is copied once and drawn by the packet path once when it
+comes back, as on its first frame.
+
+**What it costs.** A dropped recording that is needed again is recorded again (one pass through the VIF interpreter
+instead of a replay); `VCS_RSL_WORLD_LOG=1`'s new `memory:` line counts them.
+- At 256 MB on the route: 8,792 dropped in 3 sweeps over 15 minutes, and as many blocks recorded as with no limit
+  (world 11.7k against 10.8k, model 10.4k / 12.4k, other calls 4.8k / 5.2k - the AI never drives the same way twice).
+- At 64 MB: 30,827 dropped in 28 sweeps, twice the world blocks recorded (20.4k). At 24 MB, less than one place in the
+  city needs: 19,527 dropped in 6 minutes, 44% of them recorded again.
+- On the worker, at a chain's end, with the game alone on the machine (the stutter rig at 24 MB, 10,119 dropped in 23
+  sweeps): the slowest sweep (the scan and the sort) 0.31 ms, the slowest slice of frees 0.34 ms, the slowest single
+  recording 0.23 ms (2,628 ops, 2 MB). With two or three games side by side the worst were 0.5-2.8 ms and 17-31 ms -
+  and in the scenes run 1.4 ms for a recording of 10 ops: the thread waiting (the scheduler, the heap's lock), not
+  the work.
+- The stutter rig (`tools/cruise.py`, section 21: the fixed route at 144 km/h, 60 fps cap), no limit against 24 MB:
+  p50 16.7 / 16.7, p95 16.9 / 17.0, p99 17.7 / 17.7, p99.9 33.5 / 32.7, longest 75.5 / 70.0 ms; hitches 12 / 7; frames
+  over 25 / 33 / 50 ms 25 / 14 / 3 against 19 / 8 / 1 (a second run at 24 MB: 21 / 11 / 0, hitches 8, longest 44.3).
+  The same within what two runs differ by; the hitches are the known ones (the level swap's 40 ms on the game thread,
+  texture bursts). Not measured: uncapped, above 100 fps, where the worker is the limit.
+
+**Checked.**
+- No skipped block was ever rebuilt from guest RAM: 12.3M / 15.5M skipped blocks in the 15 minutes at 256 / 64 MB.
+- With the limit at 24 MB, 6 minutes of the route each: `VCS_RSL_SKIP_VERIFY=1` 4,872,657 skip decisions, 0 wrong
+  (13 recordings kept because they were used again before they were freed); `VCS_RSL_WORLD_VERIFY=1` 7,322,903
+  recordings the same as the packet path, 0 differ.
+- 40 minutes of the route, three games side by side (so ~50 fps each), MB every five minutes and the trend over the
+  second half:
+
+  | run | 5 | 10 | 15 | 20 | 25 | 30 | 35 | 40 min | trend |
+  |---|---|---|---|---|---|---|---|---|---|
+  | limit 64 MB | 387 | 453 | 480 | 461 | 459 | 470 | 461 | 484 | +0.02 MB a minute |
+  | limit 256 MB (the default) | 397 | 559 | 623 | 644 | 672 | 695 | 675 | 687 | +1.45 |
+  | recordings off | 315 | 295 | 339 | 331 | 336 | 349 | 336 | 355 | +0.78 |
+
+  At 64 MB 78,504 recordings were dropped on the way (1.3 GB of them; 43% recorded again), at 256 MB 33,167 in 10
+  sweeps (14% recorded again); 29.4M / 26.4M blocks skipped, none rebuilt from guest RAM. (No limit was 842 MB after
+  15 minutes and rising by 40 a minute.)
+- Pictures: the reference scenes captured with the default and with a 4 MB limit (7,056 recordings dropped during
+  the capture): the static scenes the same (0.03, 0.13), the moving ones within what two captures differ by, every
+  scene complete on the contact sheet. Against `build/scenes/reference` only the two known differences (the loading
+  screen's art, the pause map's prompts).
+- `tools/memcheck.py` fails a run whose memory still rises by more than 8 MB a minute over its second half, or that
+  read a skipped block from guest RAM. It runs with a 64 MB limit unless told otherwise, so most of a run is plateau.
+
+**Left.** An `Op` is 104 bytes even for an UNPACK of one qword (each carries a mesh and a raster name it does not
+use): a leaner layout would hold more recordings per MB - how many more was not measured. What else the process holds at its plateau
+beyond the recordings and the 300 MB without them (meshes and textures made for replays, both LRU-bounded; the heap's
+own) was not taken apart.
+
+### 41. The player's stutters with their mods: the texture pack's log on the GS stage (2026-11-12)
+
+The player recorded 5.4 minutes of play (F4's CSV; 3840x2160, all of Distance and population at 100, HD world radius
+3, their four mods with the HD texture pack): 67 fps, 200 hitches, the worst 237 ms, 1.1 s lost a minute. In every
+large one the game thread computed as usual (~11 ms) and waited: on the render worker (`render_ms` 32-151, normally
+1.3) and idle (`wait_ms` 50-130), with 55-145 new textures (3-14 MB) in the frame.
+
+The cruise with the player's settings and mods (`cruise.py run --fps 0`, `VCS_TEST_MODS=1`, 1x - `PS2X_HW_SCALE=5` is
+not a choice), the spike profiler on the game thread, the render worker, the GS stage and the main thread:
+- **The pack is not the main cost**: with it 114.6 fps, max 138 ms, 1662 ms lost a minute; without it 107.0 fps, max
+  92 ms, 1413 ms.
+- In the worst spikes the GS stage sat in `NtWriteFile` (15-19 samples): the pack's `[textures] matched` line, written
+  by the GS stage for every first match - stderr is unbuffered, a file-system call per line, and the launcher sends it
+  to a file (`build/run/launcher_game.log`). 2,600 matched and 3,400 loaded lines in 140 s. The matched lines now go
+  through the pack's loader thread (`texture_replacements.cpp`; the same lines, `texture_check.py` still counts them).
+- Disc reads are not it (the player's idea of a dumped disc): the game's streaming reads the ISO natively on a host
+  thread (game-internals.md 9, 14 MB in ~5 ms), the ISO and the pack are on an NVMe SSD; only `sceCdSt` (music,
+  movies) is paced at a 4x DVD's rate.
+
+| cruise, the player's mods and pack | fps | p99.9 | max | frames > 50 / 100 ms |
+|---|---|---|---|---|
+| before | 114.6 | 35.0 | 138 | 5 / 2 |
+| the matched lines off the GS stage | 112.6 | 32.0 | **63** | **1 / 0** |
+
+What is left in the largest frames (~48 s into the route, 14,000 draws): the GS stage working - `UploadImage`, `LoadClut`,
+`recordPrimitive`, the GS path's own work - with the game thread and the render worker waiting on it. Outputs:
+`build/cruise/user_full`, `user_notex`, `user_full2`.
+
+### 42. The GS stage's hashes: XXH3 (2026-11-12)
+
+The GS stage on the cruise with the player's mods (`VCS_PROFILE_THREAD=GsStage`, 90,000 samples): 80% busy - UploadImage
+12.2% on its own, `gsRun` 10.7, memcpy 7.8, the CLUT (LoadClut, LoadClutFromRect, ClutHash) ~8.7, bindTexture 4.3, the
+heap ~2.8. Most of UploadImage was `hashBytes`: every whole upload is hashed to skip the ones the game sends again;
+ClutHash runs on nearly every draw (a CLUT load before each). Both are now XXH3 (`render::textureHash`, already in the
+build for the texture packs), the values only key the backend's caches (PS2RECOMP_PATCHES.md):
+
+| GS stage, share of its samples | before | after |
+|---|---|---|
+| UploadImage | 12.2% | 6.3% |
+| ClutHash | 1.18% | 0.06% |
+| render::textureHash (the XXH3 itself) | - | 0.02% |
+
+About 7% of the GS stage's time. Uncapped, the stage spends what it saves on more frames, so its busy share hardly moves
+(80.3 -> 78.5%); the cruise's fps varies 106-119 between identical runs, too much to show it. Checked:
+`texture_check.py`'s game check with the HD pack (1647 files matched and loaded, the five spots drawn).
+`build/cruise/gs_prof`, `gs_prof2`.
+
+### 43. The far crowd's draws: real peds as proxies; the proxies were never drawn (2026-11-12)
+
+The player's settings with the population sliders at 50 (police station, noon, ~130 peds): game thread 13.7 ms, render
+worker 13.5 ms, 65 fps; with the population at the game's own 6.6 / 6.0 ms, 135 fps. View distance, HD world, distant
+traffic / crowds cost nothing measurable - the real population does. Most of it stands 100-325 m out and each ped
+went through the game's whole draw: the skin palette (~30 bones, a 3x4 product each, inside `FUN_0039EC18`), its
+packets, the worker's skinning and copies. Not drawing peds past 110 m (`VCS_PED_DRAW_MAX=110`, a probe) took the
+render worker 16.8 -> 11.2 ms and the game thread 1.6 ms lower: the ceiling of a cheaper far draw.
+
+- **Real peds as proxies** (vcs_distant.cpp, `VCS_PED_PROXY=<m>`, 0 off): past 110 m a random ped skips CEntity::Render
+  and is drawn as the template's posed mesh at its own place (the distant crowds' way); the first of each model a
+  frame draws as the game does and is the template. Only with the population raised.
+- **The proxies had never been drawn**: `drawLitProxies` / the rigid proxies tested a proxy's box against rows 28-31
+  (the GS screen matrix) instead of the clip matrix 24-27 (`litClip`'s), and skipped any part under ~6 pixels - a
+  ped's part (0.3-0.8 m) past ~100 m. Every run counted 0 drawn, millions culled: distant traffic and distant crowds
+  simulated their proxies but never showed them. Now 24-27 and ~1.5 pixels: 15.6M drawn, 10.5M culled in a run.
+  `VCS_PROXY_DEBUG=1` logs a sample of the culls with the reason.
+
+Little Havana, distant traffic / crowds off, two alternating rounds:
+
+| | game thread | render worker | GS stage | fps |
+|---|---|---|---|---|
+| real peds as proxies | 13.3-13.7 | 14.7-15.0 | 14.9-15.8 | 58-59 |
+| the game's draw | 13.3-14.1 | 14.7-15.6 | 17.8-18.3 | 59-60 |
+
+The GS stage gains ~2.5 ms; the frame rate does not move here - the three threads sit at 13-15 ms each, and a proxy
+is still one native draw per part. With distant traffic / crowds at 100 (now drawn) the GS stage rises to 17-20 ms in
+Little Havana. Next for the far crowd: one draw for all of a template's proxies (instancing).
+
+### 44. The crowd LOD's farther tiers (2026-11-12)
+
+The population's simulation (CWorld::Process 2.1 -> 5.4 ms at sliders 50) is mostly the far crowd's. Its random peds
+on foot are now processed every fourth frame past 110 m and every sixth past 180 m (were every third past 110 m;
+`VCS_CROWD_LOD_TIERS=3,3` as before) - drawn as proxies there (section 43), their animation still advanced by the
+frames they stand for. Police station, sliders 50, three alternating rounds:
+
+| | CWorld::Process | game thread | fps |
+|---|---|---|---|
+| every 4 / 6 | 3.99 / 4.37 / 4.12 ms | 12.0 / 12.9 / 12.2 ms | 59.7 / 59.9 / 60.0 |
+| every 3 (before) | 4.69 / 5.49 / 5.56 ms | 13.0 / 14.1 / 13.5 ms | 62.7 / 55.9 / 53.5 |
+
+About 1.1 ms off the game thread. Past 180 m a ped moves ~10 times a second at 60 fps, a few pixels tall there.
+
+### 45. Far peds as proxies skip their PreRender too (2026-11-12)
+
+The proxy decision moved from CEntity::Render to the random ped's PreRender (vtable 0x490840 +0x40 `FUN_00200660`,
+read from the vtable in the game): a far ped whose model already has a template this frame skips its PreRender (the
+bones' pose, its shadow, a gun's flash) and its whole Render (+0x44 `FUN_00201300`), not only CEntity::Render; the
+first of each model (or a nearer one) is drawn by the game, so a template's pose is always the frame's. Police
+station, sliders 50, distant traffic / crowds off, three alternating rounds (`VCS_PED_PROXY=0` against the default):
+
+| | game thread | render worker | GS stage | fps | peds |
+|---|---|---|---|---|---|
+| proxies | 13.7 ms | 14.6 ms | 12.2 ms | 60.9 | ~129 |
+| the game's draw | 14.6 ms | 15.8 ms | 12.2 ms | 59.7 | ~121 |
+
+Modest: a proxy is still a native draw per part. The single-spot measurement varies ±1-2 ms with the random
+population (one round each in Little Havana showed nothing either way); three rounds or more per side.
+
+### 46. The far crowd seen as fake: proxies and LOD tiers moved out (2026-11-12)
+
+The player saw "fake" people close by turn into NPCs as they came nearer. Two of the changes above showed: a real ped
+past 110 m wore its model's template's pose - a walking one first, so a standing ped walked on the spot and stopped
+when it came into the game's own draw - and past 110 / 180 m peds moved 15 / 10 times a second. Now:
+
+- templates per model **and** per walking / standing (a ped's speed, +0x140): a proxy wears a pose like its own; the
+  decorative walkers take the walking one;
+- `VCS_PED_PROXY` defaults to **150 m** (was 110);
+- the crowd LOD keeps every third frame to 150 m, every fourth past 150 m, every sixth past 220 m (were 110 / 180).
+
+No real ped proxy was ever shown as another model (the `proxies` command's `realorphans=`: 0 at both spots). The cost
+of the farther tiers is to be measured again.
+
+Then the far crowd **flickered** (the player's report, 2026-11-13, like the street lamps once): a template was the first
+ped of its key drawn in a frame - or, for the proxies' table, the farthest - and the draw order changes from frame to
+frame, so every proxy of a model took another ped's pose (another walking phase) each frame. Now a template stays the
+same ped while it is drawn (vcs_distant.cpp `stickyTemplate`, `keptTemplate`); a ped stays a proxy until 10 m nearer
+than where it became one (no back and forth on the 150 m line); and a proxy's part is drawn down to ~0.6 pixels of a
+1080-line picture (`drawLitProxies`: 0.0004 of the distance, was 0.001 - a head or a hand around 1.5 pixels came and
+went with each sub-pixel step). A template's parts drawn later in the frame from the sorted alpha list (another group
+of the same entity) now carry the same proxies (vcs_distant.cpp `frameKicked`), and a template is kept only while it
+was drawn the frame before.
+
+The player's picture also showed the crowd **piled in one band far down the street** in view and thin near them: the
+in-view spawn ring starts at 35 x the generation factor (~105 m with the population distance at its most, up to the
+node cache's ~155-200 m) and nothing in view nearer than 250 m is recycled, so new peds kept collecting there. Now the
+ring out of view reaches 60 m instead of 20 (`VCS_PED_OUT_FAR_K`, not for the camera-cut fill): side streets and the
+ones behind fill too, out of sight. At the player's spot (their card, 4K, two pictures after 2 minutes): in view within
+200 m 49-57 -> 41-43 peds, the total kept (~140). Closing the in-view ring while 20 peds stood far in view
+(`VCS_PED_INVIEW_CAP`, off by default) was tried: the game makes nearly every ped through that ring, and the city kept
+40 of its 140.
+
+### 47. The distant proxies instanced (2026-11-13)
+
+Every proxy - a distant walker, a far car, a real ped past 150 m - was one native draw per part of its template: the
+template's vertices copied into the frame again (a skinned ped's are transient), the GS stage's state work, a constant
+buffer update and a driver call each, on the AMD D3D11 driver the most expensive part (user-hardware). Now a template's
+part is drawn once for all its proxies: `GSNativeDraw::instances` carries per proxy the 11 rows that differ (the GS
+window matrix, the clip matrix, the light directions; 44 floats), up to 64 a draw; `vs_lit_inst` reads them from
+cbuffer b2 by SV_InstanceID; one `drawInstanced` (D3D11, D3D12, Vulkan). Culling stays per proxy on the worker.
+`VCS_PROXY_INSTANCING=0` draws them one by one (PS2RECOMP_PATCHES.md).
+
+Checked: proxies lit red (`VCS_DISTANT_TINT=1`) along the avenue by day, 3 pictures each: 605-675 red pixels instanced,
+593-607 one by one; the same scene otherwise.
+
+**Test runs had no population.** Hidden runs play at 30 fps; with the player's `world.fps_target=60` the population
+governor took its budget to 0 and every probe had the original ~7 peds (cap 25). Runs about the population now take
+`VCS_POPULATION_FPS=0 VCS_FPS=60`, the player's card copy, `PS2X_HIDDEN_WINDOW=3840x2160` (their 4K, `display.scale=0`)
+and ~100 s at the spot for the pool to fill (`distancestate`: peds 127/127). So, at the player's Little Havana spot,
+one round, the frame held (`pause on`):
+
+| | draws | main (render) | worker | GS stage | host fps |
+|---|---|---|---|---|---|
+| instanced | 3973 | 1.0 ms | 11.0 ms | 13.0 ms | 54 |
+| one by one | 7080 | 14.8 ms | 33.5 ms | 33.7 ms | 20 |
+
+One round only (the machine was then busy with other work): to be measured again with alternating rounds. The
+sections above measured with the population governor at work may have measured less population than they say.
+
+### 48. The animation's node loop on worker threads (2026-11-13)
+
+The game thread is single: the game's simulation (AI, physics, scripts, the population) reads and writes shared state
+everywhere and in a fixed order. What can leave it is pure arithmetic with no effect on anyone else. The largest such
+piece with the population full (127 peds, the player's card; VCS_PROFILE inclusive): the clump animation update's node
+loop (game-internals.md 12f) - FUN_00401ad8 6.4% of the game thread, ~1.4 ms; the skin palette (FUN_0039EC18, 9.2%) is
+next.
+
+- **The game's own code, copied to run anywhere** (`tools/anim_worker_gen.py`): the 52 recompiled functions the
+  per-node callbacks reach (sampling, slerp, half floats, sinf / cosf / rem_pio2f stubs) copied out of generated/ee
+  into generated/anim/anim_worker.cpp, each direct call a plain C++ call, the scheduler checkpoints and the EE clock's
+  dispatch charge dropped - nothing else changed, so bit for bit the game's arithmetic, without a hand port. It refuses
+  if the call graph reaches anything else (an indirect call, a syscall, a non-pure stub). CMake runs it at configure
+  time; the copies are game code, never committed.
+- **vcs_anim.cpp** replaces FUN_00401ad8 (quaternion and matrix callbacks; the root-motion-only one stays the game's):
+  a clump's nodes split in slices (6 nodes or more each, up to the workers + 1), each slice on its own context, its
+  own 16 KB of guest RAM (0x20000..: its args copy, its stack), the game thread's MXCSR; the game thread takes the first
+  slice and waits for the rest - the order of everything around it is the game's. A clump stays in one piece when two
+  root-motion nodes share its delta, two nodes' frames overlap, or one association's node states reach another's.
+  3 workers by default (a ped's ~25 nodes make 4 slices; 6 spinning workers starved the GS stage on a busy machine).
+- **Checked**: `VCS_NATIVE_ANIM=serial` against the game's loop (verify, compared at the next clump update's entry,
+  same game frame): 0 differences in 23810 loops; `=slices` (one piece against slices on the same input, at once):
+  0 differences in 16189 loops with no independence check at all, 13580 with it. The verify mode's other differences
+  were the game turning bones after the update (a head looking at something) and node states freed in between.
+- **Cost**, the player's benchmark (tools/bench_avenue.py: Little Havana's avenue to downtown's police station on
+  the roads, their card and settings, 4K, the population full; 2 alternating rounds, ~10600 frames each):
+
+  | | frame | game thread | host | p99 | frames > 25 ms | > 33 ms |
+  |---|---|---|---|---|---|---|
+  | in slices (3 workers) | 9.93 ms | 7.87 ms | 8.78 ms | 24.1 ms | 90 | 8 |
+  | the game's loop | 10.01 ms | 7.88 ms | 8.95 ms | 25.0 ms | 106 | 10 |
+
+  Within the noise on the game thread: at this population the node loop is ~0.5 ms, and the fork / join per clump
+  (127 clumps a frame, a few microseconds each) takes most of what the slices save. It stays on - bit for bit the
+  game's, a little better on the slow frames.
+- **The skin palette is not the next one.** Decompiled (`build/analysis/decomp/skin_39ec18.c`): the per-bone 3x4
+  product is a loop inside FUN_0039EC18 (the skinned clump's render: its packets, its meshes' draws through
+  FUN_002f7d58, the lights), not a function of its own - no hook point short of replacing the whole render, which calls
+  the game's functions throughout (the hook rule forbids calling them from host code). And the loop itself is small
+  (~30 bones of 3x4 products a ped, ~0.4 ms for 127 peds): the 9% is the render function as a whole.
+
+### 49. Crowd bands, step 2: fewer real peds (2026-11-13)
+
+docs/CROWD_BANDS_PLAN.md (the player's plan). `VCS_CROWD_BANDS=1`: the real crowd held to 20 peds within 100 m and 20 at
+100-200 m, spawned out of view where a band is short, faded past 210 m (vcs_distance.cpp `bandRings`, `trimBands`).
+
+**Measured with the machine busy** (Premiere Pro and OBS open, the GPU shared): the same default drive took 9.9 ms a
+frame the night before, 13.9-18.1 ms in this session's runs. Only alternating A / B pairs within one session are
+compared; the absolute numbers are not.
+
+The avenue benchmark (`tools/bench_avenue.py`, now with the peds seen on the way - `popview` every 10 s: the pool's
+peds, drivers included, and those in view within 200 m):
+
+| | rounds | peds (in view < 200 m) | frame | game thread | p99 | frames > 25 ms |
+|---|---|---|---|---|---|---|
+| bands off | 2 | 117 (48) | 13.94 ms | 11.92 ms | 23.9 ms | 61 |
+| bands on | 2 | 56 (10) | 12.88 ms | 10.33 ms | 30.4 ms | 256 |
+| bands off | 1 | 112 (42) | 13.97 ms | 12.04 ms | 25.5 ms | 86 |
+| bands on | 1 | 59 (10) | 12.31 ms | 10.10 ms | 27.7 ms | 149 |
+| Vehicle density 100 | 2 | 107 (42) | 18.11 ms | 15.59 ms | 52.1 ms | 718 |
+| Vehicle density 0 | 2 | 92 (33) | 15.72 ms | 13.30 ms | 45.1 ms | 588 |
+
+- About **1.6-1.9 ms off the game thread** for ~55 fewer street peds (~0.03 ms each): less than the plan's guess (3-4
+  ms). The cars at density 100 against 0 cost about as much (2.3 ms).
+- More frames over 25 ms with the bands: those are frames where the game waits for the pipeline (`wait_ms` 40-110,
+  `game_ms` 8-20 - cruise's `worst`), not the game's own work. The churn is not it: births on the drive (`popview`
+  `births=`, the ped count's rises) 791 without the bands, 416 with. Likely the faster game thread meeting the shared GPU
+  more often; to measure again on a quiet machine.
+- The middle band fills poorly from out of view (2-5 of 20 at the Little Havana spot): the game's node list reaches
+  160 m. In view it is to be fed by the walkers' handover (step 4).
+- **The in-view cap's starvation explained** (PERFORMANCE.md 46): the ped spot finder takes links within the circle of
+  "farthest in view" for both rings (game-internals.md "The ped spot finder"), so closing the in-view ring as (1e6, 0)
+  closed the out-of-view one too. Closed now as nearest = farthest at the out-of-view reach.
+
+**Steps 3-4 in (walkers from 200 m, the handover both ways; Graphics > Distance and population > Crowd bands)**, the
+same benchmark, two alternating rounds, the machine still busy:
+
+| | peds (in view < 200 m) | frame | game thread | p99 | frames > 25 ms |
+|---|---|---|---|---|---|
+| bands off | 113 (43) | 14.15 ms | 12.16 ms | 25.8 ms | 92 |
+| bands on | 70 (25) | 13.40 ms | 10.82 ms | 30.2 ms | 182 |
+
+~350 walkers became real peds on each drive (none the other way: driving on, the peds left behind leave out of view
+and fade). Draws a frame the same either way (~3.7k, native ~2.7k): the 160 walkers add none to speak of. The slow
+frames are again waits for the pipeline with the game's own work normal (`worst`: game 8-17 ms, wait 27-87 ms) - both
+modes have them, the bands twice as many. Not resolved on this machine; to measure on a quiet one before the bands
+become the default (CROWD_BANDS_PLAN.md step 5).
+
+At a fixed spot (Little Havana, the free camera 12 m up looking north, 4K) the frame stays ~18-22 ms whatever the crowd:
+there the GPU at 4K is the limit (the game's own population: 18 ms; the full one at 1080p: 17 ms).
 
 ## Next
 
@@ -901,4 +1349,3 @@ not something to run on several threads as it is.
   original sign-extends the handler's byte result after `jalr` - the tail call skips that, so it needs a return through
   the original's tail (0x256164) or proof that every handler returns a clean byte.
 - Playtest missions above 100 fps; sprint at 1/240 s (-11%).
-- The RSL recordings' memory (an LRU bound).

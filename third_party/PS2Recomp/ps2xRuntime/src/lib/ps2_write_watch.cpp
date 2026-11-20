@@ -12,6 +12,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "runtime/ps2_host_std.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -138,7 +139,7 @@ namespace ps2writewatch
             uint64_t folds = 0, pages = 0, maxPages = 0;
             double ms = 0.0;
         } g_stats;
-        auto g_reportAt = std::chrono::steady_clock::now();
+        auto g_reportAt = ps2x::hostNow();
 
         // PS2X_WRITE_WATCH_LOG=1: pages per fold and its cost, every 5 s
         void noteFold(uint64_t count, std::chrono::steady_clock::time_point start)
@@ -146,7 +147,7 @@ namespace ps2writewatch
             static const bool log = std::getenv("PS2X_WRITE_WATCH_LOG") != nullptr;
             if (!log)
                 return;
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             ++g_stats.folds;
             g_stats.pages += count;
             g_stats.maxPages = std::max<uint64_t>(g_stats.maxPages, count);
@@ -251,7 +252,7 @@ namespace ps2writewatch
 #if defined(_WIN32)
         if (!g_base)
             return 0u;
-        const auto start = std::chrono::steady_clock::now();
+        const auto start = ps2x::hostNow();
         ULONG_PTR count = static_cast<ULONG_PTR>(g_written.size());
         DWORD granularity = 0;
         if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, g_base, g_bytes, g_written.data(), &count, &granularity) != 0)
@@ -267,7 +268,7 @@ namespace ps2writewatch
 #elif defined(PS2X_LINUX_WRITE_WATCH)
         if (!g_base)
             return 0u;
-        const auto start = std::chrono::steady_clock::now();
+        const auto start = ps2x::hostNow();
         const long count = scanLinux();
         if (count < 0)
         {

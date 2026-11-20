@@ -1,5 +1,7 @@
 #include "tasks.h"
 
+#include "hardware.h"
+
 #include "os.h"
 #include "system.h"
 
@@ -8,6 +10,7 @@
 #endif
 
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
 
@@ -128,6 +131,10 @@ namespace launcher
             {"git_checkout", {"This is a git checkout", "Update it with git pull, then build again."}},
             {"build_dir_refused", {"That folder can't be used", "Choose another folder for the build."}},
             {"network", {"No connection", "Check the internet connection and try again."}},
+            {"update_incomplete", {"The update couldn't replace every file",
+                                   "Something held some of them open (often an antivirus or a cloud-synced folder); "
+                                   "the folder is still the old release. Close the game and update again, or extract "
+                                   "the new release's zip into a new folder."}},
         };
 #ifndef _WIN32
         // the same codes where Linux needs other words, and its own (tools/build.py --install-deps, doctor.py)
@@ -188,6 +195,66 @@ namespace launcher
             if (dir == dir.parent_path())
                 break;
         }
+#ifdef _WIN32
+        // Standalone single-EXE GitHub release: if tools/build.py isn't next to VCSLauncher.exe, check if this .exe
+        // carries an appended ZIP payload (trailer: 8-byte uint64 zip_size + 18-byte magic "VCSREC_ZIP_PAYLOAD") or
+        // if a previously extracted engine folder already exists in %LOCALAPPDATA%\VCSRecomp\engine.
+        if (root.empty())
+        {
+            const fs::path engineDir = knownFolder(Folder::LocalAppData) / "VCSRecomp" / "engine";
+            std::ifstream selfIn(exePath(), std::ios::binary | std::ios::ate);
+            if (selfIn)
+            {
+                const std::streamoff totalSize = selfIn.tellg();
+                constexpr const char kMagic[18] = {'V','C','S','R','E','C','_','Z','I','P','_','P','A','Y','L','O','A','D'};
+                if (totalSize > 32)
+                {
+                    selfIn.seekg(totalSize - 26);
+                    uint64_t zipSize = 0;
+                    char magic[18] = {};
+                    selfIn.read(reinterpret_cast<char *>(&zipSize), 8);
+                    selfIn.read(magic, 18);
+                    if (std::memcmp(magic, kMagic, 18) == 0 && zipSize > 0 &&
+                        static_cast<std::streamoff>(zipSize + 26) < totalSize)
+                    {
+                        std::error_code ec;
+                        const fs::path stampFile = engineDir / ".payload_size";
+                        const std::string expectedStamp = std::to_string(zipSize);
+                        const bool alreadyExtracted =
+                            fs::is_regular_file(engineDir / "tools" / "build.py", ec) &&
+                            trim(readFile(stampFile)) == expectedStamp;
+                        if (!alreadyExtracted)
+                        {
+                            fs::create_directories(engineDir, ec);
+                            const fs::path tempZip = engineDir / "_payload_extract.zip";
+                            selfIn.seekg(totalSize - 26 - static_cast<std::streamoff>(zipSize));
+                            std::ofstream zipOut(tempZip, std::ios::binary | std::ios::trunc);
+                            std::vector<char> buf(65536);
+                            uint64_t rem = zipSize;
+                            while (rem > 0 && selfIn && zipOut)
+                            {
+                                const size_t chunk = static_cast<size_t>(std::min<uint64_t>(rem, buf.size()));
+                                selfIn.read(buf.data(), static_cast<std::streamsize>(chunk));
+                                zipOut.write(buf.data(), static_cast<std::streamsize>(chunk));
+                                rem -= chunk;
+                            }
+                            zipOut.close();
+                            Process::Options tarOpts;
+                            tarOpts.cwd = engineDir;
+                            Process tarProc;
+                            std::string tarErr;
+                            if (tarProc.start({"tar.exe", "-xf", pathText(tempZip), "-C", pathText(engineDir)}, tarOpts, tarErr))
+                                tarProc.wait();
+                            fs::remove(tempZip, ec);
+                            std::ofstream(stampFile, std::ios::binary | std::ios::trunc) << expectedStamp;
+                        }
+                    }
+                }
+            }
+            if (fs::is_regular_file(engineDir / "tools" / "build.py"))
+                root = engineDir;
+        }
+#endif
         if (root.empty())
         {
             error = std::string(os::kLauncherExe) + " must stay in the game's folder, next to tools and src (it builds the "
@@ -303,6 +370,8 @@ namespace launcher
                 sourceVersion = "development";
         }
         loadSettings();
+        gameConfig.loadIni(build / "vcs.ini");
+        gameConfig.scanMods(root, build);
 
         // the disc vcs.exe would use
         std::string iniIso;
@@ -515,7 +584,9 @@ namespace launcher
         if (t.kind == "build_dir_set" && t.ok())
         {
             build = pathFrom(t.result["path"].str());
-            loadSettings(); // launcher.ini came along
+            loadSettings();
+        gameConfig.loadIni(build / "vcs.ini");
+        gameConfig.scanMods(root, build); // launcher.ini came along
             say(t.result["old_built"].boolean()
                     ? "Build folder changed. The game is built again there; the old folder can be deleted afterwards: " +
                           t.result["previous"].str()
@@ -524,12 +595,26 @@ namespace launcher
             refresh();
             return;
         }
+        if (t.kind == "build" && t.ok())
+        {
+            std::error_code ec;
+            if (!fs::equivalent(build, root / "build", ec) && fs::is_directory(root / "modloader", ec) &&
+                !fs::exists(build / "modloader", ec))
+            {
+                fs::copy(root / "modloader", build / "modloader", fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
+            }
+        }
         if (t.kind == "backup_list" && t.ok())
             backups = t.result["backups"];
         if (t.kind == "rip_list" && t.ok())
             drives = t.result["drives"];
         if ((t.kind == "update_check") && t.ok())
             updateInfo = t.result;
+        if (t.kind == "update" && t.ok() && t.result["restart"].boolean())
+        {
+            updatedTo = t.result["version"].str(); // in place: this launcher is the old one until it restarts
+            updateInfo = Json();
+        }
         if (t.kind == "rip" && t.ok() && t.result.has("iso"))
             chooseDisc(pathFrom(t.result["iso"].str()));
         if (t.kind == "backup" && t.ok())
@@ -579,9 +664,41 @@ namespace launcher
                                          "json"};
         if (!settings.opt.empty())
             args.insert(args.end(), {"--opt", settings.opt});
-        runTool("build", "Building the game", args);
+        runTool("build", isPt() ? "Compilando o jogo" : "Building the game", args);
         if (busy())
             keepAwake(true);
+    }
+
+    void App::startBuildTo(const fs::path &targetDir)
+    {
+        if (!targetDir.empty())
+        {
+            std::error_code ec;
+            fs::path resolved = targetDir;
+            if (fs::equivalent(targetDir, root, ec) || fs::equivalent(targetDir, root / "build", ec))
+            {
+                resolved = root / "build";
+                fs::remove(root / ".vcs-build-dir", ec);
+            }
+            else
+            {
+                fs::create_directories(resolved, ec);
+                std::ofstream ptr(root / ".vcs-build-dir", std::ios::binary | std::ios::trunc);
+                ptr << pathText(resolved) << "\n";
+            }
+            if (!fs::equivalent(resolved, build, ec))
+            {
+                fs::create_directories(resolved, ec);
+                if (fs::is_regular_file(build / "vcs.ini", ec) && !fs::exists(resolved / "vcs.ini", ec))
+                    fs::copy_file(build / "vcs.ini", resolved / "vcs.ini", fs::copy_options::skip_existing, ec);
+                if (fs::is_regular_file(build / "launcher.ini", ec) && !fs::exists(resolved / "launcher.ini", ec))
+                    fs::copy_file(build / "launcher.ini", resolved / "launcher.ini", fs::copy_options::skip_existing, ec);
+                build = resolved;
+                if (disc.ok)
+                    writeIsoToIni(iso);
+            }
+        }
+        startBuild();
     }
 
     void App::startInstallTools()
@@ -613,6 +730,54 @@ namespace launcher
     }
 
     void App::startUpdate() { runTool("update", "Updating", {toolPath(root, "update.py"), "apply"}); }
+
+    void App::startAutoUpdateBuild()
+    {
+        std::vector<std::string> args = {toolPath(root, "update.py"), "sync"};
+        if (disc.ok && !iso.empty())
+            args.insert(args.end(), {"--iso", pathText(iso)});
+        if (!settings.opt.empty())
+            args.insert(args.end(), {"--opt", settings.opt});
+        runTool("auto_update", isPt() ? "Buscando atualizações e atualizando a build" : "Checking updates and updating build", args);
+        if (busy())
+            keepAwake(true);
+    }
+
+    void App::startShaderCacheBuild()
+    {
+        if (busy())
+            return;
+        task = std::make_unique<Task>();
+        task->kind = "shader_cache";
+        task->title = isPt() ? "Construindo Cache de Shaders (SCSKiller)" : "Building Shader Cache (SCSKiller)";
+        task->startTime = m_now;
+        const fs::path selfExe = exePath();
+        std::vector<std::string> argv = {
+            pathText(selfExe),
+            "--scskiller",
+            pathText(build),
+            "--msaa",
+            std::to_string(std::max(1, gameConfig.displayMsaa)),
+            "--lang",
+            isPt() ? "pt" : "en",
+        };
+        Process::Options options;
+        options.cwd = root;
+        options.env = {{"VCS_PROGRESS", "json"}};
+        task->process = std::make_unique<Process>();
+        std::string error;
+        if (!task->process->start(argv, options, error))
+        {
+            task->process.reset();
+            task->errorCode = "shader_cache_failed";
+            task->errorMessage = error;
+            finishTask(*task);
+        }
+        else
+        {
+            keepAwake(true);
+        }
+    }
 
     void App::startBuildDirCheck(const fs::path &path)
     {
@@ -721,6 +886,37 @@ namespace launcher
         return true;
     }
 
+    fs::path App::restartTarget() const
+    {
+        // Linux: the AppImage file (update.py renamed the new one over it; the old image stays mounted until we end)
+        if (const char *appimage = std::getenv("APPIMAGE"); appimage && *appimage && !payload.empty())
+            return pathFrom(appimage);
+        // Windows: the release's launcher, written fresh by update.py (this one runs as VCSLauncher.exe.old)
+        return root / os::kLauncherExe;
+    }
+
+    bool App::restart(std::string &error)
+    {
+        const fs::path exe = restartTarget();
+        if (!fs::is_regular_file(exe))
+        {
+            error = "The new launcher isn't there: " + pathText(exe);
+            return false;
+        }
+        Process::Options options;
+        options.cwd = root;
+        // its output to a file, not a pipe: the pipe's reader (us) is about to end
+        options.outputFile = build / "run" / "launcher_restart.log";
+        options.killOnClose = false; // it outlives us
+        m_restarted = std::make_unique<Process>();
+        if (!m_restarted->start({pathText(exe), "--after-update", std::to_string(processId())}, options, error))
+        {
+            m_restarted.reset();
+            return false;
+        }
+        return true;
+    }
+
     std::string App::gameExitText() const
     {
         const unsigned code = static_cast<unsigned>(gameExit);
@@ -796,38 +992,119 @@ namespace launcher
 
     void App::loadSettings()
     {
-        std::ifstream in(build / "launcher.ini");
-        std::string line;
-        while (std::getline(in, line))
-        {
-            line = trim(line);
-            const size_t eq = line.find('=');
-            if (eq == std::string::npos)
-                continue;
-            const std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
-            if (key == "after_launch" && (value == "minimize" || value == "close" || value == "stay"))
-                settings.afterLaunch = value;
-            else if (key == "opt" && (value.empty() || value == "lto" || value == "none" || value == "pgo"))
-                settings.opt = value;
-            else if (key == "check_updates")
-                settings.checkUpdates = value == "1";
-            else if (key == "theme" && (value == "system" || value == "light" || value == "dark"))
-                settings.theme = value;
-            else if (key == "reduce_motion")
-                settings.reduceMotion = value == "1";
-        }
+        auto readIniFile = [&](const fs::path &iniPath) {
+            std::ifstream in(iniPath);
+            std::string line;
+            while (std::getline(in, line))
+            {
+                line = trim(line);
+                const size_t eq = line.find('=');
+                if (eq == std::string::npos)
+                    continue;
+                const std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
+                if (key == "after_launch" && (value == "minimize" || value == "close" || value == "stay"))
+                    settings.afterLaunch = value;
+                else if (key == "opt" && (value.empty() || value == "lto" || value == "none" || value == "pgo"))
+                    settings.opt = value;
+                else if (key == "check_updates")
+                    settings.checkUpdates = value == "1";
+                else if (key == "theme" && (value == "system" || value == "light" || value == "dark"))
+                    settings.theme = value;
+                else if (key == "reduce_motion")
+                    settings.reduceMotion = value == "1";
+                else if (key == "auto_preset")
+                    settings.autoPresetDone = value == "1";
+                else if (key == "language" && (value == "pt" || value == "en"))
+                {
+                    settings.language = value;
+                    settings.languageChosen = true;
+                }
+            }
+        };
+        readIniFile(root / "launcher.ini");
+        // the first-run choices are the build folder's alone: the source folder's launcher.ini ships in releases, and
+        // a language or an auto preset there would skip the language prompt and the hardware's preset for everyone
+        settings.autoPresetDone = false;
+        settings.languageChosen = false;
+        settings.language = Settings{}.language;
+        readIniFile(build / "launcher.ini");
     }
 
     void App::saveSettings()
     {
+        auto writeIniFile = [&](const fs::path &iniPath, bool buildOnly) {
+            std::error_code ec;
+            fs::create_directories(iniPath.parent_path(), ec);
+            std::ofstream out(iniPath, std::ios::trunc | std::ios::binary);
+            out << "# the launcher's own settings (the game's are in vcs.ini)\n"
+                << "after_launch=" << settings.afterLaunch << "\n"
+                << "opt=" << settings.opt << "\n"
+                << "check_updates=" << (settings.checkUpdates ? 1 : 0) << "\n"
+                << "theme=" << settings.theme << "\n"
+                << "reduce_motion=" << (settings.reduceMotion ? 1 : 0) << "\n";
+            if (!buildOnly) // the source folder's launcher.ini ships in releases: no first-run choice in it
+                return;
+            out << "auto_preset=" << (settings.autoPresetDone ? 1 : 0) << "\n";
+            if (settings.languageChosen)
+                out << "language=" << settings.language << "\n";
+        };
+        writeIniFile(build / "launcher.ini", true);
+        writeIniFile(root / "launcher.ini", false);
+    }
+
+    void App::saveGameConfig()
+    {
+        if (!gameConfig.saveIni(build / "vcs.ini"))
+            say(std::string("Não foi possível salvar ") + os::kBuildIni);
+        gameConfig.saveModPriorities(root, build);
+    }
+
+    void App::applyFirstInstallPreset()
+    {
+        if (settings.autoPresetDone)
+            return;
+        // a first install gets the preset this PC runs with room to spare; a vcs.ini that already holds graphics
+        // settings (an earlier install, the player's own choice) is left as it is
+        if (!gameConfig.graphicsConfigured)
+        {
+            std::string why;
+            const GraphicsPreset preset = recommendPreset(probeHardware(), why);
+            gameConfig.applyPreset(preset);
+            saveGameConfig();
+            static const char *const kPt[] = {"Personalizado", "Original (PS2)", "Baixo", "Médio", "Alto", "Vice Ultra"};
+            static const char *const kEn[] = {"Custom", "Original (PS2)", "Low", "Medium", "High", "Vice Ultra"};
+            const int i = static_cast<int>(preset);
+            std::printf("[launcher] first install: graphics preset %s for %s\n", kEn[i], why.c_str());
+            say(isPt() ? std::string("Preset gráfico escolhido para este PC: ") + kPt[i] + " (" + why + ")"
+                       : std::string("Graphics preset chosen for this PC: ") + kEn[i] + " (" + why + ")");
+        }
+        settings.autoPresetDone = true;
+        saveSettings();
+    }
+
+    void App::refreshMods()
+    {
+        gameConfig.loadIni(build / "vcs.ini");
+        gameConfig.scanMods(root, build);
+    }
+
+    fs::path App::assetsFolder() const
+    {
         std::error_code ec;
-        fs::create_directories(build, ec);
-        std::ofstream out(build / "launcher.ini", std::ios::trunc | std::ios::binary);
-        out << "# the launcher's own settings (the game's are in vcs.ini)\n"
-            << "after_launch=" << settings.afterLaunch << "\n"
-            << "opt=" << settings.opt << "\n"
-            << "check_updates=" << (settings.checkUpdates ? 1 : 0) << "\n"
-            << "theme=" << settings.theme << "\n"
-            << "reduce_motion=" << (settings.reduceMotion ? 1 : 0) << "\n";
+        if (fs::is_directory(root / "launcher" / "assets", ec))
+            return root / "launcher" / "assets";
+        if (fs::is_directory(root / "assets", ec))
+            return root / "assets";
+        return root / "launcher" / "assets";
+    }
+
+    bool App::addToSteam(std::string &messageOut)
+    {
+        fs::path target = exePath();
+        if (const char *appimage = std::getenv("APPIMAGE"); appimage && *appimage && !payload.empty())
+            target = pathFrom(appimage);
+        else if (std::error_code ec; fs::is_regular_file(root / os::kLauncherExe, ec))
+            target = root / os::kLauncherExe;
+        return GameConfig::addToSteam(target, root, assetsFolder(), messageOut);
     }
 }

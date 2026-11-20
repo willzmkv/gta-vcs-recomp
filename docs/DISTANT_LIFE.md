@@ -87,3 +87,10 @@ peds near the player (the population distance), decorative traffic beyond, dista
   - Real population reach: `peddist=5.00`, `maxcard=350..371 m`, `maxpedd=351..371 m` (identical whether `Distant crowds` is `0` or `100`).
   - Decorative bands: `carband=495..1045 m` (`mincar=496..500 m`), `pedband=340..640 m` (`minped=341..343 m`).
   - Night coronas (22:00, `view_distance=50`): `active=56`, `veh=27`, `maxdist=249..262 m`, `tmplskip=397..488`, `behindskip=296k+`, `evicted=644..732`.
+
+## The proxies were never drawn (2026-11-12)
+
+Until 2026-11-12 no proxy - distant car or distant walker - reached the screen: the box test used rows 28-31 (the GS
+screen matrix) instead of the clip matrix 24-27, and parts under ~6 pixels (a ped's part past ~100 m) were skipped.
+The bands and counts above were measured on the simulation; the `proxies` command's `proxydraws=drawn/culled/off`
+showed 0 drawn. Fixed in vcs_hle_world.cpp (PERFORMANCE.md 43); real peds past 110 m now use the same path.

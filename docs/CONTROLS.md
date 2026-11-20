@@ -20,7 +20,7 @@ menu (F2): the **Keyboard** and **Gamepad** pages (src/game/vcs_input.cpp).
 | L2 | 1, Z | LT |
 | R2 | 3, X | RT |
 | L3 / R3 | C / V | stick clicks |
-| Start | Enter | Start / Menu |
+| Start (pause menu) | Escape | Start / Menu |
 | Select | Backspace | Back / View |
 | Walk (hold) | - (unbound) | - (a small stick tilt) |
 
@@ -36,7 +36,7 @@ foot they keep their bindings above (W walks, Space jumps):
 | Lean back / nose up | Keypad 5 | Left stick down |
 
 Steering stays on A / D (the left stick); Shift still accelerates and E / the right mouse button is still R1. The
-game's own PS2 controls apply on top. Start or Cross (Enter / Shift) skips the intro movie; the Rockstar logos before
+game's own PS2 controls apply on top. Start or Cross (Escape / Shift) skips the intro movie; the Rockstar logos before
 it can't be skipped, as on the PS2 (Game > Skip intro movies skips both).
 
 **Right mouse button = R1**: on foot it locks on to the ped nearest in front while held (with fists or a weapon), as R1
@@ -59,10 +59,21 @@ game-internals.md 12c):
   is added. Letting go leaves the camera looking where the aim did. The camera moves into the aim in 0.1 s and out of
   it in 0.2 s, with every gun (the game blends 0.35-0.4 s, and cuts out of the aim with the guns that stand Vic still;
   its other camera changes keep their blends and cuts).
+- Sprinting the game doesn't aim: with the button held the mouse turns the camera as without it, and the aim starts
+  when Vic stops sprinting.
 - When the gun runs dry while aiming the game puts the fists in Vic's hand: with the button still held nothing
   locks on until it is let go, and choosing another gun (the wheel) aims again at once.
 - Fists, melee weapons, thrown weapons and the scoped guns (sniper rifles, rocket launcher, camera, binoculars) keep
-  R1 as on the PS2. There is no aim assist on the gamepad.
+  R1 as on the PS2.
+- **Aim assist** (Gamepad, on by default; the gamepad's free aim only): the target button first **locks on** to the
+  nearest person, as the game's own aim does (its lock-on camera and marker); pushing the right stick past about a
+  third of its throw takes the aim **free from there** (the lock lets go for two frames, then the circle starts where
+  the lock-on camera looked) - GTA V's assisted aim. With no one to lock on to after six frames it is free aim at
+  once. Off: free aim only (the player's report, 2026-11-12: free aim on the DualSense had lost the lock-on).
+- **Free aim reticle** (Enhancements > Combat; Circle by default): **Dot** shows a small white dot with a thin dark
+  rim instead of the game's circle with a dot (made narrower in the texture by the picture's widening, so it stays
+  round in widescreen - the game stretches the sprite sideways) - the game's own texture (`sitem16`, game-internals.md 12c) rewritten
+  in memory while it is on, put back when it goes back to Circle. `VCS_RETICLE=0|1`.
 - It is the game's own free aim (R1 then L3 on the PS2: the left stick moves an aiming point while Vic stands still),
   driven so that Vic can move and the mouse aims; `VCS_FREEAIM=0` leaves it out entirely.
 - **Shooting from a car** (Jive Drive: Vic in the passenger seat while Lance drives - the game's own free aim, which the
@@ -75,11 +86,17 @@ game-internals.md 12c):
   and the right stick turn the circle, no button to hold, the left button fires; the right button does nothing there
   (as R1 on the PS2), and on the gamepad **R1 fires** (as Circle), as in Jive Drive's car. Up to 110 degrees either
   side of Vic's heading, 40 above level and 20 below, as the game allows.
+- **A gun on a vehicle** (Farewell To Arms: Vic in the helicopter's door with an M249, the first-person view with the
+  circle in the middle): the same again - the mouse and the right stick turn the view, the left button fires, on the
+  gamepad R1 fires. Up to 70 degrees either side of the door, as the game allows. With free aim off the mouse still
+  turns it (as in the scopes) and the gamepad's left stick does, as on the PS2.
 
 **In the scopes** (sniper rifles, rocket launcher, M16 view, camera, binoculars) the mouse turns the view itself, 1:1,
 with Mouse camera on (zoomed in it turns slower). **Mouse wheel** (Keyboard page, on by default): on foot down is the
-next weapon and up the previous one (R2 / L2, one per notch); in the sniper scope, the camera and binoculars it zooms.
-It does nothing of this while a control is bound to the wheel, while driving or while aiming.
+next weapon and up the previous one (R2 / L2, one per notch); in the sniper scope, the camera and binoculars it zooms;
+while driving down is the next radio station and up the one before (the game's own L1 steps forwards only: a step back
+is the station written two back and L1 - game-internals.md 12a; nothing happens while the radio plays an announcement,
+as with L1). It does nothing of this while a control is bound to the wheel or while aiming.
 
 ## Keyboard page
 
@@ -97,21 +114,117 @@ It does nothing of this while a control is bound to the wheel, while driving or 
   in the menus and when the window is in the background). **On foot** it turns the camera itself, as in a PC game:
   every movement turns it by the same angle at any speed and frame rate (100%: 400 counts - half an inch at 800 DPI -
   a radian), moving the mouse forward looks up. Looking up / down goes through the game's own stick pitch, which has a
-  top speed (about 1.5 rad/s at 100%); a faster movement still arrives, a few frames later. **In the scopes and free
-  aim** it turns the view itself too (above). **In vehicles and locked on** the mouse's speed becomes the right stick's
-  tilt (1,500 counts a second is full tilt), so very fast flicks there turn no faster. **Mouse sensitivity**, **Invert
-  mouse up / down**, **Free aim** and **Mouse wheel** (above). (game-internals.md 12b, 12c)
+  top speed (about 1.5 rad/s at 100%); a faster movement still arrives, a few frames later. Turned toward a wall, the
+  camera is pulled in toward the player, as the gamepad's is (`VCS_FOOT_WALL=0`: it stops at the wall's edge, as
+  before 2026-11-11). **In the scopes and free
+  aim** it turns the view itself too (above). **Behind a car, bike or boat** it turns the camera itself as well, and
+  while the mouse moves the camera stays where it is put - the car neither drags it along nor pulls it back; **Car
+  camera return** (1.5 s; 0.5-5 s or Never) after the mouse stops it eases back behind the vehicle (about 2 s) and the
+  game's camera carries on. Never while a fire truck sprays water: its hose aims where the camera looks, so the camera
+  stays where the mouse left it until the water has stopped. The gamepad's right stick (or the camera keys) takes it back at once, held or not.
+  **Car camera sensitivity** (100%, 10-400%) scales its turn on top of Mouse sensitivity.
+  `VCS_CARCAM=0` puts the old way back (the mouse as the right stick). **In the other vehicle
+  cameras and locked on** the mouse's speed becomes the right stick's tilt (1,500 counts a second is full tilt), so very
+  fast flicks there turn no faster. **Mouse sensitivity**, **Invert mouse up / down**, **Free aim** and **Mouse wheel**
+  (above). (game-internals.md 12b, 12c)
 
 ## Gamepad page
 
+- **Presets**: one click sets the driving / shooting scheme to match a GTA game (it moves only the two trigger options
+  and gamepad free aim; the button map and the rest stay, so "Custom" is whatever you set by hand afterwards):
+  - **Original (GTA III / VC / SA / VCS)** - the classic PS2 layout those games share: Cross / Square drive, Circle
+    fires, R1 locks on; the triggers look around and change weapon.
+  - **Modern (GTA IV / GTA V)** - R2 accelerates / fires, L2 brakes / aims, free aim on the right stick (no lock-on),
+    look and change-weapon on the D-pad. Best with a DualSense's adaptive triggers.
 - **Buttons**: the gamepad input for each PS2 button (any button, LT / RT, stick clicks, D-pad, or none); several PS2
   buttons may share one.
 - **Sticks and triggers**: deadzone per stick (12%; the range past it is stretched, so a small tilt beyond it still
   counts), **Camera speed** (the right stick's tilt scaled), **Trigger press point** (LT / RT are L2 / R2 buttons),
-  **Swap sticks**, **Invert camera** left / right and up / down, **Free aim** (above; to aim with the left trigger,
-  give R1 the LT and move L2 to another button).
+  **Swap sticks**, **Invert camera** left / right and up / down, **Drive with the triggers** / **Shoot with the
+  triggers** (below), **Free aim** (above).
+- **Drive with the triggers** (off by default): while you drive, **R2 accelerates and L2 brakes / reverses** (instead
+  of Cross / Square: the pad's Cross / Square then do neither; the keyboard keeps its keys), and look left / right (R2 /
+  L2 on the PS2) move to the **D-pad**, its **down** looking behind (L2 + R2). On foot the buttons are
+  unchanged. Works on any pad with triggers; it is what makes the DualSense's adaptive triggers (below) act as a live
+  throttle and brake.
+- **Shoot with the triggers** (off by default): on foot, **R2 fires and L2 aims** (instead of Circle / R1), and change
+  weapon moves to the **D-pad** - the modern GTA IV / V layout. In a vehicle the buttons are unchanged. Pairs with the
+  DualSense's weapon trigger feel (below).
+- **GTA V buttons** (off by default; an option, nothing else changes with it off): more of GTA V's layout on a
+  PlayStation pad. The **touchpad** changes the camera (Select on the PS2); while driving **R3 looks behind** (L2 +
+  R2), the **D-pad's left / right** change the radio station (previous / next; the pad's L1 no longer does) and its
+  **down** starts a sub-mission (taxi, vigilante... - R3 on the PS2). With **Drive with the triggers** on too, **L1 /
+  R1 look / aim left / right** (L2 / R2 on the PS2: the drive-by's side) and the pad's **Cross is the handbrake** (R1
+  on the PS2; Cross is free once R2 accelerates). The right stick stays the camera (a vehicle has no free aim: pushed
+  to a side it only turned the camera - the player's report, 2026-11-12). With **Shoot with the triggers** on, **R2
+  fires guns** and **Circle is melee only** (with a gun in hand the pad's Circle does nothing, so the two never fire
+  together). L3 is the horn, as in GTA V. VCS has no reload button (it reloads by itself). Checked by
+  `tools/controls_check.py`.
+- **The forklift**: its forks are the **D-pad's up / down** (the PS2's own), in every scheme - driving it, the D-pad's
+  down neither looks behind nor starts a sub-mission (the player's report, 2026-11-13: with the triggers driving, only
+  up moved the forks).
 - **Vibration**: the DualShock 2's motors on the gamepad's rumble, 0-200% (100% as on the PS2, 0% off). The game
   drives them itself (crashes, explosions, gunfire; game-internals.md 12a).
+- **DualSense** (src/game/vcs_dualsense.cpp): extras a PS5 pad has, driven from the game's state, each off a no-op on
+  other pads (the light bar alone works on a DualShock 4). Like GTA V's DualSense support:
+  - **Light bar**: its colour during play - **Health** (green full, red hurt), **Vice theme** (a steady neon pink) or
+    **Off**. **Light bar brightness** scales it.
+  - **Police flash**: the light bar flashes red / blue while you have a wanted level, faster the more stars (a full
+    red + blue cycle of 470 ms at one star down to 250 ms at six; it was 1030 - 680 ms, too slow to read as a police
+    light), back to its colour when you lose them.
+  - **Adaptive triggers**: for shooting. On foot, with **Shoot with the triggers** on (so R2 is the trigger you pull),
+    the fire trigger feels the gun, each kind its own (the player's ask, 2026-11-12): a wall that breaks at the shot,
+    then a kick for **every round fired** (seen as the clip counting down). Every wall starts a fifth of the way into
+    the pull and the shot goes as it gives way: a **pistol** a short wall (gives at ~45%) and a short, sharp kick; a
+    **shotgun** and a **sniper rifle** a full-strength wall to ~65% and a heavier kick; the **rocket launcher** the
+    longest wall (~75%) and the heaviest kick per rocket. **SMGs, rifles, the M249, minigun and flame-thrower** a
+    lighter wall to ~55%, then a buzz while they fire. (Until 2026-11-12 the walls began near the end of the pull and
+    every gun fired at 82%: the player found them late and weak.) **Reloading or out of ammo** the trigger goes slack
+    - no wall, no kick - like a gun that does not fire. Driving leaves the triggers loose, and so does getting in or
+    out of a vehicle: the triggers held then are nothing (no shot, no weapon change; it fired the gun's feel before).
+  - **Triggers while driving** (off by default): R2 / L2 push back by the vehicle's weight - a moped barely, a sports
+    car more, a truck or a tank a lot - and judder on a crash. With **Drive with the triggers** on (above) the throttle
+    (R2) firms up the harder you accelerate and **buzzes when you lose grip** (wheelspin or a slide), and the brake
+    (L2) firms up the harder you press.
+  - **Sound through the controller**: play the game's sound - the radio, the police scanner, everything - through the
+    DualSense's own speaker instead of your speakers or headphones. It is a small speaker, so it sounds thinner; turns
+    itself off when the pad is unplugged. (The game mixes all its sound together, so this cannot be the radio alone.)
+
+  (`VCS_WANTED_OFF=<hex>` overrides the ped offset the police flash reads the wanted level from; the control channel's
+  `dualsense` command shows the live value - game-internals.md 12e.)
+
+## The game's pause menu
+
+Escape (Start) opens it - also the Save menu a safehouse opens - and it works as a PC game's menu (src/game/vcs_frontend.cpp,
+game-internals.md 6m; before 2026-11-05 Start was Enter and the menu took the pad's buttons only):
+- **Keyboard**: the arrow keys move, **Enter** selects (Cross), **Escape** goes back (Triangle) - on the tab bar
+  (map / brief / game / stats / controls / audio / display) that closes the menu. Shift / F still work as Cross /
+  Triangle, and Start's own key (Escape unless rebound) is the menu's back while it is up. Enter does nothing outside it.
+- **Mouse**: the cursor shows while the menu is up. Pointing at a tab or an item moves the game's highlight there (a tab
+  shows its page, as the D-pad does); a click selects it - a tab opens its page, an item of the page under the tab bar
+  opens that page and selects it (Game > Load Game in one click). The **right button** goes back (closes the menu on
+  the tab bar).
+  - **Sliders** (Audio > Music / SFX volume, Display > Brightness): a click on a bar sets the level, holding the button
+    and moving drags it, the wheel turns it a step a notch; a click on the label only moves the highlight there.
+  - **Choices** (Speaker setup, Radio station, Subtitles, Radar, HUD, Widescreen, Trails, the Controls page): a click
+    turns to the next one, the wheel turns either way (up: next).
+  - **Map**: drag it with the left button (it stays in the range the D-pad scrolls it); the wheel zooms (up: in, as R1).
+    Cross (Enter) shows the legend, Square (Space) places the target as on the PS2.
+  - **Brief, Stats**: the wheel scrolls.
+- **Gamepad**: unchanged (Start opens and closes, the D-pad / left stick move, Cross selects, Triangle goes back).
+- What the menu takes stays out of the game: the mouse buttons and the wheel aren't Circle / R1 / weapon changes while
+  it is up, nor while still held after it closed (a click on Load Game doesn't punch); Escape held from opening it
+  isn't a back. Any key or gamepad button pressed while the mouse is on its way to an item takes over.
+- It all goes through the game's own pad: the menu sees D-pad steps, Cross and Triangle, so it sounds, highlights and
+  switches pages as on the PS2. `VCS_MENU_MOUSE=0` leaves the mouse out (Enter / Escape stay).
+  `python tools/menu_check.py` checks all of it.
+
+## Button prompts
+
+F2 > Enhancements > **Button prompts** (default Original): the controls the game's help text and pause menu show.
+Automatic follows the device used last - the keys and mouse buttons bound on the Keyboard page, or the gamepad's own
+buttons (PlayStation or Xbox glyphs, from the pad's maker) as mapped on the Gamepad page. PlayStation, Xbox and
+Keyboard & mouse fix a set; Original is the PS2's text. game-internals.md 6n, DECISIONS.md 2026-11-07.
 
 ## Menus
 
@@ -137,7 +250,7 @@ the settings menu waits for a key to bind. `VCS_SCREENSHOT_DIR=<dir>` saves them
 ## Window
 
 Alt+Enter switches between full screen and the window (Display > Window mode; saved in vcs.ini). Enter with Alt
-held is not Start. Game > **In the background** decides what happens when another window is in front: keep running
+held is not Cross in the pause menu (nor a binding). Game > **In the background** decides what happens when another window is in front: keep running
 (as before), mute, or pause.
 
 ## Debug keys
@@ -145,7 +258,7 @@ held is not Start. Game > **In the background** decides what happens when anothe
 |---|---|
 | F3 | performance overlay: game fps and frame-time percentiles, EE thread time per phase (game / render / IOP / wait), GS and DMA counters, host frame and GPU submit times, audio buffer, and a frame-time graph; under it (beside it on a short screen) the game's state: the player's position, heading, state, health, armour, money and weapons, the vehicle (model, position, heading, health, speed), the camera (mode, position, heading, pitch, FOV), the clock, area, world level, game time, time step, pauses, pool use and the running scripts (the mission's with its IP). The same lines answer `python tools/gamectl.py gameinfo` |
 | F4 | start / stop recording one CSV row per game frame to `perf_<date>_<time>.csv` (working directory); summarise with `python tools/perf_report.py <file>` |
-| F12 | (hardware renderer) list the next frame's draws on stderr and dump its render targets |
+| F12 | (hardware renderer, only with `PS2X_HW_DUMP_KEY=1`: F12 is Steam's and Bandicam's key) list the next frame's draws on stderr and dump its render targets |
 
 ## Test runs without a window
 `python tools/run.py 600 test --hidden` starts the game with no window on the desktop, no sound, and the physical
@@ -156,8 +269,9 @@ the game layer `setting <key> [value]` (a setting read or changed; an action set
 `menu scroll <0..1>` / `menu close` (the settings menu for screenshots), `padstate` (the last pad report the
 bindings made, and the pad reads so far), `mouse <dx> <dy>` (mouse motion in counts, y down, as the mouse sends it),
 `gamepad on|off`, `gamepad <a b x y lb rb back start ls rs up down left right> <0|1>`, `gamepad <lx ly rx ry lt rt>
-<value>` (a gamepad set from the channel in place of the real one while on) and `aimstate` (free aim on or not, and
-the shots sent down the camera line so far). `--control` (`PS2X_CONTROL=1`) opens the same channel with the window shown; `PS2X_INPUT=injected`
+<value>` (a gamepad set from the channel in place of the real one while on), `aimstate` (free aim on or not, and
+the shots sent down the camera line so far) and `dualsense` (the pad's light bar / adaptive-trigger support and the
+game reads that drive them - the wanted level, health, driving - for confirming the wanted-level address). `--control` (`PS2X_CONTROL=1`) opens the same channel with the window shown; `PS2X_INPUT=injected`
 ignores physical input with the window shown. Injected keys go through the bindings like physical ones:
 `tools/controls_check.py` checks them (also a `regress.py` step). `VCS_INPUT_MAP=0` falls back to the runtime's fixed
 built-in mapping (`ps2_pad.cpp`, the old defaults).

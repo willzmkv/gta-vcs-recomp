@@ -4,6 +4,8 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_control.h"
+#include "game/vcs_display.h"
+#include "settings/settings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -27,12 +29,14 @@ namespace vcs::aim
         constexpr uint32_t kFreeAimBit = 0x00080000u;
         constexpr uint32_t kForcedBit = 0x00200000u; // bit 53: a script's forced free aim (SET_PLAYER_FORCE_FREE_AIMING)
         constexpr uint32_t kEntityFlags = 0x48u;    // & 0xE: 6 ped, 8 object
+        constexpr uint32_t kPedAttachedTo = 0x858u; // the vehicle a script attached him to (ATTACH_CHAR_TO_CAR)
         // TheCamera and its CCams (game-internals.md 12b)
         constexpr uint32_t kTheCamera = 0x006F44D0u;
         constexpr uint32_t kActiveCam = kTheCamera + 0x50u;
         constexpr uint32_t kCams = kTheCamera + 0x70u, kCamSize = 0x270u;
         constexpr uint32_t kCamSource = 0x20u, kCamAlpha = 0x78u, kCamBeta = 0x7Cu;
         constexpr uint32_t kCamModeLockOn = 11;
+        constexpr uint32_t kCamModeMountedGun = 45; // first person behind a gun on a vehicle (VC's HELICANNON_1STPERSON)
         constexpr uint32_t kTimeStep = 0x004CD110u; // CTimer::ms_fTimeStep (1.0 = 1/50 s)
         // the camera's blend from one CCam to the next (game-internals.md 12c): a byte set while it runs, and its
         // durations in ms (400 into the lock-on / free-aim camera, 350 out of it)
@@ -50,6 +54,20 @@ namespace vcs::aim
         // Guest memory for the shot's start point: the EE kernel's area below the game (0x00000-0x7FFFF), unused by the
         // recompiled runtime and the game (all zero in play, 2026-10-31).
         constexpr uint32_t kScratch = 0x00060000u;
+
+        // The free-aim circle is the HUD dictionary's texture "sitem16" (VC's M16 sight name; game-internals.md 12c):
+        // 64 x 64, 4-bit linear indices (the low nibble the left pixel), its 16-colour CLUT (RGBA, alpha 0x80 opaque)
+        // right after the pixels. 0x6EDD94 holds its texture record: +0 the raster (+8 the pixels), +0x10 the name.
+        // Found 2026-11-12 from a free-aim RAM dump: the dumped texture's 16 colours as a CLUT, the pixels before it.
+        constexpr uint32_t kReticleTexture = 0x006EDD94u;
+        constexpr uint32_t kReticlePixels = 64 * 64 / 2, kReticleBytes = kReticlePixels + 16 * 4;
+        enum Reticle { ReticleCircle = 0, ReticleDot = 1 };
+        std::atomic<int> g_reticle{ReticleCircle};
+        uint32_t g_reticleAt = 0;            // the pixels the original below was read from (0: none)
+        uint8_t g_reticleOriginal[kReticleBytes];
+        uint8_t g_reticleDot[kReticleBytes];     // a small white dot with a soft dark rim, for the aspect below
+        uint8_t g_reticleWritten[kReticleBytes]; // what was last written there
+        float g_reticleWidening = 0.0f;          // the aspect widening the dot was made for (0: not made)
 
         constexpr float kDummyDistance = 12.0f; // metres from Vic: the lock drops past ~30 (the weapons' lock-on range)
         constexpr float kPivotHeight = 0.6f;    // the dummy turns about Vic's shoulders
@@ -80,11 +98,17 @@ namespace vcs::aim
                       // held: R1 up until it is let go or a gun is back in hand (then free aim again)
             Script,   // the game's own free aim a script started (a car's drive-by mode, the forced free aim on foot): the
                       // dummy is ours, no buttons
+            Mounted,  // a gun on a vehicle a script attached him to (Farewell To Arms' helicopter door): its camera is ours
+            Assist,   // aim assist: plain R1, the game's lock-on, until the right stick moves (then free aim from where
+                      // the lock-on camera looks) or nothing was locked on to after a few reports
         };
         // game thread
         State g_state = State::Idle;
         int g_wait = 0;               // Entering: frames waited; Released: frames left with R1 up
         constexpr int kRetryFrames = 8;
+        constexpr int kAssistFrames = 6;    // Assist: reports to wait for the game's lock-on before free aim
+        constexpr float kAssistStick = 0.1f; // Assist: the right stick (rate, squared curve: ~0.3 of the throw) leaves it
+        bool g_assistDone = false;           // this hold of the button went on from the lock-on to free aim
         uint32_t g_dummy = 0;
         float g_yaw = 0, g_pitch = 0; // the aim from Vic's shoulders: yaw from +x toward +y, pitch up
         int g_quickBlend = 0;         // frames left to shorten the camera's blend into / out of free aim
@@ -138,6 +162,13 @@ namespace vcs::aim
                    (rd32(ped + kPedVehicle) || (rd32(ped + kPedFreeAimWord) & kForcedBit));
         }
 
+        // Attached to a vehicle by a script (ATTACH_CHAR_TO_CAR with a weapon) and behind its gun: Vic does not aim
+        // through the free aim there, the camera is the aim (game-internals.md 12c).
+        bool mountedGun(uint32_t ped)
+        {
+            return ped && rd32(ped + kPedAttachedTo) && (rd32(activeCam()) & 0xFFFFu) == kCamModeMountedGun;
+        }
+
         float weaponRange(uint32_t ped)
         {
             const int8_t slot = static_cast<int8_t>(g_rdram[(ped + kPedSlot) & kRamMask]);
@@ -155,6 +186,14 @@ namespace vcs::aim
                                  rdf(ped + kPedPos + 8) + kPivotHeight + kDummyDistance * std::sin(g_pitch)};
             wrVec(g_dummy + kPedPos, at);
             wrVec(ped + kPedAimPoint, at);
+        }
+
+        // The aim along where the camera `cam` looks (its Front), about level.
+        void aimAlongCamera(uint32_t cam)
+        {
+            const float fx = rdf(cam + 0x10), fy = rdf(cam + 0x14), fz = rdf(cam + 0x18);
+            g_yaw = std::atan2(fy, fx);
+            g_pitch = std::clamp(std::asin(std::clamp(fz, -1.0f, 1.0f)), -kStartPitchLimit, kStartPitchLimit);
         }
 
         void stop(const char *why)
@@ -196,8 +235,84 @@ namespace vcs::aim
         // CGame::Process: the world runs with the free-aim bit cleared - to the game a lock-on to an object, so Vic
         // walks / strafes / stands as he does locked on with this weapon, and the left stick moves him (in the game's
         // free aim it moves the dummy, and Vic stands still).
+        // The dot: white inside 2.25 texels of the centre, a dark rim out to 3.25 (seen on a bright sky), 4 x 4 samples a
+        // texel; each texel the nearest of 16 colours (clear, eight whites, seven dark greys by alpha), premultiplied.
+        // The game draws the sprite for 4:3, so a wider picture stretches it sideways (`widening`, vcs_display.h: 4/3 at
+        // 16:9 - the player saw an oval): the dot is made that much narrower in the texture, round on the screen.
+        void makeDot(float widening)
+        {
+            g_reticleWidening = widening;
+            uint8_t clut[16][4] = {};
+            for (int k = 1; k <= 8; ++k)
+                clut[k][0] = clut[k][1] = clut[k][2] = 0xFF, clut[k][3] = static_cast<uint8_t>(k * 16);
+            for (int k = 9; k < 16; ++k)
+                clut[k][0] = clut[k][1] = clut[k][2] = 0x20, clut[k][3] = static_cast<uint8_t>((k - 8) * 16);
+            std::memset(g_reticleDot, 0, kReticlePixels);
+            for (int y = 0; y < 64; ++y)
+                for (int x = 0; x < 64; ++x)
+                {
+                    float white = 0.0f, dark = 0.0f;
+                    for (int s = 0; s < 16; ++s)
+                    {
+                        const float dx = (x + (s % 4 + 0.5f) / 4.0f - 32.0f) * widening, dy = y + (s / 4 + 0.5f) / 4.0f - 32.0f;
+                        const float r = std::sqrt(dx * dx + dy * dy);
+                        if (r < 2.25f)
+                            white += 1.0f / 16.0f;
+                        else if (r < 3.25f)
+                            dark += 1.0f / 16.0f;
+                    }
+                    const float alpha = white + dark * 0.75f, grey = white * 255.0f + dark * 0.75f * 32.0f;
+                    int best = 0;
+                    float bestErr = 1e30f;
+                    for (int k = 0; k < 16; ++k)
+                    {
+                        const float a = clut[k][3] / 128.0f, ea = (a - alpha) * 255.0f, eg = clut[k][0] * a - grey;
+                        if (ea * ea + eg * eg < bestErr)
+                            bestErr = ea * ea + eg * eg, best = k;
+                    }
+                    g_reticleDot[(y * 64 + x) / 2] |= static_cast<uint8_t>(x & 1 ? best << 4 : best);
+                }
+            std::memcpy(g_reticleDot + kReticlePixels, clut, sizeof(clut));
+        }
+
+        // Game thread, each frame: the circle's texels and CLUT as the setting wants them. The original is kept from the
+        // first look (the texture's address checked by its record's name) and put back when the setting goes back.
+        void updateReticle()
+        {
+            const uint32_t rec = rd32(kReticleTexture);
+            if (rec < 0x100000u || rec >= 0x2000000u || std::memcmp(g_rdram + rec + 0x10u, "sitem16", 8) != 0)
+                return;
+            const uint32_t pixels = rd32(rd32(rec) + 8u);
+            if (pixels < 0x100000u || pixels + kReticleBytes > 0x2000000u)
+                return;
+            uint8_t *at = g_rdram + pixels;
+            // ours: what is there is what was written (else the game's: the original, or reloaded)
+            const bool ours = g_reticleAt == pixels && std::memcmp(at, g_reticleWritten, kReticleBytes) == 0;
+            if (g_reticle.load(std::memory_order_relaxed) == ReticleDot)
+            {
+                const float widening = std::clamp(vcs::aspectWidening(), 0.5f, 4.0f);
+                if (widening != g_reticleWidening)
+                    makeDot(widening);
+                if (ours && std::memcmp(g_reticleWritten, g_reticleDot, kReticleBytes) == 0)
+                    return;
+                if (!ours)
+                {
+                    std::memcpy(g_reticleOriginal, at, kReticleBytes);
+                    g_reticleAt = pixels;
+                }
+                std::memcpy(at, g_reticleDot, kReticleBytes);
+                std::memcpy(g_reticleWritten, g_reticleDot, kReticleBytes);
+            }
+            else if (ours)
+            {
+                std::memcpy(at, g_reticleOriginal, kReticleBytes);
+                g_reticleAt = 0;
+            }
+        }
+
         PS2_GUEST_CC void gameProcess(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
+            updateReticle();
             if (g_state == State::Active)
                 if (const uint32_t ped = rd32(kPlayerPed))
                     setFreeAimBit(ped, false);
@@ -305,6 +420,23 @@ namespace vcs::aim
         });
     }
 
+    void registerSettings()
+    {
+        settings::Spec s;
+        s.key = "enhance.reticle";
+        s.page = "Enhancements";
+        s.section = "Combat";
+        s.label = "Free aim reticle";
+        s.help = "What free aim (Keyboard / Gamepad > Free aim) puts where the shots go. Circle: the game's white circle "
+                 "with a dot. Dot: a small white dot alone, with a thin dark rim so it shows on a bright sky.";
+        s.type = settings::Type::Choice;
+        s.choices = {{"Circle", ReticleCircle}, {"Dot", ReticleDot}};
+        s.defaultValue = ReticleCircle;
+        s.env = "VCS_RETICLE";
+        s.onChange = [](int v) { g_reticle.store(v, std::memory_order_relaxed); };
+        settings::add(s);
+    }
+
     bool gunInHand()
     {
         const uint32_t ped = g_rdram ? rd32(kPlayerPed) : 0;
@@ -312,6 +444,16 @@ namespace vcs::aim
             return false;
         const int8_t slot = static_cast<int8_t>(g_rdram[(ped + kPedSlot) & kRamMask]);
         return slot >= 0 && slot < 10 && isGun(rd32(ped + kPedWeapons + slot * 0x1Cu));
+    }
+
+    bool firearmInHand()
+    {
+        const uint32_t ped = g_rdram ? rd32(kPlayerPed) : 0;
+        if (!ped)
+            return false;
+        const int8_t slot = static_cast<int8_t>(g_rdram[(ped + kPedSlot) & kRamMask]);
+        const uint32_t type = slot >= 0 && slot < 10 ? rd32(ped + kPedWeapons + slot * 0x1Cu) : 0;
+        return isGun(type) || (type >= 30 && type <= 32);
     }
 
     bool aiming() { return g_active.load(std::memory_order_relaxed); }
@@ -390,6 +532,33 @@ namespace vcs::aim
             wrVec(ped + kPedAimPoint, at);
             return out;
         }
+
+        // A gun on a vehicle (game-internals.md 12c: Farewell To Arms puts Vic in its helicopter's door with an M249): the
+        // camera (mode 45, FUN_00297cb8) is the aim, its circle in the middle, and the left stick turns it - its heading
+        // (+0x7C) is the turn from the side Vic faces, signed, kept within the attachment's limit (70 deg there), its
+        // pitch within the script's. Here the mouse / right stick turn it instead (the left stick centred), the gamepad's
+        // R1 fires, as in a script's free aim; the camera's update keeps both in its limits.
+        Output mounted(uint32_t ped, const Input &in)
+        {
+            Output out;
+            if (g_state != State::Mounted)
+            {
+                if (g_state == State::Active)
+                    stop("a gun on a vehicle");
+                g_state = State::Mounted;
+                g_active = true;
+                std::fprintf(stderr, "[aim] a gun on a vehicle (attached to 0x%x)\n", rd32(ped + kPedAttachedTo));
+            }
+            out.camera = out.leftStick = out.padR1Fires = true;
+            const uint32_t cam = activeCam();
+            const float dt = std::clamp(rdf(kTimeStep), 0.05f, 3.4f) / 50.0f;
+            const float turn = in.turn + in.turnRate * kStickRate * dt;
+            const float tilt = in.tilt + in.tiltRate * kStickRate * dt;
+            // signed: wrapped into 0..2 pi a turn right of the middle became the limit on the left (the user's report)
+            wrf(cam + kCamBeta, std::remainder(rdf(cam + kCamBeta) + turn, 6.2831855f));
+            wrf(cam + kCamAlpha, rdf(cam + kCamAlpha) + tilt);
+            return out;
+        }
     }
 
     Output update(const Input &in)
@@ -400,15 +569,18 @@ namespace vcs::aim
             --g_handBack; // the camera hasn't come back to the follow camera in time: leave it
         if (in.on && scriptFreeAim(ped))
             return scripted(ped, in);
-        if (g_state == State::Script)
+        if (in.on && mountedGun(ped))
+            return mounted(ped, in);
+        if (g_state == State::Script || g_state == State::Mounted)
         {
-            std::fprintf(stderr, "[aim] the game's free aim off\n");
+            std::fprintf(stderr, g_state == State::Script ? "[aim] the game's free aim off\n" : "[aim] the gun on a vehicle off\n");
             g_state = State::Idle;
             g_active = false;
         }
         if (!ped || !in.want || !onFoot(ped))
         {
             stop(!in.want ? "released" : "not on foot");
+            g_assistDone = false;
             return out;
         }
         if (!gunInHand())
@@ -425,25 +597,52 @@ namespace vcs::aim
         }
         out.own = true;
         const uint32_t cam = activeCam();
+        if (g_state == State::Idle && in.assist && !g_assistDone)
+        {
+            // aim assist: the game's own lock-on first (plain R1; its camera)
+            g_state = State::Assist;
+            g_wait = 0;
+            out.r1 = true;
+            return out;
+        }
         switch (g_state)
         {
         case State::Released:
             if (--g_wait <= 0)
                 g_state = State::Idle; // R1 up until now; the next report enters again
             return out;
+        case State::Assist:
+        {
+            const uint32_t target = rd32(ped + kPedTarget);
+            const bool stick = std::fabs(in.turnRate) > kAssistStick || std::fabs(in.tiltRate) > kAssistStick;
+            if (in.assist && !stick && (target ? !isObject(target) : ++g_wait < kAssistFrames))
+            {
+                out.r1 = true; // locked on (or still looking for someone): the game's
+                return out;
+            }
+            // on to free aim, from where the camera looks: from a lock, R1 up a moment first (the game keeps a ped's
+            // lock through R1 + L3); with no one locked on to, R1 + L3 at once
+            g_assistDone = true;
+            if (target)
+            {
+                g_state = State::Released;
+                g_wait = 2;
+                return out;
+            }
+            [[fallthrough]];
+        }
         case State::Held: // a gun in hand again, the button still held: free aim again
         case State::Idle:
         {
-            // aim where the camera looks
-            const float fx = rdf(cam + 0x10), fy = rdf(cam + 0x14), fz = rdf(cam + 0x18);
-            g_yaw = std::atan2(fy, fx);
-            g_pitch = std::clamp(std::asin(std::clamp(fz, -1.0f, 1.0f)), -kStartPitchLimit, kStartPitchLimit);
+            aimAlongCamera(cam);
             g_state = State::Entering;
             g_wait = 0;
             g_quickBlend = 30; // until a few frames after the free-aim lock is there
             g_blendMs = kBlendInMs;
             g_handBack = 0;
-            out.camera = true;
+            // The camera is the game's until its free aim is there: the mouse keeps turning it meanwhile. Sprinting the
+            // game never enters free aim, and taking the camera from the first R1 froze it for each try (20 frames,
+            // then 8 turning: the user's "incredibly choppy" turn with the right button held while running).
             out.r1 = out.l3 = true;
             return out;
         }
@@ -452,9 +651,10 @@ namespace vcs::aim
             const uint32_t target = rd32(ped + kPedTarget);
             if (!(isObject(target) && freeAimBit(ped)))
             {
-                // not yet (Vic may still be busy: firing, reloading, changing weapon). The game took R1 without L3
-                // and locked on to a ped, or ~20 frames went by: let go a few frames, then try again
-                out.camera = true;
+                // not yet (Vic may still be busy: firing, reloading, changing weapon; sprinting he never gets there).
+                // The game took R1 without L3 and locked on to a ped, or ~20 frames went by: let go a few frames, then
+                // try again. The camera turns as without the button meanwhile; the aim starts where it then looks.
+                aimAlongCamera(cam);
                 out.r1 = !target && ++g_wait < 20;
                 if (!out.r1)
                 {

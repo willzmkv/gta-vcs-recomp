@@ -81,7 +81,7 @@ namespace ps2recomp
         switch (subfunc)
         {
         case MMI1_PABSW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSW(GPR_VEC(ctx, {})));", rd, rs);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSW(GPR_VEC(ctx, {})));", rd, rt); // [gta-recomp] rt (issue 80)
         case MMI1_PCEQW:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PCEQW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PMINW:
@@ -89,7 +89,7 @@ namespace ps2recomp
         case MMI1_PADSBH:
             return translatePADSBH(inst);
         case MMI1_PABSH:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSH(GPR_VEC(ctx, {})));", rd, rs);
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PABSH(GPR_VEC(ctx, {})));", rd, rt); // [gta-recomp] rt (issue 80)
         case MMI1_PCEQH:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PCEQH(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PMINH:
@@ -105,9 +105,11 @@ namespace ps2recomp
         case MMI1_PEXTUW:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXTUW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PADDUH:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_add_epi16(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+            // [gta-recomp] saturating (issue 80)
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PADDUH(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PSUBUH:
-            return fmt::format("SET_GPR_VEC(ctx, {}, _mm_sub_epi16(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+            // [gta-recomp] saturating (issue 80)
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSUBUH(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PEXTUH:
             return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PEXTUH(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
         case MMI1_PADDUB:
@@ -135,9 +137,11 @@ namespace ps2recomp
         case MMI2_PMADDW:
             return translatePMADDW(inst);
         case MMI2_PSLLVW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSLLVW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+            // [gta-recomp] rt is the value, rs the amount (issue 80)
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSLLVW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rt, rs);
         case MMI2_PSRLVW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSRLVW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+            // [gta-recomp] rt is the value, rs the amount (issue 80)
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSRLVW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rt, rs);
         case MMI2_PMSUBW:
             return translatePMSUBW(inst);
         case MMI2_PMFHI:
@@ -193,7 +197,8 @@ namespace ps2recomp
         case MMI3_PMADDUW:
             return translatePMADDUW(inst);
         case MMI3_PSRAVW:
-            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSRAVW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rs, rt);
+            // [gta-recomp] rt is the value, rs the amount (issue 80)
+            return fmt::format("SET_GPR_VEC(ctx, {}, PS2_PSRAVW(GPR_VEC(ctx, {}), GPR_VEC(ctx, {})));", rd, rt, rs);
         case MMI3_PMTHI:
             return translatePMTHI(inst);
         case MMI3_PMTLO:

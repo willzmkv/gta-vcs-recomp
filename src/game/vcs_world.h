@@ -4,7 +4,7 @@
 
 class PS2Runtime;
 
-namespace vcs::world
+namespace vcs::world_areas
 {
     // VCS_TRACE_AREAS=1: every area request, piece read / done and area swap, with its time - how long an area takes
     // from the request to being drawn (the pop-in while driving).

@@ -21,25 +21,34 @@
 #include "debug/watchdog.h"
 #include "disc/iso_image.h"
 #include "disc/vcs_disc_id.h"
+#include "game/vcs_aim.h"
 #include "game/vcs_display.h"
+#include "game/vcs_driveby.h"
 #include "game/vcs_framerate.h"
 #include "game/vcs_movie.h"
 #include "game/vcs_hud.h"
 #include "game/vcs_input.h"
+#include "game/vcs_dualsense.h"
+#include "game/vcs_prompts.h"
 #include "game/vcs_volume.h"
 #include "game/vcs_fog.h"
 #include "game/vcs_distance.h"
 #include "game/vcs_distant.h"
 #include "game/vcs_memory.h"
 #include "game/vcs_world.h"
+#include "game/vcs_world_hd.h"
+#include "game/vcs_world_hd_coronas.h"
+#include "game/vcs_streaming_trace.h"
 #include "mods/modloader.h"
 #include "mods/rwconv.h"
+#include "game/vcs_world_detail.h"
 #include "platform/platform.h"
 #include "render/presenter.h"
 #include "rhi/rhi.h"
 #include "settings/settings.h"
 #include "ui/settings_menu.h"
 #include "ui/trainer_menu.h"
+#include "ui/ui_theme.h"
 #include "runtime/ps2_audio_out.h"
 #include "runtime/ps2_control.h"
 #include "util/sha1.h"
@@ -220,6 +229,14 @@ namespace
         }
     }
 
+    // Display > Cutscene black bars: always on at 4:3 (the PS2's picture; the menu greys the setting out), the player's
+    // choice in widescreen. "Match window" with a 4:3 window counts as 4:3.
+    bool cutsceneBarsLocked() { return g_appliedAspect < 4.0f / 3.0f + 0.01f; }
+    void applyCutsceneBars()
+    {
+        vcs::setCutsceneBars(cutsceneBarsLocked() || settings::value("display.cutscene_bars") != 0);
+    }
+
     // Display aspect: the presenter's ratio, the game camera's Hor+ widening and the HUD squeeze (game/vcs_display.h).
     void applyAspect()
     {
@@ -230,7 +247,9 @@ namespace
         gsHwSetAspectWidening(aspect / (4.0f / 3.0f)); // post effects keep their 4:3 proportions
         const int hud = settings::value("display.hud");
         gsHwSetHudSqueeze(hud != 1 ? (4.0f / 3.0f) / aspect : 1.0f);
+        vcs::setHudSqueeze(hud != 1 ? (4.0f / 3.0f) / aspect : 1.0f); // the scope mask's bars (game/vcs_hud.h)
         vcs::setHudAnchoring(hud == 2); // per-element placement (game/vcs_hud.h)
+        applyCutsceneBars();
         std::fprintf(stderr, "[settings] display aspect %.3f, HUD %s\n", aspect, hud == 0 ? "4:3" : hud == 2 ? "screen edges" : "stretched");
     }
 
@@ -310,7 +329,7 @@ namespace
                                 {"display.fps", vcs::kCapRefresh}, {"display.vsync", 0}};
     const Preset kLight[] = {{"display.aspect", 0}, {"display.hud", 2},    {"display.scale", 1},  {"display.msaa", 1},
                              {"display.aniso", 4},  {"display.timing", 1}, {"display.fps", 60}, {"display.vsync", 0}};
-    const char *const kPresetKeys[] = {"display.aspect", "display.hud", "display.scale", "display.msaa",
+    const char *const kPresetKeys[] = {"display.aspect", "display.hud", "display.cutscene_bars", "display.scale", "display.msaa",
                                        "display.aniso",  "display.timing", "display.fps", "display.vsync"};
 
     template <size_t N> void applyPreset(const char *name, const Preset (&values)[N])
@@ -454,6 +473,38 @@ namespace
         s.env = "VCS_HUD";
         s.defaultValue = 0;
         s.onChange = [](int) { applyAspect(); };
+        settings::add(s);
+
+        s = {};
+        s.key = "display.cutscene_bars";
+        s.page = "Display";
+        s.section = "Screen";
+        s.label = "Cutscene black bars";
+        s.help = "The black bars above and below cutscenes, as on the PS2. Off shows the whole picture in widescreen "
+                 "(the PS2's own widescreen mode had none).";
+        s.type = Type::Toggle;
+        s.defaultValue = 1;
+        s.env = "VCS_CUTSCENE_BARS";
+        s.onChange = [](int) { applyCutsceneBars(); };
+        s.locked = [] { return cutsceneBarsLocked(); };
+        s.lockedValue = 1;
+        s.lockedNote = "Always on at 4:3, as on the PS2: choose a widescreen aspect ratio to change it.";
+        settings::add(s);
+
+        s = {};
+        s.key = "display.cutscene_framing";
+        s.page = "Display";
+        s.section = "Screen";
+        s.label = "Cutscene framing";
+        s.help = "PS2: cutscenes show the width the PS2 showed and fill the widescreen screen by cutting the top and bottom, "
+                 "as its black bars did - people a scene keeps just off screen stay off screen until they walk in (the "
+                 "black bars are not drawn over it). Wide: the extra width of gameplay in cutscenes too; people waiting "
+                 "at the edges can be seen. No difference at 4:3.";
+        s.type = Type::Choice;
+        s.choices = {{"PS2", 1}, {"Wide", 0}};
+        s.defaultValue = 1;
+        s.env = "VCS_CUTSCENE_FRAMING";
+        s.onChange = [](int v) { vcs::setCutsceneFraming(v != 0); };
         settings::add(s);
 
         s = {};
@@ -652,15 +703,10 @@ namespace
         s.type = Type::Toggle;
         s.defaultValue = 0;
         s.env = "VCS_POST_PROCESS";
-        s.onChange = [](int v) {
-            present::setPostProcessEnabled(v != 0);
-            // when the toggle is switched on and exposure is still at its default, give a
-            // visible nudge so the effect is immediately apparent; switching off restores it
-            if (v != 0 && settings::value("graphics.exposure") == 100)
-                settings::set("graphics.exposure", 120);
-            else if (v == 0)
-                settings::set("graphics.exposure", 100);
-        };
+        // the exposure stays as set (100, the original's, by default): switching this on used to push it to 120, and
+        // since the launcher's presets switch it on, players ended up with a brighter picture than the PS2's (the
+        // player's request, 2026-11-17)
+        s.onChange = [](int v) { present::setPostProcessEnabled(v != 0); };
         settings::add(s);
 
         s = {};
@@ -682,9 +728,24 @@ namespace
         vcs::distance::registerSettings(); // the objects' draw distance (game/vcs_distance.h)
         vcs::distant::registerSettings();  // decorative distant traffic (game/vcs_distant.h)
         vcs::memory::registerSettings(); // the streaming heap's size (game/vcs_memory.h)
+        vcs::world_hd::registerSettings(); // HD world distance (experimental, game/vcs_world_hd.h)
+        vcs::streaming_trace::registerSettings(); // streaming pipeline trace (experimental, game/vcs_streaming_trace.h)
 
         // The graphics API, when the build has more than one (Windows: D3D11, D3D12, Vulkan with VCS_RHI_VULKAN);
         // VCS_RHI=d3d11|d3d12|vulkan|null chooses for one run (render/presenter.h).
+        // The reflection on car paint (docs/game-internals.md 6g): the PS2 samples the frame once per spot, so a panel
+        // flickers as the camera moves - the same at every resolution, but plainer to see when the rest of the picture is
+        // sharp. Always Auto: the original at 1x, Smooth above it - no setting (the user's choice, DECISIONS.md
+        // 2026-11-06). VCS_REFLECTIONS=0|1|2 (Original / Smooth / Auto) picks for one run, for comparisons.
+        {
+            int mode = 2;
+            if (const char *e = std::getenv("VCS_REFLECTIONS"); e && *e >= '0' && *e <= '2' && !e[1])
+                mode = *e - '0';
+            vcs::setReflectionFilter(mode);
+        }
+
+        // The graphics API, when the build has more than one (Windows with VCS_RHI_VULKAN); VCS_RHI=d3d11|vulkan|null
+        // chooses for one run (render/presenter.h).
         s = {};
         s.key = "display.renderer";
         s.page = "Graphics";
@@ -702,8 +763,36 @@ namespace
         if (s.choices.size() > 1)
             settings::add(s);
 
+        // The graphics card, on a PC with more than one (GitHub issue 112: a laptop started the game on its integrated
+        // chip): the cards this PC has, by name, the fastest first and the default. vcs.ini keeps the card's id (rhi::Gpu);
+        // a card no longer there falls back to the fastest. The log's "[rhi] graphics cards" line names them with their
+        // ids (VCS_GPU=<id> for one run), "[present] ... on ..." the one in use.
+        if (const std::vector<rhi::Gpu> gpus = rhi::listGpus(); !gpus.empty())
+        {
+            s = {};
+            s.key = "display.gpu";
+            s.page = "Graphics";
+            s.section = "Renderer";
+            s.label = "Graphics card";
+            s.help = "The graphics card the game draws with, on a PC with more than one (most gaming laptops). The first "
+                     "is the fastest, and the default.";
+            s.type = Type::Choice;
+            for (const rhi::Gpu &g : gpus)
+                s.choices.push_back({g.name + (g.integrated ? " (integrated)" : ""), g.id});
+            s.defaultValue = gpus[0].id;
+            s.apply = Apply::Restart;
+            s.env = "VCS_GPU";
+            s.onChange = [](int v) { present::setGpu(v); };
+            settings::add(s);
+        }
+
         vcs::input::registerSettings(); // the Keyboard & mouse and Gamepad pages (game/vcs_input.h)
+        vcs::dualsense::registerSettings(); // the Gamepad page's DualSense section (game/vcs_dualsense.h)
         vcs::mods::registerSettings(exeDirectory()); // the Mods page: modloader/ and texture packs (mods/modloader.h)
+        vcs::prompts::registerSettings(); // the Enhancements page: button prompts by device (game/vcs_prompts.h)
+        vcs::world::registerSettings();   // Enhancements > World: density, draw distance (game/vcs_world_detail.h)
+        vcs::driveby::registerSettings(); // Enhancements > Combat: drive-by fire rate (game/vcs_driveby.h)
+        vcs::aim::registerSettings();     // Enhancements > Combat: the free-aim reticle (game/vcs_aim.h)
 
         s = {};
         s.key = "graphics.perf_overlay";
@@ -837,8 +926,10 @@ int main(int argc, char *argv[])
             setEnv("PS2X_GS", "hw");
         registerSettings();
         settings::load(exeDirectory() / "vcs.ini");
-        if (ps2control::hiddenMode())
-            settings::keepFile(); // a test run never changes the player's settings
+        // a test run never changes the player's settings: hidden, or shown (VCS_KEEP_SETTINGS=1 from
+        // toolchain.test_window when VCS_TEST_VISIBLE=1)
+        if (const char *keep = std::getenv("VCS_KEEP_SETTINGS"); ps2control::hiddenMode() || (keep && keep[0] == '1'))
+            settings::keepFile();
         settings::applyAll();
         restoreWindowPlacement();
         const fs::path isoPath = locateIso(argc, argv);
@@ -891,7 +982,7 @@ int main(int argc, char *argv[])
 
         PS2Runtime runtime;
         // the settings menu draws in the runtime's UI hook (registered before initialize(), which runs the init hook)
-        runtime.setDebugUiCallbacks([](PS2Runtime &, void *) {},
+        runtime.setDebugUiCallbacks([](PS2Runtime &, void *) { ui::initTheme(); },
                                     [](PS2Runtime &, void *) {
                                         altEnter();
                                         screenshotKey();
@@ -900,8 +991,10 @@ int main(int argc, char *argv[])
                                         ui::drawTrainerMenu();
                                         ps2control::setGameInputBlocked(ui::settingsMenuBlocksInput() || ui::trainerMenuBlocksInput());
                                         vcs::input::onHostFrame(ui::settingsMenuOpen() || ui::trainerMenuBlocksInput());
+                                        vcs::dualsense::onHostFrame(ui::settingsMenuOpen() || ui::trainerMenuBlocksInput());
                                         vcs::volume::onHostFrame();
                                         vcs::mods::onHostFrame(); // mod / texture switches, live (mods/modloader.h)
+                                        vcs::prompts::onHostFrame();
                                         drawFrameRateCounter();
                                     },
                                     nullptr, nullptr);
@@ -926,10 +1019,14 @@ int main(int argc, char *argv[])
         vcs::rig::install(runtime); // control-channel automation commands (debug/rig.h)
         vcs::trainer::install(runtime); // the trainer's control-channel command (game/vcs_trainer.h)
         vcs::input::install(runtime);   // the player's bindings feed the pad (game/vcs_input.h)
+        vcs::dualsense::install(runtime); // the DualSense light bar / adaptive triggers (game/vcs_dualsense.h)
         vcs::volume::install(runtime);  // the game's music / effects levels follow the settings (game/vcs_volume.h)
         vcs::fog::install(runtime);     // the fog settings scale the game's fog range (game/vcs_fog.h)
         vcs::memory::install(runtime);  // the streaming heap in the upper 32 MB when asked (game/vcs_memory.h)
-        vcs::world::install(runtime);   // the world's area streaming (game/vcs_world.h; VCS_TRACE_AREAS=1)
+        vcs::world_areas::install(runtime); // the world's area streaming (game/vcs_world.h; VCS_TRACE_AREAS=1)
+        vcs::world_hd::install(runtime); // HD world further (experimental, game/vcs_world_hd.h)
+        vcs::world_hd_coronas::install(runtime); // the lamps' coronas as far (game/vcs_world_hd_coronas.h)
+        vcs::streaming_trace::install(runtime); // streaming pipeline trace (experimental, game/vcs_streaming_trace.h)
         vcs::gameinfo::install(runtime); // the F3 overlay's game-state panel, the `gameinfo` command (debug/game_info.h)
         // setting <key> [value] -> ok <value>: a setting read or changed (a hidden run never writes vcs.ini)
         ps2control::addCommand("setting", [](const std::string &args, ps2control::Reply reply) {
@@ -962,6 +1059,7 @@ int main(int argc, char *argv[])
         vcs::startWatchdog(runtime);
         vcs::startProfiler(runtime);
         runtime.run();
+        vcs::dualsense::reset(); // dark light bar, triggers released (game/vcs_dualsense.h)
 #if defined(PS2X_PGO_GEN)
         __llvm_profile_write_file(); // instrumented build: _Exit skips the atexit handler that writes the profile
 #endif

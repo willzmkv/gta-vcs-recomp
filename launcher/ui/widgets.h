@@ -50,6 +50,47 @@ namespace ui
     bool choiceRow(std::string_view idLabel, Rect r, std::string_view title, std::string_view detail, bool selected,
                    bool enabled = true);
 
+    // ---- Rockstar Launcher controls & Vice City 1980s Menu rows ---------------------------------------------------
+    bool playGameButton(std::string_view label, Rect r, char32_t icon, bool enabled = true);
+    bool rockstarButton(std::string_view idLabel, Rect r, char32_t icon, std::string_view line1,
+                        std::string_view line2 = {}, bool enabled = true);
+    bool sliderInt(std::string_view idLabel, Rect r, int &value, int minVal, int maxVal, int step = 1,
+                   std::string_view suffix = {}, bool enabled = true);
+
+    // Classic GTA: Vice City menu components (matching the original Vice City Options table)
+    bool vcSubTab(std::string_view idLabel, Rect r, std::string_view text, bool active);
+    bool vcCycleRow(std::string_view idLabel, Rect r, int rowIndex, std::string_view title,
+                    const std::vector<std::string> &options, int &selected, bool *hoveredOut = nullptr,
+                    bool enabled = true);
+    bool vcSliderRow(std::string_view idLabel, Rect r, int rowIndex, std::string_view title, int &value, int minVal,
+                     int maxVal, int step = 1, std::string_view suffix = {}, bool *hoveredOut = nullptr,
+                     bool enabled = true);
+    bool vcModRow(std::string_view idLabel, Rect r, int rowIndex, bool &modEnabled, std::string_view title,
+                  int &sliderValue, int minVal, int maxVal, int step = 1, std::string_view suffix = {},
+                  bool *hoveredOut = nullptr, bool enabled = true);
+    bool vcActionRow(std::string_view idLabel, Rect r, int rowIndex, std::string_view title,
+                     std::string_view rightText = {}, Color rightColor = 0, bool *hoveredOut = nullptr,
+                     bool enabled = true);
+
+    // the Vice City rows' controls as drawings, shared with the game menu (screens/gamemenu.cpp): the pink track and its
+    // double-ring knob (t 0..1, pressed 0..1), the pill switch with its square knob (t 0 off .. 1 on); s scales them
+    void vcSliderTrack(Rect track, float t, float pressed, float s = 1.0f);
+    void vcToggleSwitch(Rect togR, float t, float hover, float s = 1.0f);
+
+    // Classic GTA: Vice City Commodore 64 Terminal (Terminal.png style) for live CMD build output
+    void c64TerminalView(Id wid, Rect r, const std::deque<std::string> &lines, std::string_view statusRight,
+                         float progress01, bool finished, bool *closeClicked = nullptr);
+
+    enum class PerfImpact
+    {
+        Zero = 0,
+        Low = 1,
+        Medium = 2,
+        High = 3,
+        Extreme = 4,
+    };
+    void perfBadge(Rect r, PerfImpact impact, std::string_view text);
+
     // ---- surfaces and marks ---------------------------------------------------------------------------------------
     void card(Rect r, Color fill = 0, Color edge = 0); // 0: the theme's surface; edge: a coloured left edge
     float pillWidth(std::string_view text);

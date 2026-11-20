@@ -236,7 +236,7 @@ Result:
   17.7-18.6 game fps over four runs (baseline 17.9-18.2); main-thread GPU submit
   0.4 ms (GL execution was 3.2 ms; 3.7-3.9 with the stage 2 readback). The extra
   frame of display latency from stage 2 is gone.
-- Checked: `PS2X_HW_SCALE=2`, `PS2X_HW_DUMP` / F12 (render targets and display as
+- Checked: `PS2X_HW_SCALE=2`, `PS2X_HW_DUMP` / F12 (with `PS2X_HW_DUMP_KEY=1` since 2026-11-10; render targets and display as
   PPM), hidden runs, resize. vcs.exe no longer imports opengl32.dll.
 
 At this point the game runs on D3D11 with no OpenGL or raylib left. Frame rate is
@@ -432,6 +432,19 @@ then makes it hold at higher resolutions:
   texture copy, a blended one (motion blur, colour 127/128 at FIX 16) one full-screen quad with the draw's own state.
   Same picture as the strips (static regions within run-to-run noise). The self-copy over the sky stays a GS draw
   (depth-tested; 1:1, so read at full resolution).
+- **Motion blur by time, not by frame** (2026-11-13; `blurHistoryKeep` / `blurHistoryPick`, `PS2X_HW_BLUR_HISTORY=0` =
+  before). The motion blur is VCS's light trails at night (game-internals.md 6g): each frame blends the last shown
+  picture in at FIX 16, so on the PS2 the ghost is one frame, 33 ms, behind. Done once a frame at 144 fps it was 7 ms
+  behind and the trails vanished. Now each finished picture is copied, at the game's copy into the shown buffer, into
+  a small history with the time its frame was built (`Frame::builtNs`, on the game thread before any queue wait), and
+  the blend reads the one nearest to a PS2 frame before its own frame (`LayerTarget::rtTexture`: read in place of the
+  render target, same scale, so the 1:1 full-resolution read is unchanged). Each kept picture holds its own blend, so
+  the trail is the PS2's at any frame rate: 12.5% at 33 ms, 1.6% at 66 ms, with the motion as smooth as the frame
+  rate. Pictures more than 1.25 PS2 frames older than the newest are reused: 4 kept at 60 fps, 7 at 144 (each the
+  size of the frame: ~100 MB at 1440p 144 fps); at 30 fps (the shown picture 3/4 of a PS2 frame old or more) the shown
+  buffer is read as before. Resolution plays no part: the ghost is a sharp 1:1 copy at any size, as on the GS. The
+  game's flag that gates the blend (`0x48653C`, presumably the Display page's Trails) is untouched. `[gs-hw] motion blur` every 10 s:
+  blends, how many read the history, the ghost's mean age.
 
 ### Native frame (milestone 3 step 4, started 2026-10-23)
 
@@ -459,6 +472,11 @@ it is 1920x1080, 3 x 2.41 pixels per PS2 pixel.
   textures (effects, copies, the self-copy), the display, growth, dumps - sees a single-sampled copy resolved when the
   target was drawn to since the last read (`readable`, `Rt::dirty`); a multisampled frame copy is drawn instead of
   copied. Effect buffers stay single-sampled. Depth buffers are kept per scale and sample count.
+- **Car reflections** (no setting: Smooth above 1x internal resolution, the PS2's four taps at 1x; `VCS_REFLECTIONS`
+  for one run): the game's copy of the frame into the reflection map (FBP 420, FBW 2) is read through a tent over each
+  map texel's footprint instead of the GS's four taps (`gsHwSetTargetFilter`, `sampleRtFiltered`,
+  `atstArefAfailRt.w == 3`, the full shader only). Car panels then stop flickering as the camera moves.
+  game-internals.md 6g has the numbers.
 - **Anisotropic filtering** (Display > Texture filtering, `display.aniso` / `PS2X_HW_ANISO` = 2-16, restart; off =
   the original bilinear): the game's textures get a mip chain, and bilinear-filtered draws with plain repeat / clamp
   wrapping (about 90% of textured draws outside the barracks) are sampled by the hardware - trilinear, anisotropic -
@@ -477,7 +495,9 @@ it is 1920x1080, 3 x 2.41 pixels per PS2 pixel.
 - **No shader depth on Vulkan** (2026-11-02, PERFORMANCE.md 26): the GS pixel shader is built with and without its
   depth output (SHADER_DEPTH); Vulkan uses the rasterised depth - the same value with a 0..1 depth range - so early depth
   rejection works; D3D11 too since 2026-11-03 - with the shader depth it lost the game's fire sprites
-  (game-internals.md 6m; `PS2X_HW_SHADER_DEPTH=1` brings it back). The draw constants are
+  (game-internals.md 6u; `PS2X_HW_SHADER_DEPTH=1` brings it back). The draw constants are
+  rejection works; D3D11 kept the shader depth until 2026-11-04, when issue 4 (fire hidden on AMD GPUs) dropped it there
+  too (`PS2X_HW_SHADER_DEPTH=1` brings it back; DECISIONS.md 2026-11-04). The draw constants are
   written only when they change (`updateConstants`), and the Vulkan backend records viewport, scissor, blend constants
   and buffers only when they differ from what the command buffer has. Depth test / write / compare are dynamic state:
   pipelines that differ only there share one VkPipeline (`PS2X_RHI_STATIC_DEPTH=1` = baked in), and a dynamic vertex

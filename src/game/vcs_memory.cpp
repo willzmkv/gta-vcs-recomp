@@ -40,8 +40,11 @@ namespace vcs::memory
         // the upper memory's top 2 MB stay free for the port's own (resident models, T10 step 4)
         constexpr uint32_t kReserve = 2u * 1024u * 1024u;
 
+        constexpr uint32_t kPacketHeap = 0x006F3DB8u; // the world sectors' cached packets (game-internals.md 9j)
+
         PS2Runtime::RecompiledFunction g_original = nullptr;
         PS2Runtime::RecompiledFunction g_originalRemove = nullptr;
+        PS2Runtime::RecompiledFunction g_originalBuild = nullptr;
         std::atomic<uint64_t> g_capSkips{0};
         std::atomic<int> g_megabytes{30}; // Default to 30 MB streaming heap on PC
         std::atomic<uint32_t> g_end{0};
@@ -75,6 +78,21 @@ namespace vcs::memory
             g_end.store(kExtendedBase + size, std::memory_order_relaxed);
             std::fprintf(stderr, "[memory] streaming heap: %u KB at 0x%08x (the game's: %u KB from its main heap)\n", size / 1024u,
                          kExtendedBase, kGameSize / 1024u);
+        }
+
+        // FUN_002BB768(heap, base, size, granularity): the sector packet heap (built once at boot, 512 KB taken from the
+        // main heap) built in the upper memory instead, larger - with Streaming memory above the PS2's. The main heap's
+        // block stays allocated (unused). Every other heap as it was.
+        PS2_GUEST_CC void buildHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (GPR_U32(ctx, 4) == kPacketHeap && g_megabytes.load(std::memory_order_relaxed) > 0)
+            {
+                std::fprintf(stderr, "[memory] sector packet heap: %u KB at 0x%08x (the game's: %u KB at 0x%08x)\n",
+                             kPacketHeapSize / 1024u, kPacketHeapBase, GPR_U32(ctx, 6) / 1024u, GPR_U32(ctx, 5));
+                SET_GPR_U32(ctx, 5, kPacketHeapBase);
+                SET_GPR_U32(ctx, 6, kPacketHeapSize);
+            }
+            g_originalBuild(rdram, ctx, runtime);
         }
 
         // FUN_003C9DE8(streaming, flags): from the 51-cap's call with the larger heap, nothing unloaded (v0 = 0, the call's
@@ -127,6 +145,8 @@ namespace vcs::memory
         runtime.replaceFunction(kBuildStreamingHeap, &buildStreamingHeap);
         if ((g_originalRemove = runtime.lookupFunction(kRemoveLeastUsed)))
             runtime.replaceFunction(kRemoveLeastUsed, &removeLeastUsed);
+        if ((g_originalBuild = runtime.lookupFunction(kBuildHeap)))
+            runtime.replaceFunction(kBuildHeap, &buildHeap);
         // memstate -> ok streaming=<base>,<size>,<in use> main=<size>,<in use> cap_skips=<n> (bytes; heap +0xC first block,
         // +0 size, +0x14 used; n: the 51-cap's unloads skipped)
         ps2control::addCommand("memstate", [](const std::string &, ps2control::Reply reply) {

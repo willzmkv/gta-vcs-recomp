@@ -124,7 +124,7 @@ def report(rows, out_json=None, label=""):
 
 
 # ---- run ----------------------------------------------------------------------------------------------------------
-def run(out, route, speed, laps, fps, extra_env, name, settle=4.0, shots=0.0):
+def run(out, route, speed, laps, fps, extra_env, name, settle=4.0, shots=0.0, save_name=None, wait=0.0):
     out = os.path.abspath(out)
     pts = load_route(route)
     os.makedirs(out, exist_ok=True)
@@ -136,9 +136,10 @@ def run(out, route, speed, laps, fps, extra_env, name, settle=4.0, shots=0.0):
     env.update(extra_env)
     # the Fort Baxter card copy, else a copy of the player's card (build/rig/saves/user, copied from the live card - never
     # the live card itself). A new game does not do: its first mission keeps the player out of the cruise's car
+    # (--save NAME: that copy - user for the player's own progress, the city's full population)
     saves = os.path.join(ROOT, "build", "rig", "saves")
-    save = next((os.path.join(saves, s) for s in ("fortbaxter", "user") if os.path.isdir(os.path.join(saves, s, "mc0"))),
-                None)
+    save = next((os.path.join(saves, s) for s in ((save_name,) if save_name else ("fortbaxter", "user"))
+                 if os.path.isdir(os.path.join(saves, s, "mc0"))), None)
     if not save:
         sys.exit("[cruise] no card copy in %s (fortbaxter/ or user/, each holding mc0/): copy a card with a save "
                  "past the first mission there" % os.path.relpath(saves, ROOT))
@@ -160,20 +161,30 @@ def run(out, route, speed, laps, fps, extra_env, name, settle=4.0, shots=0.0):
               S.op(S.CREATE_CAR, S.i(211), S.f(x), S.f(y), S.f(z + 1.0), car) +
               S.op(S.WARP_CHAR_INTO_CAR, S.PLAYER, car) + S.op(S.SET_CAR_PROOFS, car, *([S.i(1)] * 5)) +
               S.op(S.MARK_MODEL_AS_NO_LONGER_NEEDED, S.i(211)))
+        if wait > 0:  # --wait: the population fills around the start first (it takes the game a minute or two)
+            time.sleep(wait)
         reply = g.cmd("cruise start %s %.1f%s" % (os.path.abspath(route), speed, " loop" if laps > 1 else ""))
         total = float(reply.split()[1])
-        mark = next_shot = time.time()
+        mark = next_shot = next_pop = time.time()
         drive_secs = total * laps / speed
-        while time.time() - mark < drive_secs * 1.5 + 60.0:
-            st = g.cmd("cruise status").split()
-            if st[1] == "1" or (laps > 1 and time.time() - mark >= drive_secs):
-                break
-            if not g.alive():
-                raise RuntimeError("the game exited during the cruise")
-            if shots and time.time() >= next_shot:  # a GPU read-back each: a hitch of its own (not for measuring)
-                g.cmd("screenshot " + os.path.join(out, "shot_%04.0f.png" % (time.time() - mark)))
-                next_shot += shots
-            time.sleep(1.0)
+        with open(os.path.join(out, "popview.log"), "w") as pop_log:  # the population on the way (`popview`), every 10 s
+            while time.time() - mark < drive_secs * 1.5 + 60.0:
+                if time.time() >= next_pop:
+                    next_pop += 10.0
+                    try:
+                        pop_log.write("%.0f %s\n" % (time.time() - mark, g.cmd("popview")))
+                        pop_log.flush()
+                    except RuntimeError:  # (no camera yet: a sample skipped, the drive goes on)
+                        pass
+                st = g.cmd("cruise status").split()
+                if st[1] == "1" or (laps > 1 and time.time() - mark >= drive_secs):
+                    break
+                if not g.alive():
+                    raise RuntimeError("the game exited during the cruise")
+                if shots and time.time() >= next_shot:  # a GPU read-back each: a hitch of its own (not for measuring)
+                    g.cmd("screenshot " + os.path.join(out, "shot_%04.0f.png" % (time.time() - mark)))
+                    next_shot += shots
+                time.sleep(1.0)
         run_secs = time.time() - mark
         g.cmd("cruise stop")
     finally:
@@ -191,7 +202,7 @@ def record(route, minutes, spot, speed=40.0, style=3):
     """AI drives one after another: when the car stands (traffic, a pole - tools/soak.py sees it too), a new AI car
     beside it carries on from there (a few metres' step in the route: the cruise goes straight from point to point)."""
     os.makedirs(os.path.dirname(os.path.abspath(route)), exist_ok=True)
-    save = os.path.join(ROOT, "build", "rig", "saves", "fortbaxter")
+    save = rig.default_save()
     g = rig.Game.start(save=save, name="cruise_record", port=47671,
                        data_dir=os.path.join(ROOT, "build", "cruise", "record_data"), env={"VCS_TIMING": "1", "VCS_FPS": "60"})
     pts = []
@@ -247,6 +258,8 @@ def main():
     r.add_argument("--name", default="cruise")
     r.add_argument("--shots", type=float, default=0.0, help="a screenshot every S seconds (checking the route; each "
                    "is a hitch of its own, so not while measuring)")
+    r.add_argument("--save", help="the card copy in build/rig/saves to start from (default: fortbaxter, else user)")
+    r.add_argument("--wait", type=float, default=0.0, help="seconds at the start before driving (the population fills)")
     r.add_argument("env", nargs="*", help="ENV=VAL for the game")
     p = sub.add_parser("report")
     p.add_argument("csv")
@@ -266,7 +279,7 @@ def main():
             pairs.append(a.out)
             a.out = None
         run(a.out or os.path.join(ROOT, "build", "cruise", a.name), a.route, a.speed, a.laps, a.fps,
-            dict(x.split("=", 1) for x in pairs), a.name, shots=a.shots)
+            dict(x.split("=", 1) for x in pairs), a.name, shots=a.shots, save_name=a.save, wait=a.wait)
     elif a.cmd == "report":
         report(perf_report.load(a.csv, a.t_from, a.t_to), a.json)
     else:

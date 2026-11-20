@@ -26,6 +26,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "runtime/ps2_host_std.h"
 
 #if __has_include(<libavcodec/avcodec.h>)
 #define VCS_MOVIES 1
@@ -173,7 +174,7 @@ namespace vcs
 
         double nowSeconds()
         {
-            return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            return std::chrono::duration<double>(ps2x::hostNow().time_since_epoch()).count();
         }
 
 #if VCS_MOVIES

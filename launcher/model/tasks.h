@@ -4,6 +4,7 @@
 #pragma once
 
 #include "disc_check.h"
+#include "game_config.h"
 #include "json.h"
 #include "process.h"
 
@@ -53,6 +54,9 @@ namespace launcher
         bool checkUpdates = false;            // ask GitHub for a newer release when the launcher starts
         bool reduceMotion = false;            // the launcher's animations off; this alone decides (off until set)
         std::string theme = "system";         // system (Windows' app mode), light, dark
+        std::string language = "pt";          // "pt" (Português do Brasil) or "en" (English)
+        bool languageChosen = false;          // true once the user selected a language on first launch
+        bool autoPresetDone = false;          // the first install's graphics preset was chosen from the hardware (hardware.h)
     };
 
     class App
@@ -95,6 +99,9 @@ namespace launcher
         std::unique_ptr<Task> task; // the one long thing running (or finished, until dismissed)
         bool busy() const { return task && !task->finished; }
         void startBuild();
+        void startBuildTo(const std::filesystem::path &targetDir);
+        void startAutoUpdateBuild();
+        void startShaderCacheBuild();
         void startInstallTools();
         void startBackup();
         void startRestore(const std::string &backup);
@@ -113,6 +120,11 @@ namespace launcher
         void dismissTask() { if (task && task->finished) task.reset(); }
         Json backups, drives, updateInfo; // results kept from their tasks
         bool updateQuiet = false;
+        // an update put in place (update.py apply said restart): the version; this launcher is the old one until then
+        std::string updatedTo;
+        std::filesystem::path restartTarget() const; // the new launcher: root's VCSLauncher.exe, or $APPIMAGE
+        // the new launcher started (--after-update <our pid>: it waits for us to end); the caller closes this one
+        bool restart(std::string &error);
 
         // the game
         std::unique_ptr<Process> game;
@@ -124,7 +136,15 @@ namespace launcher
         std::string gameExitText() const;
 
         Settings settings;
+        bool isPt() const { return settings.language != "en"; }
         void saveSettings();
+
+        GameConfig gameConfig;
+        void saveGameConfig();
+        void applyFirstInstallPreset(); // once: the graphics preset from the PC's hardware (hardware.h)
+        void refreshMods();
+        std::filesystem::path assetsFolder() const;
+        bool addToSteam(std::string &messageOut);
 
         std::string toast; // a short message under the buttons
         double toastTime = 0;
@@ -136,6 +156,7 @@ namespace launcher
 
     private:
         std::unique_ptr<Process> m_doctor;
+        std::unique_ptr<Process> m_restarted; // the new launcher (restart): never killed
         std::vector<std::string> m_doctorOut;
         double m_now = 0;
         void runTool(const std::string &kind, const std::string &title, const std::vector<std::string> &args);

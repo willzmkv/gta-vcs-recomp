@@ -192,4 +192,15 @@ namespace launcher
         auto seconds = [](const FILETIME &f) { return double((uint64_t(f.dwHighDateTime) << 32) | f.dwLowDateTime) / 1e7; };
         return seconds(kernel) + seconds(user);
     }
+
+    unsigned long processId() { return GetCurrentProcessId(); }
+
+    void waitForProcessExit(unsigned long pid, double seconds)
+    {
+        HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, DWORD(pid));
+        if (!process)
+            return; // gone already
+        WaitForSingleObject(process, DWORD(seconds * 1000.0));
+        CloseHandle(process);
+    }
 }

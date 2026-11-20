@@ -6,7 +6,8 @@
     python tools/doctor.py --iso PATH   check that disc instead of the one the build would find
 
 Checks: the folder (where the game is built: write access, synced / network folders, path length, free space), the
-memory, the processor (which build it gets: AVX2, AVX or SSE4 - toolchain.cpu_level), the compiler (Windows: Visual Studio with the C++ tools and its clang-cl; Linux: build.py --check-deps), git
+memory, the processor (which build it gets: AVX2, AVX or SSE4 - toolchain.cpu_level), the compiler (Windows: llvm-mingw, or that the build
+downloads it - with VCS_TOOLCHAIN=msvc Visual Studio with the C++ tools and its clang-cl; Linux: build.py --check-deps), git
 when the dependencies aren't bundled (deps/), the disc (tools/vcs_disc.py check), and the state of the build:
 whether generated/ is current (recompile.py's stamp) and whether build/vcs.exe matches the source (build/build_info.json,
 file times). "next" says what to do: disc, tools, build or play. Nothing here changes anything.
@@ -27,6 +28,7 @@ GB = 1 << 30
 # 2026-10-30, docs/LAUNCHER.md). 3 GB leaves room for the recompile's second copy of generated/, the compiler's
 # temporary files and a PGO build.
 NEED_FREE = 3 * GB
+NEED_TOOLCHAIN = GB  # llvm-mingw unpacked in build/build-tools: 0.74 GB (20261020), downloaded by the first build
 NEED_RAM = 8 * GB  # a unity batch of generated code takes up to ~2 GB to compile, several run at once
 
 VS_COMPONENTS = {
@@ -92,9 +94,11 @@ def check_folder():
         warnings += [w for w in place_warnings(build, "the build folder") if w["code"] != "long_path" or len(build) > 60]
     free = shutil.disk_usage(existing(build)).free
     built = os.path.isfile(tc.VCS_EXE)
-    if free < (NEED_FREE // 4 if built else NEED_FREE):
+    need = NEED_FREE + (NEED_TOOLCHAIN if tc.IS_WINDOWS and tc.windows_toolchain() == "mingw" and
+                        not tc.llvm_mingw_bin(download=False) else 0)
+    if free < (need // 4 if built else need):
         warnings.append({"code": "disk_space", "message": "%.1f GB free on the build folder's drive; a build needs "
-                                                           "about %d GB" % (free / GB, NEED_FREE // GB)})
+                                                           "about %d GB" % (free / GB, round(need / GB))})
     if custom and shutil.disk_usage(existing(root)).free < GB // 2:
         warnings.append({"code": "disk_space", "message": "less than 0.5 GB free on the source folder's drive: the "
                                                            "recompiled code (0.2 GB) is kept there"})
@@ -106,7 +110,7 @@ def check_folder():
                                                              "this keeps coming back" % (
                                                                  len(future), "file is" if len(future) == 1 else
                                                                  "files are", ahead / 3600, tc.show(path))})
-    return {"path": root, "build": build, "build_custom": custom, "free_bytes": free, "need_bytes": NEED_FREE,
+    return {"path": root, "build": build, "build_custom": custom, "free_bytes": free, "need_bytes": need,
             "warnings": warnings}
 
 
@@ -171,8 +175,11 @@ def vs_installs():
 
 
 def check_compiler():
-    """Windows: the Visual Studio the build would use and what it lacks. code: ok, no_vs, no_cpp_tools, no_clang,
-    old_clang (CMake / Ninja: found or downloaded by the build). Linux: build.py --check-deps."""
+    """Windows: the Visual Studio the build would use and what it lacks (code: ok, no_vs, no_cpp_tools, no_clang,
+    old_clang; CMake / Ninja: found or downloaded by the build) - with VCS_TOOLCHAIN=mingw llvm-mingw instead (always
+    ok: the build downloads it when it isn't there yet). Linux: build.py --check-deps."""
+    if tc.IS_WINDOWS and tc.windows_toolchain() == "mingw":
+        return check_llvm_mingw()
     if not tc.IS_WINDOWS:
         missing = tc.linux_missing(tc.build_env(), quiet=True)
         if not missing:
@@ -184,7 +191,7 @@ def check_compiler():
                 "message": "%d package%s missing: %s" % (len(missing), "" if len(missing) == 1 else "s",
                                                           ", ".join(label for label, _ in missing))}
     installs = vs_installs()
-    result = {"installs": installs, "installer": os.path.join(os.path.dirname(vswhere()), "setup.exe")}
+    result = {"toolchain": "msvc", "installs": installs, "installer": os.path.join(os.path.dirname(vswhere()), "setup.exe")}
     with_cpp = [i for i in installs if i["components"]["cpp"]]
     if not installs:
         return dict(result, ok=False, code="no_vs", message="Visual Studio or its Build Tools aren't installed")
@@ -214,6 +221,24 @@ def check_compiler():
     missing = [title for title in ("CMake", "Ninja") if not tools[title.lower()]]
     return dict(result, ok=True, code="ok", message="%s %s, clang-cl %d%s" % (
         vs["name"], vs["version"], version, "; the build downloads " + " and ".join(missing) if missing else ""))
+
+
+def check_llvm_mingw():
+    """The compiler a Windows build uses (toolchain.llvm_mingw_bin): there, or downloaded by the first build. Nothing is
+    fetched here."""
+    bin_dir = tc.llvm_mingw_bin(download=False)
+    tools = tc.build_tools(dict(os.environ), download=False)
+    missing = [title for title in ("CMake", "Ninja") if not tools[title.lower()]]
+    result = {"toolchain": "mingw", "cmake": tools["cmake"] or "", "ninja": tools["ninja"] or ""}
+    if bin_dir:
+        version = tc.clang_version(os.path.join(bin_dir, "clang.exe"))
+        result.update(clang=version, clang_path=os.path.join(bin_dir, "clang.exe"))
+        text = "llvm-mingw, clang %d" % version
+    else:
+        missing.insert(0, "llvm-mingw (clang, ~190 MB)")
+        text = "nothing to install"
+    return dict(result, ok=True, code="ok", download=missing,
+                message=text + ("; the build downloads " + " and ".join(missing) if missing else ""))
 
 
 def check_downloads():
@@ -352,8 +377,8 @@ def show(report):
          else "; ".join(build["reasons"]))
     advice = {"cpu": "this processor can't run the game",
               "disc": "choose your disc: python tools/build.py --recompile \"path\\to\\your.iso\" (or the launcher)",
-              "tools": "install what's missing above (the launcher can install Visual Studio's Build Tools: "
-                       "python tools/setup_vs.py)",
+              "tools": "install what's missing above" + (" (the launcher can install Visual Studio's Build Tools: "
+                                                         "python tools/setup_vs.py)" if tc.IS_WINDOWS and tc.windows_toolchain() == "msvc" else ""),
               "build": "python tools/build.py --recompile-if-needed",
               "play": "start %s (or the launcher)" % tc.show(tc.VCS_EXE)}
     print("next: " + advice[report["next"]])

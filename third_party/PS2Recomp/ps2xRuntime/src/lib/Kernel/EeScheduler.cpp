@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include "runtime/ps2_host_std.h"
 
 // [gta-recomp] PS2X_WAIT_LOG (EeScheduler::logLongWait)
 namespace
@@ -163,7 +164,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_threads.emplace(main.id, std::move(main));
     m_readyQueues[0].push_back(kMainThreadId);
     scheduleEvent(m_clock.cycle + kVBlankPeriodCycles,
-                  std::chrono::steady_clock::now() + kVBlankPeriod,
+                  ps2x::hostNow() + kVBlankPeriod,
                   EeEvent{EeEventType::VBlankStart, 0, 0});
     publishSnapshot();
 }
@@ -431,7 +432,7 @@ void EeScheduler::syncToRealTime(uint64_t maxCycles) noexcept
 {
     if (m_lastVBlankHost == std::chrono::steady_clock::time_point{})
         return;
-    const auto since = std::chrono::steady_clock::now() - m_lastVBlankHost;
+    const auto since = ps2x::hostNow() - m_lastVBlankHost;
     if (since.count() <= 0)
         return;
     const uint64_t target =
@@ -1123,7 +1124,7 @@ int EeScheduler::setAlarm(uint16_t ticks,
     m_alarms.emplace(id, EeAlarm{id, ticks, handler, argument, gp, sp});
     const uint64_t tickCount = ticks == 0u ? 1u : static_cast<uint64_t>(ticks);
     scheduleEvent(m_clock.cycle + tickCount * kAlarmTickCycles,
-                  std::chrono::steady_clock::now() + std::chrono::microseconds(tickCount * kAlarmTickMicroseconds),
+                  ps2x::hostNow() + std::chrono::microseconds(tickCount * kAlarmTickMicroseconds),
                   EeEvent{EeEventType::Alarm, static_cast<uint32_t>(id), 0});
     return id;
 }
@@ -1837,7 +1838,7 @@ void EeScheduler::processDueDeadlines()
         std::chrono::steady_clock::time_point pacingDeadline{};
         {
             std::unique_lock lock(m_eventMutex);
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             for (const ScheduledEvent &item : m_deadlines)
             {
                 if (item.deadlineCycle <= m_clock.cycle &&
@@ -1859,7 +1860,7 @@ void EeScheduler::processDueDeadlines()
                 ps2perf::PhaseScope waitTime(ps2perf::Phase::Wait); // [gta-recomp]
                 if (waitLogMs() > 0 && pacingDeadline - now > std::chrono::milliseconds(waitLogMs())) // [gta-recomp]
                     logLongWait("pacing to a deadline", std::chrono::duration<double, std::milli>(pacingDeadline - now).count());
-                m_eventCv.wait_until(lock, pacingDeadline, [this]()
+                ps2x::waitUntil(m_eventCv, lock, pacingDeadline, [this]()
                                      { return !m_events.empty() ||
                                               m_stopRequested.load(std::memory_order_acquire); });
                 if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
@@ -1869,7 +1870,7 @@ void EeScheduler::processDueDeadlines()
                 }
             }
 
-            const auto pacedNow = std::chrono::steady_clock::now();
+            const auto pacedNow = ps2x::hostNow();
             auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
                                               [this, pacedNow](const ScheduledEvent &item)
                                               { return item.deadlineCycle <= m_clock.cycle &&
@@ -1914,7 +1915,7 @@ void EeScheduler::processDueDeadlines()
                 // [gta-recomp] Never fall more than one period behind the host clock: after a slow stretch
                 // (loading, a heavy scene) the old chained deadline let VBlanks race at ~80/s to catch up.
                 auto nextHostDeadline = scheduled.hostDeadline + kVBlankPeriod;
-                const auto hostNow = std::chrono::steady_clock::now();
+                const auto hostNow = ps2x::hostNow();
                 if (nextHostDeadline + kVBlankPeriod < hostNow)
                     nextHostDeadline = hostNow;
                 scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
@@ -2104,7 +2105,7 @@ void EeScheduler::logLongWait(const char *where, double ms) const
 
 void EeScheduler::waitForEvent()
 {
-    const auto waitStart = std::chrono::steady_clock::now(); // [gta-recomp] PS2X_WAIT_LOG
+    const auto waitStart = ps2x::hostNow(); // [gta-recomp] PS2X_WAIT_LOG
     struct WaitLog
     {
         const EeScheduler &s;
@@ -2114,7 +2115,7 @@ void EeScheduler::waitForEvent()
             const long limit = waitLogMs();
             if (limit <= 0)
                 return;
-            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            const double ms = std::chrono::duration<double, std::milli>(ps2x::hostNow() - t0).count();
             if (ms > double(limit))
                 s.logLongWait("idle, waiting for an event", ms);
         }
@@ -2152,7 +2153,7 @@ void EeScheduler::waitForEvent()
     }
     if (hasTimerDeadline)
     {
-        const auto timerHostDeadline = std::chrono::steady_clock::now() + eeCyclesToHostDuration(timerCycles);
+        const auto timerHostDeadline = ps2x::hostNow() + eeCyclesToHostDuration(timerCycles);
         if (timerHostDeadline < hostDeadline)
         {
             deadlineCycle = m_clock.cycle + timerCycles;
@@ -2160,7 +2161,7 @@ void EeScheduler::waitForEvent()
         }
     }
 
-    const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
+    const bool signaled = ps2x::waitUntil(m_eventCv, lock, hostDeadline, [this]()
                                                { return !m_events.empty() ||
                                                         m_stopRequested.load(std::memory_order_acquire); });
     if (!signaled)

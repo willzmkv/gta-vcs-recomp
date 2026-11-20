@@ -10,6 +10,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include "runtime/ps2_host_std.h"
 
 class GSStats
 {
@@ -54,7 +55,7 @@ public:
         }
         std::snprintf(key, sizeof(key), "colclamp=%u dthe=%u fba=%u", unsigned(s.colclamp & 1u), unsigned(s.dthe & 1u), unsigned(c.fba & 1u));
         ++m_maps["misc"][key];
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (std::chrono::duration<double>(now - m_since).count() >= m_period)
         {
             std::fprintf(stderr, "[gs-stats] %llu primitives\n", static_cast<unsigned long long>(m_total));
@@ -71,7 +72,7 @@ private:
     {
         const char *env = std::getenv("VCS_GS_STATS");
         m_period = env ? std::atof(env) : 0.0;
-        m_since = std::chrono::steady_clock::now();
+        m_since = ps2x::hostNow();
     }
     double m_period = 0.0;
     std::mutex m_mutex;

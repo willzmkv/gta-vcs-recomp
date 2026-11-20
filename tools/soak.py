@@ -15,6 +15,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -51,7 +52,7 @@ def main():
     a = ap.parse_args()
     out = os.path.abspath(a.out or os.path.join(ROOT, "build", "soak", time.strftime("%Y%m%d-%H%M%S")))
     os.makedirs(out, exist_ok=True)
-    g = rig.Game.start(save=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"), name="soak",
+    g = rig.Game.start(save=rig.default_save(), name="soak",
                        seconds=a.hours * 3600 + 600, data_dir=os.path.join(out, "data"), port=a.port)
     pid = game_pid(g.proc.pid)
     rows, events = [], []
@@ -126,6 +127,10 @@ def main():
     finally:
         g.quit()
         f.close()
+        # the next soak reuses build/run/soak.log: keep this run's next to its numbers
+        log = os.path.join(ROOT, "build", "run", "soak.log")
+        if os.path.exists(log):
+            shutil.copyfile(log, os.path.join(out, "soak.log"))
     # memory trend after warm-up (20 min): least squares MB/h on private bytes
     pts = [(r[0] / 3600.0, r[3]) for r in rows if r[3] is not None and r[0] > 1200]
     slope = None

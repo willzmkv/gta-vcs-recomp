@@ -100,6 +100,13 @@ jobs:
         with:
           python-version: "3.13"
 
+      # llvm-mingw (the compiler; CMake / Ninja when the runner's are too old), pinned in tools/toolchain.py and
+      # downloaded by the build: kept between runs
+      - uses: actions/cache@v4
+        with:
+          path: build/build-tools
+          key: build-tools-windows-${{ hashFiles('tools/toolchain.py') }}
+
       - name: Build the launcher
         run: python tools/build.py --launcher
 
@@ -124,9 +131,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { "no generated code here (expected)" }
           exit 0
 
+      # the mods every release carries (HD Hands, HD Hud): not in the repository, they live in this fork's
+      # `mods-pack` release (DECISIONS.md 2026-11-17)
+      - name: Bundled mods
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download mods-pack --repo ${{ github.repository }} --pattern "VCS-Recomp-mods.zip" --dir "${{ runner.temp }}"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Expand-Archive -Path "${{ runner.temp }}/VCS-Recomp-mods.zip" -DestinationPath "${{ runner.temp }}/mods"
+
       - name: Release zip
         if: startsWith(github.ref, 'refs/tags/v')
-        run: python tools/release.py --ref ${{ github.ref_name }} --launcher VCSLauncher.exe
+        # the zip, and the standalone launcher: one VCS.rec-Launcher-<version>.exe with the whole release (the bundled
+        # mods with it) inside, as the player planned the download
+        run: python tools/release.py --ref ${{ github.ref_name }} --launcher VCSLauncher.exe --mods "${{ runner.temp }}/mods" --standalone-exe
 
       - uses: actions/upload-artifact@v4
         if: startsWith(github.ref, 'refs/tags/v')
@@ -135,6 +156,7 @@ jobs:
           path: |
             build/dist/*.zip
             build/dist/*.zip.sha256
+            build/dist/*.exe
 
   # both platforms' files on one release, only when both were made: Windows and Linux ship together
   # The title as every release has it; the notes from docs/releases/<tag>.md when the tag has one (written for players),

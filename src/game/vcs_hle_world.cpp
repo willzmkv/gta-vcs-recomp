@@ -30,6 +30,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "runtime/ps2_host_std.h"
 
 namespace
 {
@@ -545,7 +546,7 @@ namespace
         uint64_t envClipped = 0;           // ... of them through the clipper
     } g_stats;
 
-    auto g_reportAt = std::chrono::steady_clock::now();
+    auto g_reportAt = ps2x::hostNow();
 
     void report()
     {
@@ -1818,10 +1819,10 @@ namespace
                              g_pred.clipPackets.size(), vu.size(), memOk ? "ok" : "off");
             }
         }
-        static auto reportAt = std::chrono::steady_clock::now();
-        if (std::chrono::steady_clock::now() - reportAt >= std::chrono::seconds(10))
+        static auto reportAt = ps2x::hostNow();
+        if (ps2x::hostNow() - reportAt >= std::chrono::seconds(10))
         {
-            reportAt = std::chrono::steady_clock::now();
+            reportAt = ps2x::hostNow();
             std::fprintf(stderr, "[hle-verify] 0x02c0 re-draws: %llu exact, %llu memory off, %llu kicks off (shine: %llu clipped, %llu culled)\n",
                          (unsigned long long)g_redraw.exact, (unsigned long long)g_redraw.memBad, (unsigned long long)g_redraw.kicksBad,
                          (unsigned long long)g_redraw.shineClipped, (unsigned long long)g_redraw.shineCulled);
@@ -1906,7 +1907,7 @@ namespace
             else
                 ++s.fastBad;
         }
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - g_reportAt >= std::chrono::seconds(10))
         {
             g_reportAt = now;
@@ -1954,7 +1955,7 @@ namespace
             if (stats)
             {
                 static std::map<std::string, uint64_t> missed;
-                static auto at = std::chrono::steady_clock::now();
+                static auto at = ps2x::hostNow();
                 const IVec4 t38 = loadI(c.vuData, 38), t39 = loadI(c.vuData, 39), t40 = loadI(c.vuData, 40), t41 = loadI(c.vuData, 41),
                             t52 = loadI(c.vuData, 52);
                 char key[160];
@@ -1964,9 +1965,9 @@ namespace
                               t41.v[1] & 0xFFFF, t41.v[2] & 0xFFFF, t41.v[3] & 0xFFFF, t52.v[0] & 0xFFFF,
                               worldCodeResident(c.vuCode, c.codeGeneration) ? 1 : 0);
                 ++missed[key];
-                if (std::chrono::steady_clock::now() - at > std::chrono::seconds(10))
+                if (ps2x::hostNow() - at > std::chrono::seconds(10))
                 {
-                    at = std::chrono::steady_clock::now();
+                    at = ps2x::hostNow();
                     for (const auto &[k, n] : missed)
                         if (n > 100)
                             std::fprintf(stderr, "[hle-stats] passed over %8llu x %s\n", (unsigned long long)n, k.c_str());
@@ -2131,7 +2132,7 @@ namespace
         std::memcpy(vu + 52u * 16u + 8u, &variant, 4);
         (clipped ? g_native.clipped : g_native.drawn) += 1;
         g_native.vertices += nloop;
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - g_reportAt >= std::chrono::seconds(10))
         {
             g_reportAt = now;
@@ -2151,6 +2152,55 @@ namespace
     // makes it (24-27, 28-31), the lights turned as 0x2bf0's setup turns them into the object's space; the same mesh (cached
     // by its key), GS state and colours. Culled by the mesh's box. Not the VU's numbers (nothing compares them).
     uint64_t g_proxyDraws = 0, g_proxyCulled = 0, g_proxyNotOnCar = 0;
+
+    // PERFORMANCE.md 47: a template's part for all its proxies in one instanced draw (gs_draw.hlsl vs_lit_inst), up to
+    // GSNativeDraw::kMaxInstances at a time - each proxy was a native draw of its own (the GS stage's and the driver's
+    // work per draw, the template's vertices copied each time). Per instance the rows that differ: the GS window matrix
+    // (constants 0-15), the clip matrix (32-47), the light directions (48-59). VCS_PROXY_INSTANCING=0: a draw each.
+    bool proxyInstancing()
+    {
+        static const bool on = !(std::getenv("VCS_PROXY_INSTANCING") && std::getenv("VCS_PROXY_INSTANCING")[0] == '0');
+        return on;
+    }
+    struct ProxyBatch
+    {
+        uint64_t prim = 0;
+        GSNativeDraw *e = nullptr;
+        std::vector<float> rows;
+
+        // this proxy's rows (from the draw's constants as set up for it); false: the batch could not be drawn
+        bool add()
+        {
+            const float *k = e->constants;
+            rows.insert(rows.end(), k, k + 16);
+            rows.insert(rows.end(), k + 32, k + 60);
+            return rows.size() / GSNativeDraw::kInstanceFloats < GSNativeDraw::kMaxInstances || flush();
+        }
+        bool flush()
+        {
+            const uint32_t n = static_cast<uint32_t>(rows.size() / GSNativeDraw::kInstanceFloats);
+            if (!n)
+                return true;
+            e->instances = rows.data();
+            e->instanceCount = n;
+            bool ok = ps2hle::gs()->submitNative(prim, *e);
+            e->instances = nullptr;
+            e->instanceCount = 0;
+            if (!ok) // refused (no instanced shader): one draw each, the rows put back into the constants
+            {
+                ok = true;
+                for (uint32_t i = 0; ok && i < n; ++i)
+                {
+                    const float *r = rows.data() + size_t(i) * GSNativeDraw::kInstanceFloats;
+                    std::memcpy(e->constants, r, 16 * sizeof(float));
+                    std::memcpy(e->constants + 32, r + 16, 28 * sizeof(float));
+                    ok = ps2hle::gs()->submitNative(prim, *e);
+                }
+            }
+            rows.clear();
+            return ok;
+        }
+    };
 
     void drawProxies(const uint8_t *vu, uint64_t prim, const GSNativeDraw &d, uint32_t posBase, uint32_t count,
                      const vcs::distant::Proxies &px)
@@ -2212,6 +2262,10 @@ namespace
         std::memcpy(tmp, vu, sizeof(tmp));
         GSNativeDraw e = d;
         float *k = e.constants;
+        static thread_local ProxyBatch batch;
+        batch.prim = prim;
+        batch.e = &e;
+        batch.rows.clear();
         for (uint32_t n = 0; n < px.count; ++n)
         {
             const float *P = px.matrices + size_t(n) * 16u;
@@ -2245,6 +2299,10 @@ namespace
             setupMatrices(tmp, 0, 16, 12, 24);
             Vec4 m[4];
             foldMatrix(tmp, 28, m);
+            Vec4 cm[4];
+            foldMatrix(tmp, 24, cm);
+            // the box against the clip matrix (24-27, as the draws' own clip test 0x0c38 / litClip): it was tested against
+            // 28-31, the GS screen matrix, where every corner lies outside +-w - no proxy was ever drawn (2026-11-12)
             uint32_t all = 0x3Fu;
             for (int corner = 0; corner < 8 && all; ++corner)
             {
@@ -2253,7 +2311,7 @@ namespace
                 v.v[1] = corner & 2 ? hi[1] : lo[1];
                 v.v[2] = corner & 4 ? hi[2] : lo[2];
                 v.v[3] = 1.0f;
-                const Vec4 q = transform(m, v);
+                const Vec4 q = transform(cm, v);
                 all &= clipFlags(q, q.v[3]);
             }
             if (all)
@@ -2262,8 +2320,6 @@ namespace
                 vcs::distant::noteProxy(1);
                 continue;
             }
-            Vec4 cm[4];
-            foldMatrix(tmp, 24, cm);
             for (int r = 0; r < 4; ++r)
             {
                 putRow(k + r * 4, m[r]);
@@ -2287,11 +2343,12 @@ namespace
                 k[76] = 1.0f;
                 k[77] = k[78] = 0.0f;
             }
-            if (!ps2hle::gs()->submitNative(prim, e))
+            if (proxyInstancing() ? !batch.add() : !ps2hle::gs()->submitNative(prim, e))
                 return;
             ++g_proxyDraws;
             vcs::distant::noteProxy(0);
         }
+        batch.flush();
     }
 
     // proxiesOnly: the draw is culled or drawn by another path (the env pipeline's clipper) - only its proxies
@@ -2479,6 +2536,10 @@ namespace
         std::memcpy(tmp, vu, sizeof(tmp));
         GSNativeDraw e = d;
         float *k = e.constants;
+        static thread_local ProxyBatch batch;
+        batch.prim = prim;
+        batch.e = &e;
+        batch.rows.clear();
         for (uint32_t n = 0; n < px.count; ++n)
         {
             const float *P = px.matrices + size_t(n) * 16u;
@@ -2493,8 +2554,21 @@ namespace
             for (int c = 0; c < 3; ++c)
                 W[c] = b[0].v[c] * centre.v[0] + b[1].v[c] * centre.v[1] + b[2].v[c] * centre.v[2] + b[3].v[c];
             const float z_cam = br[0].v[2] * W[0] + br[1].v[2] * W[1] + br[2].v[2] * W[2] + br[3].v[2];
-            if (z_cam <= 0.0f || size < 0.005f * z_cam)
+            // a part under ~1.5 pixels of a 1080-line picture is skipped. The test is per part (a head, a torso: 0.3 -
+            // 0.8 m), and at 0.005 (~6 pixels) every part past ~100 m was skipped: no distant walker was ever drawn
+            // (16M proxy draws culled, none drawn) and the far real peds drawn as proxies vanished (2026-11-12)
+            static const bool debug = std::getenv("VCS_PROXY_DEBUG") != nullptr;
+            static std::atomic<int> logged{0};
+            auto why = [&](const char *reason) {
+                if (debug && logged.fetch_add(1) % 50000 == 0)
+                    std::fprintf(stderr, "[proxy] culled (%s): z %.1f size %.2f W %.1f %.1f %.1f P %.1f %.1f %.1f\n", reason, z_cam,
+                                 size, W[0], W[1], W[2], P[12], P[13], P[14]);
+            };
+            // (0.0004 since 2026-11-13: at 0.001 a head or a hand around ~1.5 pixels came and went with every sub-pixel
+            // step - the far crowd flickered; instanced, the extra parts cost little)
+            if (z_cam <= 0.0f || size < 0.0004f * z_cam)
             {
+                why(z_cam <= 0.0f ? "behind" : "small");
                 vcs::distant::noteProxy(1);
                 continue;
             }
@@ -2503,15 +2577,20 @@ namespace
             const float bound = z_cam * 1.55f + size;
             if (std::abs(x_cam) > bound || std::abs(y_cam) > bound)
             {
+                why("outside");
                 vcs::distant::noteProxy(1);
                 continue;
             }
             for (int i = 0; i < 4; ++i)
                 storeF(tmp, i, b[i]);
             setupMatrices(tmp, 0, 16, 12, 24);
-            Vec4 m[4];
+            Vec4 m[4], cm[4];
             for (int r = 0; r < 4; ++r)
+            {
                 m[r] = loadF(tmp, 28 + r);
+                cm[r] = loadF(tmp, 24 + r);
+            }
+            // the box against the clip matrix 24-27 (as litClip), not 28-31 (the GS screen's): see the rigid proxies
             uint32_t all = 0x3Fu;
             for (int corner = 0; corner < 8 && all; ++corner)
             {
@@ -2520,17 +2599,15 @@ namespace
                 v.v[1] = corner & 2 ? hi[1] : lo[1];
                 v.v[2] = corner & 4 ? hi[2] : lo[2];
                 v.v[3] = 1.0f;
-                const Vec4 q = transform(m, v);
+                const Vec4 q = transform(cm, v);
                 all &= clipFlags(q, q.v[3]);
             }
             if (all)
             {
+                why("clipped");
                 vcs::distant::noteProxy(1);
                 continue;
             }
-            Vec4 cm[4];
-            for (int r = 0; r < 4; ++r)
-                cm[r] = loadF(tmp, 24 + r);
             for (int r = 0; r < 4; ++r)
             {
                 putRow(k + r * 4, m[r]);
@@ -2553,10 +2630,11 @@ namespace
                 k[76] = 1.0f;
                 k[77] = k[78] = 0.0f;
             }
-            if (!ps2hle::gs()->submitNative(prim, e))
+            if (proxyInstancing() ? !batch.add() : !ps2hle::gs()->submitNative(prim, e))
                 return;
             vcs::distant::noteProxy(0);
         }
+        batch.flush();
     }
 
     bool drawNativeLit(const ps2hle::MscalContext &c)
@@ -2698,16 +2776,30 @@ namespace
             ++g_nativeEnv.clipped;
             return true;
         }
-        if (!envKicks(vu, c.top, kicks) || !drawNativeRigid(c))
+        // Pass 1 goes out as the reproduction's own kick (tag 49), like pass 2: both from the same VU-exact XYZF2, so pass
+        // 2's depth test (GEQUAL) passes over pass 1 everywhere, as on the PS2. Pass 1 drawn natively (the GPU's own
+        // transform; PS2X_HLE_ENV_PASS1=native, as until 2026-11-06) puts some vertices a Z unit or 1/16 pixel off: the
+        // reflection failed its depth test in bands - diagonal stripes and moiré on car paint that crawled with the camera
+        // (game-internals.md 6g)
+        static const bool nativePass1 = [] {
+            const char *e = std::getenv("PS2X_HLE_ENV_PASS1");
+            return e && std::strcmp(e, "native") == 0;
+        }();
+        if (!envKicks(vu, c.top, kicks) || (nativePass1 && !drawNativeRigid(c)))
         {
             ++g_nativeEnv.fallback;
             return false;
+        }
+        if (!nativePass1)
+        {
+            const int32_t variant = 698; // what drawNativeRigid leaves at 52.z for an unclipped packet (the VU's own write)
+            std::memcpy(vu + 52u * 16u + 8u, &variant, 4);
         }
         const int rounding = sseRounding();
         setSseRounding(g_callerRounding);
         gsSetPath1Producer(c.startPc, true); // draw sources: a C++ reproduction sends these
         gsSetCurrentGifPath(1u);
-        for (size_t i = 1; i < kicks.size(); ++i)
+        for (size_t i = nativePass1 ? 1 : 0; i < kicks.size(); ++i)
             sendKick(kicks[i]);
         gsSetCurrentGifPath(3u);
         setSseRounding(rounding);
@@ -3165,10 +3257,10 @@ namespace
                 std::fprintf(stderr, "[hle-verify] setup 0x%04x differs: kicks %s (%zu), %u qwords off from %u\n", c.startPc,
                              kicksOk ? "ok" : "off", g_pred.vuKicks.size(), bad, firstBad);
         }
-        static auto reportAt = std::chrono::steady_clock::now();
-        if (std::chrono::steady_clock::now() - reportAt >= std::chrono::seconds(10))
+        static auto reportAt = ps2x::hostNow();
+        if (ps2x::hostNow() - reportAt >= std::chrono::seconds(10))
         {
-            reportAt = std::chrono::steady_clock::now();
+            reportAt = ps2x::hostNow();
             std::fprintf(stderr, "[hle-verify] setup programs: %llu exact, %llu memory off, %llu kicks off\n",
                          (unsigned long long)g_setup.exact, (unsigned long long)g_setup.memBad, (unsigned long long)g_setup.kicksBad);
         }
@@ -3254,7 +3346,7 @@ namespace
         if (stats && !handled && (c.startPc == 0x30u || c.startPc == 0x2C0u))
         {
             static std::map<std::string, uint64_t> unhandled;
-            static auto reportAt = std::chrono::steady_clock::now();
+            static auto reportAt = ps2x::hostNow();
             char key[256];
             const IVec4 t38 = loadI(c.vuData, 38), t39 = loadI(c.vuData, 39), t40 = loadI(c.vuData, 40), t41 = loadI(c.vuData, 41);
             int len = 0;
@@ -3289,9 +3381,9 @@ namespace
                     std::fclose(f);
                 }
             }
-            if (std::chrono::steady_clock::now() - reportAt >= std::chrono::seconds(10))
+            if (ps2x::hostNow() - reportAt >= std::chrono::seconds(10))
             {
-                reportAt = std::chrono::steady_clock::now();
+                reportAt = ps2x::hostNow();
                 for (const auto &[k, n] : unhandled)
                     std::fprintf(stderr, "[hle] on the VU1: %8llu x %s\n", (unsigned long long)n, k.c_str());
             }

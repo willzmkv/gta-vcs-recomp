@@ -26,6 +26,23 @@ import toolchain as tc  # noqa: E402
 ROOT = tc.ROOT if hasattr(tc, "ROOT") else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+SAVES = os.path.join(ROOT, "build", "rig", "saves")
+
+
+def default_save():
+    """The card copy the test tools start from: build/rig/saves/fortbaxter (a save in the Fort Baxter barracks, the one
+    their numbers were taken with), else build/rig/saves/user (a copy of the player's own card, made with copy_card -
+    never the live card itself; the Linux laptop has only that one). Each holds mc0/. Neither there: the fortbaxter
+    path, so the copy fails naming it."""
+    for name in ("fortbaxter", "user"):
+        path = os.path.join(SAVES, name)
+        if os.path.isdir(os.path.join(path, "mc0")):
+            if name != "fortbaxter":
+                print("[rig] no fortbaxter card copy: starting from %s" % os.path.relpath(path, ROOT), flush=True)
+            return path
+    return os.path.join(SAVES, "fortbaxter")
+
+
 def copy_card(src, dst):
     """Copy a card folder keeping file times (the card's directory order falls back to creation times)."""
     if os.path.isdir(dst):
@@ -134,7 +151,8 @@ class Game:
                                 cwd=ROOT, env=e, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=not tc.IS_WINDOWS)
         gamectl.wait(port=port, timeout=90)
-        return cls(proc, os.path.join(ROOT, "build", "run", name + ".log"), port)
+        # where run.py writes it: the build folder's run/ (tools/build_dir.py may have moved it out of build/)
+        return cls(proc, os.path.join(tc.BUILD, "run", name + ".log"), port)
 
     def alive(self):
         return self.proc is None or self.proc.poll() is None

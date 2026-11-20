@@ -7,10 +7,12 @@
 #include "runtime/gs/ps2_gs_psmt8.h"
 #include "runtime/gs/ps2_gs_memory.h"
 #include "ps2_log.h"
+#include "render/texture_replacements.h" // [gta-recomp] render::textureHash (XXH3) for ClutHash
 #include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -1294,7 +1296,20 @@ uint64_t GSCpuBackend::ClutHash(const GSTex0Reg &tex0) const
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_clutHashDirty) // [gta-recomp] hashing 512 entries per paletted draw was ~17% of the frame
     {
-        // [gta-recomp] 8 bytes at a time in four independent lanes: VCS loads a CLUT before nearly every draw, so this
+        // [gta-recomp] XXH3 (render::textureHash): VCS loads a CLUT before nearly every draw, and the CLUT work was ~9% of
+        // the GS stage on the cruise (PERFORMANCE.md 42); the value only keys the texture cache. PS2X_HW_UPLOAD_HASH=lanes:
+        // the four lanes below, as before.
+        static const bool lanes = [] {
+            const char *e = std::getenv("PS2X_HW_UPLOAD_HASH");
+            return e && std::strcmp(e, "lanes") == 0;
+        }();
+        if (!lanes)
+        {
+            m_clutHashCache = render::textureHash(m_clut.data(), sizeof(m_clut));
+            m_clutHashDirty = false;
+            return m_clutHashCache ^ (uint64_t(tex0.cpsm) << 56) ^ (uint64_t(tex0.csa) << 48) ^ (uint64_t(tex0.csm) << 40);
+        }
+        // 8 bytes at a time in four independent lanes: VCS loads a CLUT before nearly every draw, so this
         // ran per draw - the one-entry-at-a-time FNV chain was ~5% of the render worker in the city
         uint64_t h[4] = {0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull};
         const uint8_t *bytes = reinterpret_cast<const uint8_t *>(m_clut.data());

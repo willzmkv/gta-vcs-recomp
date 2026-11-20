@@ -733,8 +733,13 @@ inline __m128i ps2_psubsw(__m128i a, __m128i b)
 #define PS2_PCEQB(a, b) _mm_cmpeq_epi8((__m128i)(a), (__m128i)(b))
 
 // Packed Absolute (PABS)
-#define PS2_PABSW(a) _mm_abs_epi32((__m128i)(a))
-#define PS2_PABSH(a) _mm_abs_epi16((__m128i)(a))
+// [gta-recomp] PABSW / PABSH saturate: |0x80000000| is 0x7FFFFFFF and |0x8000| is 0x7FFF on the EE (the SSE abs leaves
+// them negative). The translator passes rt, the operand; rs is 0 in the encoding (GitHub issue 80).
+#define PS2_PABSW(a) _mm_min_epu32(_mm_abs_epi32((__m128i)(a)), _mm_set1_epi32(0x7FFFFFFF))
+#define PS2_PABSH(a) _mm_min_epu16(_mm_abs_epi16((__m128i)(a)), _mm_set1_epi16(0x7FFF))
+// [gta-recomp] PADDUH / PSUBUH: unsigned halfwords that saturate at 0xFFFF / 0 (GitHub issue 80)
+#define PS2_PADDUH(a, b) _mm_adds_epu16((__m128i)(a), (__m128i)(b))
+#define PS2_PSUBUH(a, b) _mm_subs_epu16((__m128i)(a), (__m128i)(b))
 #define PS2_PABSB(a) _mm_abs_epi8((__m128i)(a))
 
 // Packed Pack (PPAC) - Packs larger elements into smaller ones
@@ -791,51 +796,34 @@ inline __m128i ps2_ppacb(__m128i rs, __m128i rt)
 #define PS2_PMADDW(a, b) _mm_add_epi32(_mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(1, 0, 3, 2)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(1, 0, 3, 2))), _mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3, 2, 1, 0))))
 
 // Packed Variable Shifts
-#define PS2_PSLLVW(a, b) _mm_custom_sllv_epi32((__m128i)(a), (__m128i)(b))
-#define PS2_PSRLVW(a, b) _mm_custom_srlv_epi32((__m128i)(a), (__m128i)(b))
-#define PS2_PSRAVW(a, b) _mm_custom_srav_epi32((__m128i)(a), (__m128i)(b))
+// [gta-recomp] PSLLVW / PSRLVW / PSRAVW rd, rt, rs: words 0 and 2 of rt (the value) shifted by the low 5 bits of
+// words 0 and 2 of rs, each 32-bit result sign-extended into its doubleword (words 1 and 3 are not shifted lanes of
+// their own). Upstream shifted rs by rt in four independent words (GitHub issue 80). Arguments: (value rt, amount rs).
+#define PS2_PSLLVW(rt, rs) ps2_pshiftvw<0>((__m128i)(rt), (__m128i)(rs))
+#define PS2_PSRLVW(rt, rs) ps2_pshiftvw<1>((__m128i)(rt), (__m128i)(rs))
+#define PS2_PSRAVW(rt, rs) ps2_pshiftvw<2>((__m128i)(rt), (__m128i)(rs))
 
-inline __m128i _mm_custom_sllv_epi32(__m128i a, __m128i count)
+template <int Kind> // 0 left logical, 1 right logical, 2 right arithmetic
+inline __m128i ps2_pshiftvw(__m128i rt, __m128i rs)
 {
-    alignas(16) int32_t a_arr[4];
-    alignas(16) int32_t count_arr[4];
-    alignas(16) int32_t result[4];
-
-    std::memcpy(a_arr, &a, sizeof(a));
-    std::memcpy(count_arr, &count, sizeof(count));
-
-    for (int i = 0; i < 4; i++)
+    uint32_t value[4], amount[4];
+    std::memcpy(value, &rt, sizeof(value));
+    std::memcpy(amount, &rs, sizeof(amount));
+    int64_t out[2];
+    for (int i = 0; i < 2; i++)
     {
-        result[i] = a_arr[i] << (count_arr[i] & 0x1F);
+        const uint32_t v = value[i * 2];
+        const uint32_t n = amount[i * 2] & 0x1Fu;
+        uint32_t r;
+        if constexpr (Kind == 0)
+            r = v << n;
+        else if constexpr (Kind == 1)
+            r = v >> n;
+        else
+            r = static_cast<uint32_t>(static_cast<int32_t>(v) >> n);
+        out[i] = static_cast<int64_t>(static_cast<int32_t>(r));
     }
-
-    __m128i out;
-    std::memcpy(&out, result, sizeof(out));
-    return out;
-}
-
-inline __m128i _mm_custom_srlv_epi32(__m128i a, __m128i count)
-{
-    int32_t a_arr[4], count_arr[4], result[4];
-    _mm_storeu_si128((__m128i *)a_arr, a);
-    _mm_storeu_si128((__m128i *)count_arr, count);
-    for (int i = 0; i < 4; i++)
-    {
-        result[i] = (uint32_t)a_arr[i] >> (count_arr[i] & 0x1F);
-    }
-    return _mm_loadu_si128((__m128i *)result);
-}
-
-inline __m128i _mm_custom_srav_epi32(__m128i a, __m128i count)
-{
-    int32_t a_arr[4], count_arr[4], result[4];
-    _mm_storeu_si128((__m128i *)a_arr, a);
-    _mm_storeu_si128((__m128i *)count_arr, count);
-    for (int i = 0; i < 4; i++)
-    {
-        result[i] = a_arr[i] >> (count_arr[i] & 0x1F);
-    }
-    return _mm_loadu_si128((__m128i *)result);
+    return _mm_set_epi64x(out[1], out[0]);
 }
 
 // PMFHL function implementations

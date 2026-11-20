@@ -5,6 +5,7 @@
 #include "runtime/ps2_render_worker.h" // [gta-recomp]
 #include "runtime/ps2_chain_observer.h" // [gta-recomp]
 #include <cstring>
+#include "runtime/ps2_host_std.h"
 
 enum VIFCmd : uint8_t
 {
@@ -368,7 +369,7 @@ void PS2Memory::submitVif1DirectData(const uint8_t *data, uint32_t qwCount, bool
         if (trace)
         {
             static std::map<std::string, uint64_t> shapes;
-            static auto last = std::chrono::steady_clock::now();
+            static auto last = ps2x::hostNow();
             uint64_t lo, hi;
             std::memcpy(&lo, data, 8);
             std::memcpy(&hi, data + 8, 8);
@@ -398,7 +399,7 @@ void PS2Memory::submitVif1DirectData(const uint8_t *data, uint32_t qwCount, bool
                 if (prim)
                     ++shapes["A+D drawing, nloop " + std::to_string(nloop) + ":" + regs];
             }
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = ps2x::hostNow();
             if (now - last > std::chrono::seconds(5))
             {
                 last = now;

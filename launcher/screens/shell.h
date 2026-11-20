@@ -27,6 +27,15 @@ namespace screens
         Task,
     };
 
+    enum class Tab
+    {
+        Game = 0,
+        Mods = 1,
+        Controls = 2,
+        Settings = 3,
+        About = 4,
+    };
+
     enum class Sheet
     {
         None,
@@ -72,6 +81,8 @@ namespace screens
         Mode mode = Mode::Home, previousMode = Mode::Home;
         double modeSince = -10;  // animation clock
         bool setupOpen = false;  // the player opened Setup from Home (everything is ready)
+        Tab tab = Tab::Game;
+        double tabSince = -10;
 
         int step = kStepDisc, previousStep = -1;
         double stepSince = -10;
@@ -84,6 +95,18 @@ namespace screens
 
         Dialog dialog = Dialog::None, dialogShown = Dialog::None;
         float dialogT = 0;
+
+        int configSubTab = 0; // 0=Display, 1=Graphics, 2=World, 3=Population, 4=Audio & Game
+        int modsSubTab = 0;   // 0=All, 1=Compatible, 2=Incompatible, 3=ModLoader
+        int controlsSubTab = 0; // 0=PS2, 1=Xbox, 2=DS4, 3=DualSense, 4=Switch, 5=KB+Mouse, 6=Settings
+        int gameMenuTab = 0;    // the game menu's page (gamemenu.cpp): 0 Map .. 6 Trainer
+        int gameMenuSlot = 0;   // its Game page's selected save slot
+        bool gameMenuControllerLayout = false; // Options > Controls > Adjust Control Layout open: the launcher's controllers
+        int aboutSubTab = 0;  // 0=Project, 1=Disc & Install, 2=Memory Card
+        bool buildConfirmOpen = false;
+        bool c64TerminalOpen = false;
+        bool forceLanguagePrompt = false;
+        std::filesystem::path stagedBuildDir;
 
         std::string restoreName, ripDrive;
         bool showDrives = false;
@@ -101,6 +124,11 @@ namespace screens
         std::function<void()> pending; // a file dialog, run between frames
     };
     extern Shell shell;
+
+    inline const char *tr(const char *pt, const char *en)
+    {
+        return (!shell.app || shell.app->isPt()) ? pt : en;
+    }
 
     // ---- readings of the model (screens.cpp) -----------------------------------------------------------------------
     ui::Status folderStatus(const App &app);
@@ -126,8 +154,10 @@ namespace screens
     // ---- actions shared by several screens -------------------------------------------------------------------------
     void chooseIso();                        // the file dialog
     void chooseBuildDir(const std::filesystem::path &start);
+    void chooseInstallDirForBuild();         // prompts for final installation folder and opens Build Confirmation
     void chooseRipTarget();
     void play(App &app);
+    void restartLauncher(App &app); // after an update: the new launcher starts, this one closes
     void openSheet(Sheet sheet);
     void openDialog(Dialog dialog);
     void openSetup(int step);
@@ -146,14 +176,23 @@ namespace screens
     float windowScale();
 
     // ---- the parts (each in its own file) --------------------------------------------------------------------------
+    constexpr float kSidebarWidth = 216.0f;
     void drawBackdrop(Rect r, float hero, bool alive = false); // hero: 0..1, the scene of Home; alive: it moves
+    void drawSidebar(Rect r);
     float drawTitleBar(Rect r);              // returns its height
     void drawSetup(Rect r);
     void drawHome(Rect r);
+    void drawMods(Rect r);
+    void drawControls(Rect r);
+    void drawConfig(Rect r);
+    void drawAbout(Rect r);
     void drawTask(Rect r);
     void drawSheets(Rect window);
     void drawDialogs(Rect window);
     void drawToasts(Rect window);
     void drawGallery(Rect r);
+    void drawGameMenu(Rect window); // the in-game menu (T12), full screen; --screen gamemenu:N shows it
+    void vcCategoryBar(Rect barR, const char *const *labels, int count, int &activeTab);
+    void vcFillStripes(Rect tableR, float currentY, float rowH, int &rowIdx);
     void drawFolderBody(Rect r, float &y);   // the folder step's content, also the Folder sheet's
 }

@@ -81,6 +81,10 @@ namespace vcs::distance
         constexpr uint32_t kSetupBigBuildingPrefetchNoFadeReturn = 0x0035FA70u;
         constexpr uint32_t kSetupBigBuildingPrefetchWithFadeReturn = 0x0035FAA0u;
 
+        // Call-site return addresses of GetAtomicFromDistance and GetAtomicFromDistanceWithFlags in SetupEntityVisibility:
+        constexpr uint32_t kSetupEntityVisibilityAtomicReturn = 0x0035F64Cu;
+        constexpr uint32_t kSetupEntityVisibilityFlagsReturn = 0x0035F7E4u;
+
         // the functions that read GenerationDistMultiplier (not FUN_00219898: its +0x7D0 is a ped's); the first two are
         // the peds'
         constexpr uint32_t kGenReaders[] = {0x002AFE80u, 0x002B0200u, 0x0036EBF8u, 0x003DA070u, 0x003F29D8u, 0x00430290u, 0x00433378u};
@@ -98,6 +102,7 @@ namespace vcs::distance
         // guest RAM the patched GenerateOneRandomCar / vehicle removal read their offscreen distances from (60, 90, 70 m;
         // game/vcs/overrides.toml) - the EE kernel's area below the game, next to vcs_physics_timing's 0x7FF00..0x7FF0C
         constexpr uint32_t kOffscreenSlots = 0x0007FF40u;
+        constexpr uint32_t kCarTries = 0x0007FF54u; // GenerateRandomCars' loop counter (game/vcs/overrides.toml; 4: six tries)
         constexpr uint32_t kRoadDensity = 0x00487498u; // bytes: a road density class's spawn chance (0, 4, 7, 15)
 
         constexpr uint32_t kPedPoolCtor = 0x00478F28u, kCarPoolCtor = 0x00478FC0u;   // (memory, size, name)
@@ -111,28 +116,26 @@ namespace vcs::distance
 
         PS2Runtime::RecompiledFunction g_original = nullptr, g_pedPoolCtor = nullptr, g_carPoolCtor = nullptr;
         PS2Runtime::RecompiledFunction g_atomicFromDistance = nullptr, g_func3A53E0 = nullptr, g_largestLodDistance = nullptr;
-        PS2Runtime::RecompiledFunction g_func35E590 = nullptr, g_func35E620 = nullptr, g_func3606C8 = nullptr;
+        PS2Runtime::RecompiledFunction g_setupEntityVisibility = nullptr;
+        PS2Runtime::RecompiledFunction g_storeCarLightShadow = nullptr;
+        PS2Runtime::RecompiledFunction g_renderHeadLightBeams = nullptr;
+        PS2Runtime::RecompiledFunction g_process2dEffects = nullptr;
+
         constexpr uint32_t kFunc3A53E0 = 0x003A53E0u;
-        constexpr uint32_t kFunc35E590 = 0x0035E590u;
-        constexpr uint32_t kFunc35E620 = 0x0035E620u;
-        constexpr uint32_t kFunc3606C8 = 0x003606C8u;
-
-        // Call-site return addresses of func_35E590 (frustum ray-plane intersection):
-        // 1. FUN_0035e620 (standard entities):
-        constexpr uint32_t kFrustumRayReturn1_Standard = 0x0035EC90u;
-        constexpr uint32_t kFrustumRayReturn2_Standard = 0x0035ED08u;
-        constexpr uint32_t kFrustumRayReturn3_Standard = 0x0035ED80u;
-        constexpr uint32_t kFrustumRayReturn4_Standard = 0x0035EDF8u;
-        // 2. FUN_003606c8 (fading entities / big buildings):
-        constexpr uint32_t kFrustumRayReturn1_Fading = 0x00360B24u;
-        constexpr uint32_t kFrustumRayReturn2_Fading = 0x00360B9Cu;
-        constexpr uint32_t kFrustumRayReturn3_Fading = 0x00360C14u;
-        constexpr uint32_t kFrustumRayReturn4_Fading = 0x00360C8Cu;
-
+        constexpr uint32_t kSetupEntityVisibility = 0x0035EFD8u;
+        constexpr uint32_t kStoreCarLightShadow = 0x002E1140u;
+        constexpr uint32_t kRenderHeadLightBeams = 0x002E23A0u;
+constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
+ 
+        // Frustum triangle hook (ScanSectorList_FrustumTriangle / FUN_0035DEA8) - extends on-foot frustum from 300m
+        constexpr uint32_t kScanFrustumTriangle = 0x0035DEA8u;
+        PS2Runtime::RecompiledFunction g_origScanFrustumTriangle = nullptr;
+ 
         PS2Runtime::RecompiledFunction g_readers[kReaderCount] = {};
         std::atomic<uint32_t> g_statClamp330Bypasses{0};
         std::atomic<uint32_t> g_statPrefetchLookahead{0};
         std::atomic<uint32_t> g_statSectorLookaheads{0};
+        std::atomic<uint32_t> g_statPropsBoosted{0};
         std::atomic<float> g_cameraSpeed{0.0f};
         float g_lastCamX = 0.0f, g_lastCamY = 0.0f;
         bool g_lastCamInit = false;
@@ -144,6 +147,51 @@ namespace vcs::distance
         bool g_genFresh = false, g_genTouched = false;
         float g_genBase = 1.0f;
         constexpr float kGenUnwritten = -1.0f; // written before CCamera::Process: still there = it wrote none this frame
+
+        // The spawn rings (2026-11-12, the player: "few people and few cars on the streets at 100", then "they spawn in
+        // front of me"). With the population distance at its most every new ped stood 175-300 m away in view (the game's
+        // 35-60 x a factor of 5) or 22-44 m out of view, every new car in view 300-480 m away, and the far peds - alive out
+        // to ~325 m - held every slot of the cap: in view within 50 m 1.1-1.4 peds against the PS2's 10 (Little Havana /
+        // the police station, noon). Bringing the rings in view near filled the street but made peds and cars appear in
+        // plain sight (55-160 m), so what spawns in view stays far, and the street near the player fills from out of view:
+        // peds there at the game's 10-20 m (g_pedOutK), the crowd at its cap recycling its farthest ped (trimCrowd), the
+        // camera-cut fill (a new picture) within kFillInViewK. Knobs for a test: VCS_CAR_RINGS (n > 1: the car spawner's
+        // distance cycles over n rings from the game's own out to the population distance - in view, so cars appear),
+        // VCS_PED_INVIEW_K (k > 0: peds in view made within k x the game's distance), VCS_PED_OUT_K (0: the population
+        // distance's, as before), VCS_PED_INVIEW_MIN. All of them are the game's own at population distance 0.
+        float envFloat(const char *name, float fallback)
+        {
+            const char *v = std::getenv(name);
+            return v && *v ? static_cast<float>(std::atof(v)) : fallback;
+        }
+        const int g_carRings = static_cast<int>(envFloat("VCS_CAR_RINGS", 1.0f));
+        const float g_pedOutK = envFloat("VCS_PED_OUT_K", 1.0f);
+        const float g_pedInMin = envFloat("VCS_PED_INVIEW_MIN", 55.0f);
+        const float g_pedInMaxK = envFloat("VCS_PED_INVIEW_K", 0.0f);
+        // (2026-11-13) The in-view ring is far (105-200 m with the population distance at its most) and nothing in view
+        // nearer than 250 m is ever recycled: the new peds piled up in one band far down the street the player looks
+        // along while the street near them stayed thin (the player's picture: "concentrated there, not spread over the
+        // streets"). So the ring out of view reaches VCS_PED_OUT_FAR_K x the game's 20 m: the side streets and the ones
+        // behind fill too (at the player's spot: 49-57 -> 41-43 in view within 200 m, the total kept at ~140).
+        // VCS_PED_INVIEW_CAP=n closes the in-view ring while n peds stand in view beyond 90 m - off: the game makes
+        // nearly all its peds through the in-view ring, and with it closed (n = 20) the city kept 40 peds of 140.
+        const int g_pedInViewCap = static_cast<int>(envFloat("VCS_PED_INVIEW_CAP", 0.0f));
+        const float g_pedOutFarK = envFloat("VCS_PED_OUT_FAR_K", 3.0f);
+        constexpr float kFillInViewK = 1.5f; // the camera-cut fill's farthest in view (the picture is new then)
+        // Crowd bands (docs/CROWD_BANDS_PLAN.md, the player's plan, 2026-11-13): with the population raised, few real peds -
+        // VCS_CROWD_NEAR within 100 m, VCS_CROWD_MID at 100-200 m - and the decorative walkers from 200 m out
+        // (realPedOuterRadius). No ring in view (a ped made there is seen standing up) but the camera-cut fill's; out of
+        // view the ring goes to the band that is short; past 210 m a ped becomes a walker in view, fades out of view
+        // (trimBands); walkers coming in become real peds (the handover). Graphics > Distance and population > Crowd bands
+        // (world.crowd_bands, VCS_CROWD_BANDS; off).
+        std::atomic<bool> g_bands{false};
+        const int g_bandNearBase = static_cast<int>(envFloat("VCS_CROWD_NEAR", 25.0f));
+        const int g_bandMidBase = static_cast<int>(envFloat("VCS_CROWD_MID", 25.0f));
+        constexpr float kBandNear = 100.0f, kBandEdge = 200.0f, kBandOut = 210.0f, kBandMidSpawn = 155.0f, kBandMidFade = 120.0f;
+        constexpr float kBandAdoptMax = 450.0f; // past it a ped in view is a few pixels: faded, not made a walker
+        std::atomic<uint32_t> g_births{0}; // popview's births= (the ped count's rises, once a game frame)
+        uint32_t g_carRing = 0;
+        float g_carSpawnK = 1.0f; // the car spawner's factor this call (the node list's shift follows it)
 
         // the game's constants, read once
         bool g_haveDefaults = false;
@@ -194,6 +242,63 @@ namespace vcs::distance
             return p <= 1.0f ? p : std::min(1.0f + (p - 1.0f) * 2.0f, kMaxPedDistance);
         }
         float pedDensityDistance() { return std::min(pedDistance(), kMaxPedDensityDistance); }
+        bool bandsOn() { return g_bands.load(std::memory_order_relaxed) && pedDistance() > 1.0f; }
+
+        // a random ped on foot that the crowd's numbers count: the population's own (+0x8F4 1), not in a vehicle, not dying
+        // or dead (0x37, 0x39, 0x3A), not fading out (+0x1CC bit 31)
+        bool crowdPed(uint32_t ped)
+        {
+            const int32_t state = rd32(ped + 0x8C4u);
+            return rd32(ped + 0x8F4u) == 1 && state != 0x37 && state != 0x39 && state != 0x3A && rd32(ped + 0x538u) == 0;
+        }
+        bool fadingOut(uint32_t ped) { return (rd32(ped + 0x1CCu) & 0x80000000) != 0; }
+
+        // the crowd's peds by band (2D from the camera)
+        struct Bands
+        {
+            int nearCount = 0, midCount = 0, outCount = 0, fading = 0;
+        };
+        Bands countBands()
+        {
+            Bands bands;
+            const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
+            if (!pool)
+                return bands;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
+            const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), kLargePeds);
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            for (uint32_t i = 0; i < size; ++i)
+            {
+                if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
+                    continue;
+                const uint32_t ped = entries + i * 0xD20u;
+                if (!crowdPed(ped))
+                    continue;
+                if (fadingOut(ped))
+                {
+                    ++bands.fading;
+                    continue;
+                }
+                const float d = std::hypot(rdf(ped + 0x30u) - cx, rdf(ped + 0x34u) - cy);
+                (d < kBandNear ? bands.nearCount : d < kBandEdge ? bands.midCount : bands.outCount) += 1;
+            }
+            return bands;
+        }
+        // once a game frame and again when the game's ped count moved (the camera-cut fill makes up to 100 in one frame), on
+        // the game thread (the control channel's popview counts its own)
+        Bands bandCounts()
+        {
+            static int32_t frame = -1, peds = -1;
+            static Bands bands;
+            const int32_t now = rd32(0x004CD124u), count = rd32(kPeds); // the game's frame counter, its ped count
+            if (now != frame || count != peds)
+            {
+                frame = now;
+                peds = count;
+                bands = countBands();
+            }
+            return bands;
+        }
         // the densities as they apply now (updateBudget): the sliders' at a budget of 1; at 0 the game's own numbers of
         // cars and peds, spread over the population distance's area (the distances never change: spawns stay far)
         float g_budget = 1.0f;
@@ -204,6 +309,16 @@ namespace vcs::distance
         }
         float trafficDensity() { return governed(percent(g_traffic), carDistance()); }
         float pedestrianDensity() { return governed(percent(g_pedestrians), pedDensityDistance()); }
+        // the crowd bands' numbers: Pedestrian density's - VCS_CROWD_NEAR / _MID (25) at its 50 (2.5 x the game's),
+        // 0.4 of them at 0, 1.6 at 100 - and towards the 0's with the frame-rate target's budget (2026-11-13: fixed at 25,
+        // neither slider did anything to the peds with the bands on)
+        int bandTarget(int base)
+        {
+            const float least = base * 0.4f, want = base * percent(g_pedestrians) / 2.5f;
+            return static_cast<int>(std::lround(least + (want - least) * g_budget));
+        }
+        int bandNear() { return bandTarget(g_bandNearBase); }
+        int bandMid() { return bandTarget(g_bandMidBase); }
 
         // GenerateOneRandomCar gives up on a found spot unless rand() & 15 <= the road's density class value (the lower
         // of the link's two nodes): 1, 5, 8 and 16 chances in 16. More cars over a larger area need more spots taken -
@@ -258,32 +373,178 @@ namespace vcs::distance
         // Peds above the cap (0x488008) fade out and go - the flag CPopulation's removal sets (+0x1C8 bit 63, bFadeOut; it
         // takes them away once faded): random peds on foot out of the camera's cone, the farthest first, at most two a
         // frame. Only while the budget holds the numbers below the sliders'.
+        // Also while the crowd is at its cap with the population distance raised (2026-11-12): peds live out to ~325 m, so
+        // the far ones held every slot and none was made near the player any more (by the police station 4 in view within
+        // 50 m against the PS2's 11). Then one ped at a time goes - out of the camera's cone beyond 40 m or anywhere beyond
+        // 250 m (in view only that far: a ped the player can make out never fades away), the farthest first, while fewer
+        // than two fade - and the spawner fills its slot, near out of view or far in view.
+        constexpr float kRecycleOutOfView = 40.0f, kRecycleAnywhere = 250.0f;
+        // a ped model's info (CModelInfo::ms_modelInfoPtrs at *0x486518, 0x4CD10C entries; 0: none)
+        uint32_t modelInfo(uint32_t model)
+        {
+            const uint32_t table = static_cast<uint32_t>(rd32(0x00486518u));
+            return table && model < static_cast<uint32_t>(rd32(0x004CD10Cu)) ? static_cast<uint32_t>(rd32(table + model * 4u)) : 0u;
+        }
+        // the live peds wearing a model (a walker of it is drawn on one of them: vcs_distant.cpp's templates)
+        int pedsOfModel(uint32_t model)
+        {
+            const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
+            if (!pool)
+                return 0;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
+            const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), kLargePeds);
+            int n = 0;
+            for (uint32_t i = 0; i < size; ++i)
+            {
+                const uint32_t ped = entries + i * 0xD20u;
+                if (!(g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u) && rd16(ped + 0x56u) == model && !(rd32(ped + 0x4Cu) & 1))
+                    ++n; // (not one leaving the world)
+            }
+            return n;
+        }
+        std::atomic<uint32_t> g_handIns{0}, g_handOuts{0}; // popview's handovers: walkers made real, real peds made walkers
+        // VCS_CROWD_BANDS_LOG: each handover logged, and a ped handed in looked at again a second later (still there, its
+        // height and heading)
+        const bool g_bandsLog = std::getenv("VCS_CROWD_BANDS_LOG") != nullptr;
+        struct HandWatch
+        {
+            uint32_t ped = 0;
+            int32_t frame = 0;
+            float heading = 0.0f, z = 0.0f;
+        };
+        HandWatch g_handWatch[8];
+        uint32_t g_handWatchNext = 0;
+        void watchHandovers()
+        {
+            const int32_t now = rd32(0x004CD124u);
+            for (HandWatch &w : g_handWatch)
+                if (w.ped && now - w.frame >= 60)
+                {
+                    std::fprintf(stderr, "[bands] in +1 s: ped %08x model %d at %.1f %.1f %.1f (made at z %.1f) heading %.2f (made %.2f) state %#x\n",
+                                 w.ped, rd16(w.ped + 0x56u), rdf(w.ped + 0x30u), rdf(w.ped + 0x34u), rdf(w.ped + 0x38u), w.z,
+                                 rdf(w.ped + 0x8E0u), w.heading, rd32(w.ped + 0x8C4u));
+                    w.ped = 0;
+                }
+        }
+
+        // With the crowd bands: a ped past kBandOut in view (the walkers' cone, +-60 degrees) becomes a walker of its model
+        // on the nearest pavement link and leaves the world at once (bRemoveFromWorld, +0x48 bit 32: CWorld::Process
+        // removes it this frame; the walker is drawn this frame too) - while another ped wears its model (the walker's
+        // template) and a walker is free, else it stays until out of view. Out of view a ped past kBandOut fades, and while
+        // the bands hold more than their numbers (just switched on, the camera-cut fill's hundred tries) the farthest out
+        // of view beyond 40 m; the farthest first, while fewer than four fade.
+        void trimBands()
+        {
+            if (g_bandsLog)
+                watchHandovers();
+            const Bands bands = bandCounts();
+            const bool over = bands.nearCount + bands.midCount > bandNear() + bandMid();
+            // the middle band over its own number holds the near band's room (peds made near walk out into it in view,
+            // and in view none faded: near 7-15 of 25 at a standing camera, the middle 35-58): its farthest go - out of
+            // view, or in view past kBandMidFade, where they are a few pixels of a template's mesh (2026-11-13)
+            const bool midOver = bands.midCount > bandMid();
+            if (!over && !midOver && bands.outCount == 0)
+                return;
+            const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
+            if (!pool)
+                return;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
+            const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), kLargePeds);
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            const float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u), fl = std::max(0.001f, std::hypot(fx, fy));
+            uint32_t pick[2] = {0, 0};
+            float far[2] = {0.0f, 0.0f};
+            int adopted = 0, adoptTries = 0; // (a failed try scans the pavement nodes: a few a frame)
+            for (uint32_t i = 0; i < size; ++i)
+            {
+                if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
+                    continue;
+                const uint32_t ped = entries + i * 0xD20u;
+                if (!crowdPed(ped) || fadingOut(ped) || (rd32(ped + 0x4Cu) & 1))
+                    continue;
+                const float dx = rdf(ped + 0x30u) - cx, dy = rdf(ped + 0x34u) - cy, d = std::hypot(dx, dy);
+                const bool past = d > kBandOut;
+                const float along = dx * fx + dy * fy;
+                if (past && d < kBandAdoptMax && along >= 0.5f * d * fl)
+                {
+                    // walking away (forward (-sin, cos) of +0x8E0 from the camera): one coming back stays real
+                    const uint32_t model = rd16(ped + 0x56u);
+                    const float heading = rdf(ped + 0x8E0u), away = -std::sin(heading) * dx + std::cos(heading) * dy;
+                    if (adopted < 4 && away > 0.0f && ++adoptTries <= 8 && pedsOfModel(model) >= 2 &&
+                        vcs::distant::adoptPed(rdf(ped + 0x30u), rdf(ped + 0x34u), rdf(ped + 0x8E0u), model))
+                    {
+                        if (g_bandsLog)
+                            std::fprintf(stderr, "[bands] out: ped %08x model %u at %.1f %.1f heading %.2f, %.0f m -> a walker\n", ped,
+                                         model, rdf(ped + 0x30u), rdf(ped + 0x34u), rdf(ped + 0x8E0u), d);
+                        wr32(ped + 0x4Cu, rd32(ped + 0x4Cu) | 1);
+                        ++adopted;
+                        g_handOuts.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    continue; // in view: never faded
+                }
+                const bool outOfView = along <= 0.2f * d * fl;
+                const bool spare = (over && d > kRecycleOutOfView && outOfView) ||
+                                   (midOver && d >= kBandNear && (outOfView || d > kBandMidFade));
+                if (!past && !spare)
+                    continue;
+                const float key = past ? d + 1e4f : d; // past the edge first
+                for (int k = 0; k < 2; ++k)
+                    if (key > far[k])
+                    {
+                        if (k == 0)
+                        {
+                            far[1] = far[0];
+                            pick[1] = pick[0];
+                        }
+                        far[k] = key;
+                        pick[k] = ped;
+                        break;
+                    }
+            }
+            for (int k = 0; k < std::min(2, 4 - bands.fading); ++k) // (none while four fade)
+                if (pick[k])
+                    wr32(pick[k] + 0x1CCu, rd32(pick[k] + 0x1CCu) | static_cast<int32_t>(0x80000000u));
+        }
+
         void trimCrowd()
         {
-            if (g_budget >= 1.0f)
+            if (bandsOn())
+                return trimBands();
+            const int32_t count = rd32(kPeds);
+            const int32_t cap = rd32(0x00489F7Cu) == 0 ? rd32(kMaxPeds) : rd32(kMaxPedsB); // CGame::currArea: outdoors
+            const bool full = pedDistance() > 1.0f && count >= cap - 1;
+            if (g_budget >= 1.0f && !full)
                 return;
-            const int32_t excess = rd32(kPeds) - rd32(kMaxPedsB);
+            const int32_t excess = g_budget < 1.0f ? count - rd32(kMaxPedsB) : 0;
             const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
-            if (excess <= 0 || !pool)
+            if ((excess <= 0 && !full) || !pool)
                 return;
             const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
             const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), kLargePeds);
             const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u), cz = rdf(kCameraPos + 8u);
             const float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u), fz = rdf(kCameraFront + 8u);
+            const bool recycle = excess <= 0; // only the cap's recycling, not the budget's trim
+            const float nearOut = recycle ? kRecycleOutOfView : 30.0f;
             uint32_t pick[2] = {0, 0};
             float far[2] = {0.0f, 0.0f};
+            int fading = 0;
             for (uint32_t i = 0; i < size; ++i)
             {
                 if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
                     continue;
                 const uint32_t ped = entries + i * 0xD20u;
                 const int32_t state = rd32(ped + 0x8C4u);
-                if (rd32(ped + 0x8F4u) != 1 || state == 0x37 || state == 0x39 || state == 0x3A || rd32(ped + 0x538u) != 0 ||
-                    (rd32(ped + 0x1CCu) & 0x80000000))
+                if (rd32(ped + 0x8F4u) != 1 || state == 0x37 || state == 0x39 || state == 0x3A || rd32(ped + 0x538u) != 0)
                     continue;
+                if (rd32(ped + 0x1CCu) & 0x80000000)
+                {
+                    ++fading;
+                    continue;
+                }
                 const float dx = rdf(ped + 0x30u) - cx, dy = rdf(ped + 0x34u) - cy, dz = rdf(ped + 0x38u) - cz;
                 const float d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 < 30.0f * 30.0f || dx * fx + dy * fy + dz * fz > 0.2f * std::sqrt(d2))
+                const bool farAway = recycle && d2 > kRecycleAnywhere * kRecycleAnywhere;
+                if (!farAway && (d2 < nearOut * nearOut || dx * fx + dy * fy + dz * fz > 0.2f * std::sqrt(d2)))
                     continue; // near, or in view
                 for (int k = 0; k < 2; ++k)
                     if (d2 > far[k])
@@ -298,7 +559,8 @@ namespace vcs::distance
                         break;
                     }
             }
-            for (int k = 0; k < std::min(excess, 2); ++k)
+            const int n = recycle ? (fading < 2 ? 1 : 0) : std::min(excess, 2);
+            for (int k = 0; k < n; ++k)
                 if (pick[k])
                     wr32(pick[k] + 0x1CCu, rd32(pick[k] + 0x1CCu) | static_cast<int32_t>(0x80000000u));
         }
@@ -332,13 +594,20 @@ namespace vcs::distance
             // the caps share the ped pool: every random car takes a driver from it, the ambient peds the rest (less the
             // slots kept for missions and the player). Each keeps up to the game's own cap; what the settings ask beyond
             // that shares the room left, in proportion.
-            // Realistic Open Limit Adjuster (OLA) caps for 1986 Vice City:
-            // Base PS2: 16 cars, 30 peds.
-            // Realistic OLA target: up to 64 active cars and 104 active pedestrians (~20-25% boost over initial calibration).
-            // This provides rich, continuous traffic and bustling sidewalks without
-            // unrealistic 1000-NPC gridlocks or single-threaded MIPS CPU starvation.
-            constexpr int32_t kOlaMaxCars = 64;
-            constexpr int32_t kOlaMaxPeds = 104;
+            // The caps are the pools' room, as Open Limit Adjuster's "unlimited" (2026-11-12, the player's choice): the
+            // pools are made at their ceiling (240 / 140 here) and nothing below them stops the numbers - fixed 64 cars /
+            // 104 peds were reached at 100 and held the crowd there (by the police station 99 peds, 138 with the pools'
+            // room; game thread 11.9 -> 13.9 ms, PROGRESS.md 2026-11-12). The 1000-entity scenes of 2026-11-05 came from
+            // the decorative proxies on top and pools of 280 / 200; the slots kept for missions stay kept.
+            // VCS_POP_CAPS=cars,peds fixes them for a test (64,104: the caps before).
+            static const std::pair<int32_t, int32_t> kCaps = [] {
+                int cars = 0, peds = 0; // 0: the pools' room
+                if (const char *e = std::getenv("VCS_POP_CAPS"))
+                    std::sscanf(e, "%d,%d", &cars, &peds);
+                return std::make_pair(cars > 0 ? cars : 1000, peds > 0 ? peds : 1000);
+            }();
+            const int32_t kOlaMaxCars = kCaps.first;
+            const int32_t kOlaMaxPeds = kCaps.second;
             const int32_t carPool = static_cast<int32_t>(poolSize(kCarPool)), pedPool = static_cast<int32_t>(poolSize(kPedPool));
             const int32_t carRoom = std::clamp<int32_t>(carPool - static_cast<int32_t>(kCarsKept), g_maxCars, kOlaMaxCars);
             int32_t maxCars = std::clamp(static_cast<int32_t>(std::lround(g_maxCars * cars)), 0, carRoom);
@@ -415,8 +684,11 @@ namespace vcs::distance
             std::memcpy(&camMode, rdram + 0x006F4540u + mode * 0x270u, 2);
             const float own = rdf(kLodMultiplier) / view, gen = rdf(kGenMultiplier), ped = own * peds;
             wrf(0x004CD5C0u, camMode == 1 || camMode == 0x25 ? 1e6f : own * (own * 400.0f));
-            wrf(0x004CD5D8u, ped * (ped * 4900.0f));
-            wrf(0x004CD5CCu, ped * (ped * 4900.0f));
+            // [probe] VCS_PED_DRAW_MAX=<m>: peds drawn no farther than that (what drawing the far crowd costs)
+            static const float pedDrawMax = envFloat("VCS_PED_DRAW_MAX", 1e9f);
+            const float pedDraw = std::min(70.0f * ped, pedDrawMax) / 70.0f;
+            wrf(0x004CD5D8u, pedDraw * (pedDraw * 4900.0f));
+            wrf(0x004CD5CCu, pedDraw * (pedDraw * 4900.0f));
             wrf(0x004CD5BCu, gen * (gen * 4900.0f));
             wrf(0x004CD5C4u, gen * (gen * 22500.0f));
             wrf(0x004CD5D0u, gen * (gen * 8100.0f));
@@ -424,6 +696,141 @@ namespace vcs::distance
             wrf(0x004CD5C8u, gen * (gen * 3600.0f));
             ctx->pc = GPR_U32(ctx, 31);
             return true;
+        }
+
+        // The police after the player: their cars come out of the same spawner as the traffic, at its distance - with the
+        // population distance's (up to 3 x) they appeared too far ever to catch a car, and came only once the player
+        // stood still (the player's report, 2026-11-17). While the player is wanted, the spawner's ring **out of view**
+        // (behind and beside the camera: 60 / 90 / 70 m, kOffscreenSlots) keeps the game's distance, the police come
+        // from there as on the PS2; the ring in view stays far. (The first fix brought the whole spawner back to the
+        // game's distance: every new car then appeared close and in plain sight - the player's report, 2026-11-18.)
+        // VCS_CHASE_SPAWN=0 leaves both rings at the population distance's (for comparing).
+        bool chased()
+        {
+            static const bool on = !(std::getenv("VCS_CHASE_SPAWN") && *std::getenv("VCS_CHASE_SPAWN") == '0');
+            if (!on)
+                return false;
+            const uint32_t ped = rd32(0x004E4910u + rd8(0x004CD128u) * 0x190u); // CWorld::Players[in focus].m_pPed
+            if (ped < 0x00100000u || ped >= 0x02000000u)
+                return false;
+            const uint32_t stars = rd32(ped + 0x920u); // the wanted level (game-internals.md 12e)
+            return stars >= 1u && stars <= 6u;
+        }
+
+        // Room for the police's cars. GenerateOneRandomCar (FUN_00430290) returns at once when the random cars are as many
+        // as the zone wants (0x48A96C >= the zone's density x 0x48A968 x 0x48A680) or all the counts reach the cap
+        // 0x48A9A8 - and only after that does it choose a police car (wanted level > 1, the cop cars 0x48A970 fewer than
+        // the level's +0x91A, the ped's +0x918 below +0x919: at 3 stars and more always, at 2 one in two; the model -
+        // Cheetah, Enforcer... - from FUN_00432BE8 by the level). On the PS2 the traffic turns over within 60 m, so a
+        // try gets through; with the population distance and density up the traffic stays at its number, nearly every
+        // try returned before the police, and a 3- or 4-star chase brought one or two cars (the player's report,
+        // 2026-11-18; build/analysis/decomp/gen_random_cars.c). While the police want a car, the number wanted and the
+        // cap are raised just past the counts for the spawner's tries - one more car - and applyDensity writes the
+        // frame's values back before the next frame's. VCS_CHASE_SPAWN=0 leaves them.
+        void policeRoom()
+        {
+            if (!chased())
+                return;
+            const uint32_t ped = rd32(0x004E4910u + rd8(0x004CD128u) * 0x190u);
+            const int32_t stars = static_cast<int32_t>(rd32(ped + 0x920u));
+            const int32_t cops = static_cast<int32_t>(rd32(0x0048A970u));
+            if (stars < 2 || cops >= static_cast<int32_t>(rd8(ped + 0x91Au)) || rd8(ped + 0x918u) >= rd8(ped + 0x919u))
+                return;
+            const int32_t random = static_cast<int32_t>(rd32(kRandomCars));
+            const int32_t zone = std::max<int32_t>(static_cast<int16_t>(rd16(0x004E4A54u + rd8(0x004CD128u) * 400u)), 1);
+            const float scripts = rdf(0x0048A968u);
+            if (!(scripts > 0.0f))
+                return; // a mission turned the traffic off: no police cars from it either (as on the PS2)
+            const float need = (static_cast<float>(random) + 1.5f) / (static_cast<float>(zone) * scripts);
+            if (need > rdf(kCarNumber))
+                wrf(kCarNumber, need);
+            int32_t sum = 0;
+            for (uint32_t a : {0x0048A96Cu, 0x0048A970u, 0x0048A974u, 0x0048A978u, 0x0048A980u, 0x0048A984u})
+                sum += static_cast<int32_t>(rd32(a));
+            const int32_t room = static_cast<int32_t>(poolSize(kCarPool)) - static_cast<int32_t>(kCarsKept);
+            if (static_cast<int32_t>(rd32(kMaxCars)) <= sum && sum + 1 <= room)
+                wr32(kMaxCars, sum + 1);
+        }
+
+        constexpr uint32_t kClearRange = 0x00195380u; // CWorld::FindObjectsInRange (leaf)
+        PS2Runtime::RecompiledFunction g_csClear = nullptr;
+
+        // #35: Traffic spawner gate relaxation when population distance or vehicle density is raised above 0.
+        // 1. clear20A (0x432010): when the player is on foot or stopped, FUN_00430290 checks boundRadius + 20.0f around
+        //    the new car; clear10 (10 m) and clear20B (boundRadius) already prevent overlap (just as while driving, when
+        //    0x24C($sp) == 0 skips clear20A). VCS_CAR_CLEAR20A_EXTRA=20 restores the original 20 m buffer.
+        // 2. not_toward (0x4320F4): past the game's 160 m outer ring (carDistance() > 1), cars on one-way avenues at
+        //    extended range driving away would be rejected 100% of the time; relax within (160*base, pct*160*base*k]
+        //    so distant traffic populates without spawning right at the removal edge to vanish immediately.
+        //    0x80($sp)/0x84($sp) are written at 0x431ce8/0x431cec and read only once at 0x4320cc/0x4320d4.
+        float clear20AExtra()
+        {
+            static const float v = [] {
+                if (const char *e = std::getenv("VCS_CAR_CLEAR20A_EXTRA"))
+                    return std::clamp(std::strtof(e, nullptr), 0.0f, 20.0f);
+                return 0.0f;
+            }();
+            return v;
+        }
+        enum NtMode : uint8_t { NtBand = 0, NtUnbounded, NtOrig };
+        NtMode notTowardMode()
+        {
+            static const NtMode m = [] {
+                if (const char *e = std::getenv("VCS_CAR_NT_MODE"))
+                {
+                    if (std::strcmp(e, "orig") == 0)
+                        return NtOrig;
+                    if (std::strcmp(e, "unbounded") == 0)
+                        return NtUnbounded;
+                }
+                return NtBand;
+            }();
+            return m;
+        }
+        float ntMaxPct()
+        {
+            static const float v = [] {
+                if (const char *e = std::getenv("VCS_CAR_NT_MAX_PCT"))
+                    return std::clamp(std::strtof(e, nullptr), 0.0f, 2.0f);
+                return 0.80f;
+            }();
+            return v;
+        }
+        PS2_GUEST_CC void csClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ra = GPR_U32(ctx, 31);
+            const bool entry = (ctx->pc == kClearRange);
+            if (entry && ra == 0x43206Cu &&
+                (g_population.load(std::memory_order_relaxed) > 100 || g_traffic.load(std::memory_order_relaxed) > 100))
+            {
+                const float extra = clear20AExtra();
+                if (extra < 20.0f)
+                    ctx->f[12] = std::max(0.0f, ctx->f[12] - (20.0f - extra));
+            }
+            g_csClear(rdram, ctx, runtime);
+            if (ra == 0x4320C4u && ctx->pc == 0x4320C4u && carDistance() > 1.0f && notTowardMode() != NtOrig)
+            {
+                g_rdram = rdram;
+                const uint32_t sp = GPR_U32(ctx, 29);
+                if (static_cast<int16_t>(rd16(sp + 0x1F0u)) == 0)
+                {
+                    const float vx = rdf(sp + 0x80u), vy = rdf(sp + 0x84u);
+                    const float dx = rdf(sp + 0x90u), dy = rdf(sp + 0x94u);
+                    const float dot = vx * dx + vy * dy;
+                    if (dot >= 0.0f)
+                    {
+                        const float dist = std::hypot(dx, dy);
+                        const float base = g_genBase > 0.0f ? g_genBase : 1.0f;
+                        const float ntMin = 160.0f * base;
+                        const float ntMax = 160.0f * base * carDistance() * ntMaxPct();
+                        if (dist > ntMin && (notTowardMode() == NtUnbounded || dist <= ntMax))
+                        {
+                            wrf(sp + 0x80u, dot > 0.0f ? -vx : -dx);
+                            wrf(sp + 0x84u, dot > 0.0f ? -vy : -dy);
+                        }
+                    }
+                }
+            }
         }
 
         // a reader of GenerationDistMultiplier: the frame's base (the game's value) times this reader's factor
@@ -437,11 +844,29 @@ namespace vcs::distance
             {
                 updateBudget();
                 trimCrowd();
+                // the population's births, roughly: the rises of the game's ped count from one frame to the next
+                static int32_t lastPeds = -1;
+                const int32_t peds = rd32(kPeds);
+                if (lastPeds >= 0 && peds > lastPeds)
+                    g_births.fetch_add(static_cast<uint32_t>(peds - lastPeds), std::memory_order_relaxed);
+                lastPeds = peds;
+            }
+            if (kGenReaders[I] == 0x00430290u) // GenerateOneRandomCar
+            {
+                policeRoom();
+                // the tries a frame (#35): GenerateRandomCars FUN_00430148 calls it once, then loops on a counter of 4 -
+                // six tries - which game/vcs/overrides.toml reads from kCarTries (written here at the first call, before
+                // the loop reads it). Kept at the game's 4: up to 24 tries a frame at Vehicle density 100 left the
+                // standing traffic as it was (Little Havana, two runs each: ~43 cars at 0 and at 100) - the spots, not
+                // the tries, are what runs out. VCS_CAR_TRIES=<n> for experiments.
+                static const int tries = std::getenv("VCS_CAR_TRIES") ? std::clamp(std::atoi(std::getenv("VCS_CAR_TRIES")), 0, 60) : 4;
+                wr32(kCarTries, tries);
             }
             const float cars = carDistance();
-            wrf(kOffscreenSlots, 60.0f * cars);
-            wrf(kOffscreenSlots + 4u, 90.0f * cars);
-            wrf(kOffscreenSlots + 8u, 70.0f * cars);
+            const float offscreen = chased() ? 1.0f : cars; // (the police's ring: chased() above)
+            wrf(kOffscreenSlots, 60.0f * offscreen);
+            wrf(kOffscreenSlots + 4u, 90.0f * offscreen);
+            wrf(kOffscreenSlots + 8u, 70.0f * offscreen);
             if (g_genTouched)
             {
                 if (g_genFresh)
@@ -449,7 +874,17 @@ namespace vcs::distance
                     const float v = rdf(kGenMultiplier);
                     g_genBase = v == kGenUnwritten ? g_genBase : v;
                 }
-                wrf(kGenMultiplier, g_genBase * (I < kPedReaders ? pedDistance() : cars));
+                float k = I < kPedReaders ? pedDistance() : cars;
+                if (kGenReaders[I] == 0x00430290u)
+                {
+                    // the car spawner: its rings spread from the game's distance out to the population distance's (the
+                    // spawn rings' note at g_carRings; the removal, FUN_00433378, keeps the population distance)
+                    const int rings = std::max(g_carRings, 1);
+                    if (rings > 1)
+                        k = 1.0f + (cars - 1.0f) * static_cast<float>(g_carRing++ % rings) / static_cast<float>(rings - 1);
+                    g_carSpawnK = k;
+                }
+                wrf(kGenMultiplier, g_genBase * k);
                 if (percent(g_population) == 1.0f) // back at the game's own: this frame keeps it, the next is left alone
                     g_genTouched = false;
             }
@@ -472,13 +907,14 @@ namespace vcs::distance
         // is set, else 0) to the count (+0x38) whose LOD distance (+0x2C) times LODDistMultiplier is beyond the distance,
         // 0 past the last. With a detail distance other than the view's, the distances before the last are scaled by
         // detail / view (at most the last); the original otherwise.
-        // For extended view distance, small attached props (dishes, antennas, signs) have tiny .IDE ranges (25m-40m).
-        // We enforce a propFloor (260m-360m) so they stay visible matching the parent building's LOD.
+        // For extended view distance, small attached props (dishes, antennas, signs, foliage) have tiny .IDE ranges (25m-40m).
+        // We enforce a propFloor (350m-950m) so they stay visible matching the parent building's LOD.
+        // Furthermore, foliage (bit 6/0x40 in flags) and distance-fading entities (bit 36 in entity flags) were hard-culled
+        // at 30m by Rockstar to protect the PS2's GS fillrate. When viewFactor > 1.0f, clearing bit 0x40 and bit 36 routes
+        // them to the primary opaque/transparent render lists (0x744AC0/0x742B80), eliminating the 30m pop-in wall.
         PS2_GUEST_CC void atomicFromDistance(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const float view = percent(g_view), detail = percent(g_detail);
-            if (detail == view && view <= 1.0f)
-                return g_atomicFromDistance(rdram, ctx, runtime);
             g_rdram = rdram;
             const uint32_t mi = GPR_U32(ctx, 4);
             const float distance = ctx->f[12];
@@ -490,20 +926,63 @@ namespace vcs::distance
                 std::memcpy(&flags, rdram + ((mi + 0x3Au) & PS2_RAM_MASK), 2);
                 const int count = rdram[(mi + 0x38u) & PS2_RAM_MASK];
                 const float mult = rdf(kLodMultiplier);
-                const float propFloor = (view > 1.0f) ? std::clamp(300.0f * view, 500.0f, 900.0f) : 0.0f;
-                const float last = count > 0 ? std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(count - 1)) * mult, propFloor) : 0.0f;
+                const float viewFactor = view;
+                const float baseLod = count > 0 ? rdf(mi + 0x2Cu) : 0.0f;
+                const bool isSmallProp = (baseLod <= 80.0f) || ((flags & 0x6040u) != 0);
+                const float propFloor = (viewFactor > 1.0f && isSmallProp) ? std::clamp(180.0f * viewFactor, 180.0f, 400.0f) : 0.0f;
+                const float last = count > 0 ? std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(count - 1)) * mult, isSmallProp ? propFloor : 0.0f) : 0.0f;
                 for (int i = (flags & 8u) ? (flags & 3u) : 0; i < count; ++i)
                 {
                     float limit = rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(i)) * mult;
                     if (i < count - 1)
+                    {
                         limit = std::min(limit * detail / view, last);
-                    else if (propFloor > 0.0f)
+                        if (isSmallProp && propFloor > 0.0f)
+                            limit = std::max(limit, propFloor);
+                    }
+                    else if (isSmallProp && propFloor > 0.0f)
+                    {
                         limit = std::max(limit, propFloor);
+                    }
                     if (distance < limit)
                     {
-                        result = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(i)));
+                        uint32_t atomicPtr = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(i)));
+                        if (!atomicPtr)
+                            atomicPtr = static_cast<uint32_t>(rd32(atomics));
+                        result = atomicPtr;
                         break;
                     }
+                }
+                if (viewFactor > 1.0f && result != 0)
+                {
+                    // 1. Model info: Set alpha to 255 (fully visible, avoids 16-frame fade delay & return 2)
+                    wr8(mi + 0x39u, 0xFFu);
+
+                    // 2. Model info: Clear bit 6 (0x40 DRAW_LAST / alpha foliage), which forces SetupEntityVisibility
+                    // to return 2 and route to the 30m PS2 discard trap
+                    if (flags & 0x40u)
+                    {
+                        flags &= ~0x40u;
+                        wr16(mi + 0x3Au, flags);
+                    }
+
+                    // 3. Entity: If called from SetupEntityVisibility (0x0035F64C), clear bit 36 (bDistanceFade),
+                    // which causes SetupEntityVisibility to return 2 and route to the 30m PS2 discard trap.
+                    const uint32_t ra = GPR_U32(ctx, 31);
+                    if (ra == kSetupEntityVisibilityAtomicReturn)
+                    {
+                        const uint32_t ent = GPR_U32(ctx, 16);
+                        if (ent >= 0x00010000u && ent < 0x02000000u)
+                        {
+                            const uint32_t hiFlags = static_cast<uint32_t>(rd32(ent + 0x4Cu));
+                            constexpr uint32_t kHiDistanceFade = 1u << 4; // bit 36 in 64-bit entity flags
+                            if (hiFlags & kHiDistanceFade)
+                            {
+                                wr32(ent + 0x4Cu, static_cast<int32_t>(hiFlags & ~kHiDistanceFade));
+                            }
+                        }
+                    }
+                    g_statPropsBoosted.fetch_add(1, std::memory_order_relaxed);
                 }
             }
             SET_GPR_U32(ctx, 2, result);
@@ -516,8 +995,6 @@ namespace vcs::distance
         PS2_GUEST_CC void func3A53E0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const float view = percent(g_view);
-            if (view <= 1.0f)
-                return g_func3A53E0(rdram, ctx, runtime);
             g_rdram = rdram;
             const uint32_t mi = GPR_U32(ctx, 4);
             const float distance = ctx->f[12];
@@ -533,11 +1010,44 @@ namespace vcs::distance
                     int idx = count - 1;
                     if (!(flags & 8u) && (flags & 3u))
                         idx = static_cast<int>(flags & 3u) - 1;
+                    idx = std::clamp(idx, 0, count - 1);
                     const float mult = rdf(kLodMultiplier);
-                    const float propFloor = std::clamp(300.0f * view, 500.0f, 900.0f);
+                    const float viewFactor = view;
+                    const float baseLod = rdf(mi + 0x2Cu);
+                    const bool isSmallProp = (baseLod <= 80.0f) || ((flags & 0x6040u) != 0);
+                    const float propFloor = (viewFactor > 1.0f && isSmallProp) ? std::clamp(180.0f * viewFactor, 180.0f, 400.0f) : 0.0f;
                     const float limit = std::max(rdf(mi + 0x2Cu + 4u * static_cast<uint32_t>(idx)) * mult, propFloor);
                     if (distance < limit)
-                        result = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(idx)));
+                    {
+                        uint32_t atomicPtr = static_cast<uint32_t>(rd32(atomics + 4u * static_cast<uint32_t>(idx)));
+                        if (!atomicPtr)
+                            atomicPtr = static_cast<uint32_t>(rd32(atomics));
+                        result = atomicPtr;
+                    }
+                    if (viewFactor > 1.0f && result != 0)
+                    {
+                        wr8(mi + 0x39u, 0xFFu);
+                        if (flags & 0x40u)
+                        {
+                            flags &= ~0x40u;
+                            wr16(mi + 0x3Au, flags);
+                        }
+                        const uint32_t ra = GPR_U32(ctx, 31);
+                        if (ra == kSetupEntityVisibilityFlagsReturn)
+                        {
+                            const uint32_t ent = GPR_U32(ctx, 16);
+                            if (ent >= 0x00010000u && ent < 0x02000000u)
+                            {
+                                const uint32_t hiFlags = static_cast<uint32_t>(rd32(ent + 0x4Cu));
+                                constexpr uint32_t kHiDistanceFade = 1u << 4;
+                                if (hiFlags & kHiDistanceFade)
+                                {
+                                    wr32(ent + 0x4Cu, static_cast<int32_t>(hiFlags & ~kHiDistanceFade));
+                                }
+                            }
+                        }
+                        g_statPropsBoosted.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             }
             SET_GPR_U32(ctx, 2, result);
@@ -555,8 +1065,8 @@ namespace vcs::distance
         // to decide whether to stream in models. At high speed (144 km/h = 40 m/s), a static 50m margin only gives 1.2s
         // of advance warning, causing billboards, streetlamps, and trees to pop in late. For streaming call sites,
         // we add a velocity-aware prefetch bonus so models stream well ahead of high-speed travel.
-        // Small attached props have tiny IDE distances (25m-40m); enforcing a 420m floor ensures CStreaming
-        // queues them well before the camera reaches propFloor (260m-360m).
+        // Small attached props have tiny IDE distances (25m-40m); enforcing a 400m floor ensures CStreaming
+        // queues them well before the camera reaches propFloor (350m-950m).
         PS2_GUEST_CC void largestLodDistance(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t ra = GPR_U32(ctx, 31);
@@ -564,13 +1074,13 @@ namespace vcs::distance
 
             g_largestLodDistance(rdram, ctx, runtime);
 
+            if (viewFactor <= 1.0f)
+                return;
+
             if (ra == kSetupEntityVisibility330ClampReturn)
             {
-                if (viewFactor > 1.0f)
-                {
-                    ctx->f[0] = 0.0f;
-                    g_statClamp330Bypasses.fetch_add(1, std::memory_order_relaxed);
-                }
+                ctx->f[0] = 0.0f;
+                g_statClamp330Bypasses.fetch_add(1, std::memory_order_relaxed);
             }
             else if (ra == kSetupEntityVisibilityPrefetchNoFadeReturn ||
                      ra == kSetupEntityVisibilityPrefetchWithFadeReturn ||
@@ -578,133 +1088,110 @@ namespace vcs::distance
                      ra == kSetupBigBuildingPrefetchWithFadeReturn)
             {
                 const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
-                const float scale = std::max(1.0f, viewFactor);
-                // Expand prefetch lookahead significantly during high-speed driving or on foot:
-                // Base 350m ensures roadside signs, poles, and shopfronts (like near Pay 'n' Spray)
-                // are queued and alpha-faded well before arriving, eliminating late popping.
-                const float prefetchBonus = std::max(350.0f, 200.0f + speed * 8.0f) * scale;
-                const float streamFloor = (viewFactor > 1.0f) ? std::clamp(350.0f * viewFactor, 550.0f, 950.0f) : 0.0f;
-                ctx->f[0] = std::max(ctx->f[0] + prefetchBonus, streamFloor);
+                // Advance streaming prefetch proportional to vehicle speed and view distance
+                const float prefetchBonus = std::max(60.0f, speed * 3.5f) * (viewFactor - 1.0f);
+                ctx->f[0] += prefetchBonus;
                 g_statPrefetchLookahead.fetch_add(1, std::memory_order_relaxed);
             }
         }
 
-        // CRenderer frustum ray-plane intersection (FUN_0035E590):
-        // FUN_0035e620 (standard entities) and FUN_003606c8 (fading entities / big buildings) project the 4 corners of
-        // the view frustum onto a hardcoded ground plane $f12 = -100.0f at return addresses 0x35EC90..0x35EDF8 and
-        // 0x360B24..0x360C8C. This restricted the 50x50 world sector scanning bounding box to merely 1-2 sectors ahead
-        // (~100m-160m), starving CStreaming of advance notice for props, roadside signage, street poles, antennas, and
-        // parked vehicles when driving at high speed or turning corners.
-        // We expand lookahead plane distance to 600m-1000m based on viewFactor and camera speed, clamp rays forward, and on
-        // the 4th ray inject an omnidirectional 350m corner-turning radius plus lookahead cone into the caller's stack bounding box.
-        PS2_GUEST_CC void func35E590(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        bool isVehicle(uint32_t entity)
         {
-            const uint32_t ra = GPR_U32(ctx, 31);
-            const bool isStandard = (ra == kFrustumRayReturn1_Standard || ra == kFrustumRayReturn2_Standard ||
-                                     ra == kFrustumRayReturn3_Standard || ra == kFrustumRayReturn4_Standard);
-            const bool isFading = (ra == kFrustumRayReturn1_Fading || ra == kFrustumRayReturn2_Fading ||
-                                   ra == kFrustumRayReturn3_Fading || ra == kFrustumRayReturn4_Fading);
+            const uint32_t pool = static_cast<uint32_t>(rd32(kCarPool));
+            if (!pool)
+                return false;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool));
+            const uint32_t size = std::min<uint32_t>(static_cast<uint32_t>(rd32(pool + 8u)), 1024u);
+            constexpr uint32_t kCarSize = 0x8C0u;
+            return entity >= entries && entity < entries + size * kCarSize && ((entity - entries) % kCarSize == 0u);
+        }
 
-            if (!isStandard && !isFading)
-                return g_func35E590(rdram, ctx, runtime);
-
-            g_rdram = rdram;
+        // SetupEntityVisibility (0x0035EFD8):
+        // Rockstar's PS2 GS fillrate clamp subject entities returning 2 (foliage with bit 0x40, distance-fading entities
+        // with bit 36, storefront signs, fences, street poles, and trees) to an aggressive 30m box clamp in ScanSectorList
+        // and ScanBigBuildingList (abs(dx) < 30.0f && abs(dy) < 30.0f). Any entity >= 30.0f away is immediately discarded.
+        // When viewFactor > 1.0f, overriding return value 2 -> 1 routes them directly to the primary 2000-capacity render
+        // lists (0x744AC0 opaque, 0x742B80 transparent), rendering them natively at their full extended LOD distance.
+        PS2_GUEST_CC void setupEntityVisibility(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ent = GPR_U32(ctx, 4);
+            g_setupEntityVisibility(rdram, ctx, runtime);
             const float viewFactor = percent(g_view);
-            const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
-            // 600m to 1000m lookahead based on viewFactor and camera speed (e.g. Banshee at 45 m/s):
-            const float lookahead = std::clamp(600.0f * std::max(1.0f, viewFactor) + speed * 8.0f, 600.0f, 1000.0f);
-
-            ctx->f[12] = -lookahead;
-
-            const uint32_t callerSp = GPR_U32(ctx, 29);
-            const uint32_t outAddr = GPR_U32(ctx, 4);
-
-            g_func35E590(rdram, ctx, runtime);
-
-            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
-            const float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u);
-
-            // Ensure projected ray intersection never points backwards if camera pitch tilts upward:
-            const float rx = rdf(outAddr), ry = rdf(outAddr + 4u);
-            const float dot = (rx - cx) * fx + (ry - cy) * fy;
-            if (dot < 0.0f)
+            if (viewFactor > 1.0f && GPR_U32(ctx, 2) == 2u)
             {
-                wrf(outAddr, cx + fx * lookahead);
-                wrf(outAddr + 4u, cy + fy * lookahead);
+                SET_GPR_U32(ctx, 2, 1u);
+                if (ent >= 0x00010000u && ent < 0x02000000u)
+                {
+                    const uint32_t hi = static_cast<uint32_t>(rd32(ent + 0x4Cu));
+                    constexpr uint32_t kHiDistanceFade = 1u << 4; // bit 36 in 64-bit entity flags
+                    if (hi & kHiDistanceFade)
+                        wr32(ent + 0x4Cu, static_cast<int32_t>(hi & ~kHiDistanceFade));
+                }
+                g_statPropsBoosted.fetch_add(1, std::memory_order_relaxed);
             }
-
-            // On the 4th ray return, expand the caller's stack bounding box before the sector loop executes:
-            if (ra == kFrustumRayReturn4_Standard || ra == kFrustumRayReturn4_Fading)
+}
+ 
+// ScanSectorList_FrustumTriangle (FUN_0035DEA8) - extends on-foot frustum from 300m to view distance
+        // Rockstar's on-foot sector rasterization uses a hardcoded 300m frustum ray depth (0x43960000).
+        // This hook scales the ray endpoints to match the view distance setting.
+        PS2_GUEST_CC void scanFrustumTriangleHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const float view = percent(g_view);
+            if (view > 1.0f)
             {
-                const uint32_t minX_addr = callerSp + (isStandard ? 0xB0u : 0x90u);
-                const uint32_t minY_addr = callerSp + (isStandard ? 0xB4u : 0x94u);
-                const uint32_t maxX_addr = callerSp + (isStandard ? 0xB8u : 0x98u);
-                const uint32_t maxY_addr = callerSp + (isStandard ? 0xBCu : 0x9Cu);
-
-                float minX = rdf(minX_addr);
-                float maxX = rdf(maxX_addr);
-                float minY = rdf(minY_addr);
-                float maxY = rdf(maxY_addr);
-
-                // 1. Omnidirectional corner-turning radius around camera (350m covers ~4.5 sectors in every direction):
-                constexpr float kCornerRadius = 350.0f;
-                minX = std::min(minX, cx - kCornerRadius);
-                maxX = std::max(maxX, cx + kCornerRadius);
-                minY = std::min(minY, cy - kCornerRadius);
-                maxY = std::max(maxY, cy + kCornerRadius);
-
-                // 2. Forward lookahead cone (600m - 1000m along camera view direction):
-                const float halfWidth = lookahead * 0.7f;
-                const float p1x = cx + fx * lookahead - fy * halfWidth;
-                const float p1y = cy + fy * lookahead + fx * halfWidth;
-                const float p2x = cx + fx * lookahead + fy * halfWidth;
-                const float p2y = cy + fy * lookahead - fx * halfWidth;
-                const float p3x = cx + fx * lookahead;
-                const float p3y = cy + fy * lookahead;
-
-                minX = std::min({minX, p1x, p2x, p3x});
-                maxX = std::max({maxX, p1x, p2x, p3x});
-                minY = std::min({minY, p1y, p2y, p3y});
-                maxY = std::max({maxY, p1y, p2y, p3y});
-
-                wrf(minX_addr, minX);
-                wrf(maxX_addr, maxX);
-                wrf(minY_addr, minY);
-                wrf(maxY_addr, maxY);
-
-                g_statSectorLookaheads.fetch_add(1, std::memory_order_relaxed);
+                // TODO: Implement frustum ray depth scaling.
+                // The function computes frustum triangle vertices with 300m ray depth.
+                // The VU1 microprogram reads the ray depth from VU1 data memory.
+                // Need to patch the 300m value in VU1 data memory after the original writes it.
+                // For now, just call the original.
             }
+            g_origScanFrustumTriangle(rdram, ctx, runtime);
+        }
+ 
+        // CShadows::StoreCarLightShadow (0x002E1140):
+        // Prevents parked / stationary cars (m_pDriver == nullptr at vehicle +0x384) from storing headlight beam shadows.
+        PS2_GUEST_CC void storeCarLightShadow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t veh = GPR_U32(ctx, 4);
+            if (veh >= 0x00010000u && veh < 0x02000000u && !rd32(veh + 0x384u))
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
+            g_storeCarLightShadow(rdram, ctx, runtime);
         }
 
-        // CRenderer::ConstructRenderList (FUN_0035E620):
-        // Rockstar implemented a camera mode switch at 0x35EA38: on-foot modes branch to FUN_0035DEA8
-        // which rasterizes only a narrow 300m triangle frustum, starving CStreaming and skipping the
-        // extended sector bounding box. Vehicle modes (1 and 37) take label_35ec70 which calls func35E590
-        // to compute a full bounding box. By temporarily presenting vehicle mode (1) to this check,
-        // ALL camera modes (on foot, sprint, aim, vehicle, helicopter) get the complete 600m-1000m
-        // forward sector scan and 350m omnidirectional corner-turning radius.
-        PS2_GUEST_CC void func35E620(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        // CShadows::RenderHeadLightBeams (0x002E23A0):
+        // Deactivates any headlight beam slot belonging to a parked car before RegisterCorona is called.
+        PS2_GUEST_CC void renderHeadLightBeams(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            g_rdram = rdram;
-            const uint8_t activeCam = rd8(0x006F4520u);
-            const uint32_t modeAddr = 0x006F4540u + static_cast<uint32_t>(activeCam & 3u) * 0x270u + 0x70u;
-            const uint16_t origMode = rd16(modeAddr);
-            wr16(modeAddr, 1u);
-            g_func35E620(rdram, ctx, runtime);
-            wr16(modeAddr, origMode);
+            constexpr uint32_t kSlots = 0x0051E510u;
+            for (uint32_t i = 0; i < 32u; ++i)
+            {
+                const uint32_t slot = kSlots + i * 80u;
+                if (rd8(slot + 0x34u))
+                {
+                    const uint32_t veh = static_cast<uint32_t>(rd32(slot + 0x2Cu));
+                    if (veh >= 0x00010000u && veh < 0x02000000u && !rd32(veh + 0x384u))
+                    {
+                        wr8(slot + 0x34u, 0u);
+                    }
+                }
+            }
+            g_renderHeadLightBeams(rdram, ctx, runtime);
         }
 
-        // CRenderer::ConstructRenderList_FadingEntities (FUN_003606C8):
-        // Same camera mode switch at 0x360A5C for fading entities and large LOD buildings.
-        PS2_GUEST_CC void func3606C8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        // CEntity::Process2dEffects (0x003C35A8):
+        // Prevents parked cars (no driver) from processing 2DFX headlight / tail light coronas.
+        PS2_GUEST_CC void process2dEffects(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            g_rdram = rdram;
-            const uint8_t activeCam = rd8(0x006F4520u);
-            const uint32_t modeAddr = 0x006F4540u + static_cast<uint32_t>(activeCam & 3u) * 0x270u + 0x70u;
-            const uint16_t origMode = rd16(modeAddr);
-            wr16(modeAddr, 1u);
-            g_func3606C8(rdram, ctx, runtime);
-            wr16(modeAddr, origMode);
+            const uint32_t ent = GPR_U32(ctx, 4);
+            if (ent >= 0x00010000u && ent < 0x02000000u && isVehicle(ent) && !rd32(ent + 0x384u))
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
+            g_process2dEffects(rdram, ctx, runtime);
         }
 
         // The spot finder FUN_00267928(x, y, dirx, diry, distance, cos, nodes, ...) looks for a road node `distance` (110 x
@@ -732,25 +1219,133 @@ namespace vcs::distance
         }
         // FUN_00268048(CPathFind, pos, ..., nearestInView $f12, farthestInView $f13, nearestOut $f14, farthestOut $f15):
         // Stratifies the in-view real pedestrian spawn ring across close, medium, and far sub-bands within the currently
-        // cached pavement node window (35 m out to ~300 m) so raising Population distance populates the full visible range
-        // without leaving a hollow gap near the player.
+        // cached pavement node window so raising Population distance populates the visible range without leaving a hollow
+        // gap near the player. It begins at the caller's nearest (35 x the factor: 175 m at the most) - nearer, peds appear
+        // in plain sight; VCS_PED_INVIEW_K brings it in for a test (the spawn rings' note above).
+        // the peds in view (+-40 degrees round the camera's forward) beyond 90 m, counted once a game frame
+        int farInView()
+        {
+            static int32_t frame = -1;
+            static int count = 0;
+            const int32_t now = rd32(0x004CD124u); // the game's frame counter (kFrameCounter, below)
+            if (now == frame)
+                return count;
+            frame = now;
+            count = 0;
+            const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
+            if (!pool)
+                return 0;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
+            const uint32_t size = static_cast<uint32_t>(rd32(pool + 8u));
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u);
+            const float fl = std::hypot(fx, fy);
+            fx /= fl > 0.0f ? fl : 1.0f;
+            fy /= fl > 0.0f ? fl : 1.0f;
+            for (uint32_t i = 0; i < size && i < 512u; ++i)
+            {
+                if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
+                    continue;
+                const uint32_t e = entries + i * 0xD20u;
+                if (rd32(e + 0x8F4u) != 1) // the population's own (not the player, cops, a mission's)
+                    continue;
+                const float dx = rdf(e + 0x30u) - cx, dy = rdf(e + 0x34u) - cy, d = std::hypot(dx, dy);
+                count += d > 90.0f && dx * fx + dy * fy >= 0.766f * d;
+            }
+            return count;
+        }
+
+        // The crowd bands' rings (g_bands), as AddToPopulation's four floats ($f12..$f15): a ring only where a band is short
+        // - the near band first, in view and out of view (in view from 10 m for the camera-cut fill: the picture is new); a closed ring
+        // (nearest = farthest) finds no spot. Set at AddToPopulation's entry and again at its spot finder's call (0x2B1E34): on one
+        // path it makes its in-view ring again from its own 35 / 60 m (0x2B1A00, with the cars below their cap), and on
+        // retries it adds 30-60 m to that ring - closed it stays closed.
+        constexpr uint32_t kAddToPopulationFinds = 0x002B1E3Cu; // the return address of its call to FUN_00268048
+        bool g_bandFill = false;
+        void bandRings(R5900Context *ctx)
+        {
+            const Bands bands = bandCounts();
+            // the total too: peds made in view near walk out into the middle band, where a ped in view never fades - at a
+            // standing camera the middle band grew to 70+ of 25 (2026-11-13)
+            const bool room = bands.nearCount + bands.midCount < bandNear() + bandMid();
+            const bool nearShort = room && bands.nearCount < bandNear(), midShort = room && bands.midCount < bandMid();
+            // Both rings span their band (2026-11-13: out of view 10-60 m alone, the in-view ring closed, put the whole
+            // crowd in a knot around the player and none down the street). In view no nearer than before the bands (a ped
+            // made there is seen standing up; farther the faster the camera); the middle band to 155 m, the node list's
+            // reach (160 m).
+            const float inMin = g_bandFill ? 10.0f : std::max(55.0f, 40.0f + 1.5f * g_cameraSpeed.load(std::memory_order_relaxed));
+            auto ring = [&](int lo, int hi, float nearLo) {
+                const float a = nearShort ? nearLo : midShort ? std::max(nearLo, kBandNear) : 0.0f;
+                const float b = nearShort ? kBandNear : midShort ? kBandMidSpawn : 0.0f;
+                ctx->f[lo] = a < b ? a : 0.0f;
+                ctx->f[hi] = a < b ? b : 0.0f;
+            };
+            ring(14, 15, 25.0f);
+            ring(12, 13, inMin);
+            // the farthest in view is also the radius the finder takes links within, out of view too (FUN_00267E98):
+            // a closed in-view ring is empty (nearest = farthest) at the out-of-view ring's reach, never 0
+            if (ctx->f[13] <= ctx->f[12])
+                ctx->f[12] = ctx->f[13] = ctx->f[15];
+        }
+
+        // The crowd bands' handover in (CROWD_BANDS_PLAN.md step 4): a walker come in past 200 m in view becomes a real ped
+        // in its place through AddToPopulation's own making of one - its spot finder answered with the walker's place
+        // and link (here), AddPed given its model, type and place (addPed), the new ped turned its way and set walking
+        // that way (setWanderPath: +0x8E0 / +0x8E4 the rotation now / wanted, forward (-sin, cos); +0x78A the wander
+        // direction, 0 north .. 7 north-west clockwise - game-internals.md "The ped spot finder"). One per AddToPopulation
+        // call, while the middle band has room and a ped of its model lives (its model is loaded).
+        constexpr uint32_t kAddPed = 0x002B2908u, kAddPedReturn = 0x002B2568u;
+        constexpr uint32_t kSetWanderPath = 0x00206568u, kSetWanderReturn = 0x002B2764u;
+        struct HandIn
+        {
+            bool active = false, made = false;
+            vcs::distant::Handover h{};
+        };
+        HandIn g_handIn;
+
         PS2_GUEST_CC void pedSpotFinder(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
+            g_rdram = rdram; // (farInView reads through it)
+            if (ctx->pc == kPedSpotFinder && g_handIn.active && GPR_U32(ctx, 31) == kAddToPopulationFinds)
+            {
+                // the walker's spot: position (a3), its link's nodes (t0, t1) and place along it (t2); found
+                const vcs::distant::Handover &h = g_handIn.h;
+                const uint32_t pos = GPR_U32(ctx, 7);
+                wrf(pos, h.x);
+                wrf(pos + 4u, h.y);
+                wrf(pos + 8u, h.z);
+                wr32(GPR_U32(ctx, 8), h.from);
+                wr32(GPR_U32(ctx, 9), h.to);
+                wrf(GPR_U32(ctx, 10), h.t);
+                SET_GPR_U32(ctx, 2, 1);
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
+            if (ctx->pc == kPedSpotFinder && bandsOn() && GPR_U32(ctx, 31) == kAddToPopulationFinds)
+                bandRings(ctx);
             if (ctx->pc == kPedSpotFinder)
             {
                 const float k = pedDistance();
-                if (k > 1.0f)
+                if (k > 1.0f && !bandsOn()) // (the crowd bands set the rings in addToPopulation)
                 {
                     const float base = g_genBase > 0.0f ? g_genBase : 1.0f;
                     const float speed = g_cameraSpeed.load(std::memory_order_relaxed);
                     // Safe forward distance so pedestrians never pop in immediately in front of the vehicle/player bumper:
                     // stationary: 55m; at 30 m/s (108 km/h): 85m; at 50 m/s (180 km/h): 115m.
-                    const float safeInViewMin = std::max(55.0f, 40.0f + speed * 1.5f);
-                    const float minLo = std::max(safeInViewMin, ctx->f[12]);
+                    const float safeInViewMin = std::max(g_pedInMin, 40.0f + speed * 1.5f);
+                    const float kIn = g_pedInMaxK > 0.0f ? std::min(k, g_pedInMaxK) : k; // the spawn rings: genReader's note
+                    const float minLo = std::max(safeInViewMin, std::min(ctx->f[12], 35.0f * base * kIn));
                     const float cacheReach = 155.0f + g_pedNodeShift;
-                    const float maxHi = std::max(minLo + 45.0f, std::min(70.0f * base * k, cacheReach));
+                    const float maxHi = std::max(minLo + 45.0f, std::min(70.0f * base * kIn, cacheReach));
                     const uint32_t pass = g_pedSpotPass++ & 3u;
-                    if (maxHi > minLo + 40.0f)
+                    if (g_pedInViewCap > 0 && farInView() >= g_pedInViewCap)
+                    {
+                        // enough far down the street already: no ring in view this time (out of view only). Empty at
+                        // the out-of-view reach, not (1e6, 0): the farthest in view is the radius the finder takes
+                        // links within (FUN_00267E98), so 0 closed both rings - why this cap starved the city
+                        ctx->f[12] = ctx->f[13] = std::max(ctx->f[13], ctx->f[15]);
+                    }
+                    else if (maxHi > minLo + 40.0f)
                     {
                         const float span = maxHi - minLo;
                         const float band = std::max(55.0f, span * 0.42f);
@@ -771,7 +1366,7 @@ namespace vcs::distance
         {
             if (ctx->pc == kNodeList)
             {
-                const float k = carDistance(), kp = pedDistance();
+                const float k = g_carRings > 1 ? g_carSpawnK : carDistance(), kp = pedDistance();
                 const uint32_t ra = GPR_U32(ctx, 31);
                 if (k > 1.0f && ra >= kSpotFinder && ra < kSpotFinderEnd)
                 {
@@ -783,7 +1378,7 @@ namespace vcs::distance
                 }
                 else if (ra == kPedNodeListReturn)
                 {
-                    if (kp > 1.0f)
+                    if (kp > 1.0f && !bandsOn()) // (the crowd bands' rings lie round the player: the game's window)
                     {
                         g_rdram = rdram;
                         g_pedFarWindow = !g_pedFarWindow;
@@ -818,6 +1413,46 @@ namespace vcs::distance
             if (GPR_U32(ctx, 31) == kClearGetAtReturn && GPR_U32(ctx, 5) >= 128u)
                 SET_GPR_U32(ctx, 5, 0xFFFFFFFFu);
             g_pedGetAt(rdram, ctx, runtime);
+        }
+
+        // CPed::IsPedPointerValid_NotInWorld (FUN_0020C3C8) and CPed::IsPedPointerValid (FUN_0020C400) take GetHandle's
+        // slot (FUN_004701B8: (ped - entries) / 0xD20 by its multiply, -1 outside the pool) and compare it with the PS2's
+        // pool size compiled in (sltiu 0x47 / 0x46): every ped in a slot from 70 up was "not valid". IsPedPointerValid is
+        // what CPed::ScanForEntities' every-frame pass (FUN_001EEEB8) drops near peds by, and CWeapon::FireMelee
+        // (FUN_002C1D80) only tries the attacker's near peds (+0x6F8), so with the larger pool most of the street's peds
+        // could not be punched, clubbed or knifed - bullets and cars, which go through the world's collision, still hurt
+        // them (the player's report, 2026-11-15; game-internals.md 9h / 12h). Both done here against the pool's own size:
+        // GetHandle already gives -1 past it, so for the PS2's 70 slots the answers are the game's. VCS_PED_VALID=0: the
+        // original functions (A / B).
+        constexpr uint32_t kPedValidNotInWorld = 0x0020C3C8u, kPedValid = 0x0020C400u;
+        constexpr uint32_t kPlayers = 0x004E4910u, kPlayerInFocus = 0x004CD128u; // CWorld::Players (0x190 each), byte
+        std::atomic<uint64_t> g_pedValidCalls{0}, g_pedValidHigh{0}; // "pedvalid": calls, true answers for slots >= 70
+        bool pedSlotValid(uint32_t ped)
+        {
+            const uint32_t pool = static_cast<uint32_t>(rd32(kPedPool));
+            const uint32_t slot = (ped - static_cast<uint32_t>(rd32(pool))) * 0xD8FD8FD9u >> 5;
+            const bool valid = slot < static_cast<uint32_t>(rd32(pool + 8u));
+            g_pedValidCalls.fetch_add(1, std::memory_order_relaxed);
+            if (valid && slot >= 70u)
+                g_pedValidHigh.fetch_add(1, std::memory_order_relaxed);
+            return valid;
+        }
+        PS2_GUEST_CC void pedValidNotInWorld(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+        {
+            g_rdram = rdram;
+            const uint32_t ped = GPR_U32(ctx, 4);
+            SET_GPR_U32(ctx, 2, ped != 0u && pedSlotValid(ped) ? 1u : 0u);
+            ctx->pc = GPR_U32(ctx, 31);
+        }
+        PS2_GUEST_CC void pedValid(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+        {
+            g_rdram = rdram;
+            const uint32_t ped = GPR_U32(ctx, 4);
+            // in the world (an entry list at +0xE4), or the player in focus (FindPlayerPed, FUN_0024A430)
+            const bool valid = ped != 0u && pedSlotValid(ped) &&
+                               (rd32(ped + 0xE4u) != 0 || static_cast<int32_t>(ped) == rd32(kPlayers + rd8(kPlayerInFocus) * 0x190u));
+            SET_GPR_U32(ctx, 2, valid ? 1u : 0u);
+            ctx->pc = GPR_U32(ctx, 31);
         }
 
         // the pools' constructors, from CPools::Initialise only: larger pools when the main heap has the room.
@@ -872,6 +1507,24 @@ namespace vcs::distance
         std::atomic<uint32_t> g_statCarGenChecks{0};
         std::atomic<uint32_t> g_statCarGenActive{0};
 
+        // The parked cars at the population distance (2026-11-11, the player's report: parked cars and the hospital's
+        // ambulance appearing right in front of them with the detailed city drawn far). FUN_0040A9E0 spawns a generator's
+        // car when the player comes within 160 m (25600.0, squared) and handles a queued one within 170 m (28900.0) -
+        // immediates, patched in game/vcs/overrides.toml to read guest RAM kCarGenSlots / + 4, written here before every
+        // call: the game's values times the population distance squared (the game's own at 100 %). The removal
+        // (FUN_00433378) takes parked cars away out of view past 160 m x GenerationDistMultiplier, which the same setting
+        // scales: spawned within it, they stay.
+        constexpr uint32_t kCarGenSlots = 0x0007FF4Cu; // next to kOffscreenSlots
+        PS2_GUEST_CC void carGeneratorsHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_rdram = rdram;
+            const float k = carDistance();
+            wrf(kCarGenSlots, 25600.0f * k * k);
+            wrf(kCarGenSlots + 4u, 28900.0f * k * k);
+            g_carGeneratorsProcess(rdram, ctx, runtime);
+        }
+
+        // (unused: a previous agent's rewrite, which calls guest functions from host code - AGENTS.md rule 2)
         PS2_GUEST_CC void carGeneratorsProcess(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_rdram = rdram;
@@ -1044,6 +1697,17 @@ namespace vcs::distance
         constexpr uint32_t kAnimUpdate = 0x00154D10u; // RpAnimBlendClumpUpdateAnimations(dt $f12, clump $a0, all $a1)
         constexpr uint32_t kFrameCounter = 0x004CD124u;
         constexpr float kLodDistance = 70.0f, kLodFar = 110.0f; // every second frame past the first, every third past this
+        // (2026-11-12) every fourth past 150 m and every sixth past 220 m: the crowd there is drawn as proxies (vcs_distant)
+        // and is most of the population's simulation cost (CWorld::Process 2.1 -> 5.4 ms at sliders 50, PERFORMANCE.md 44).
+        // First past 110 / 180 m: a walker there moving 15 / 10 times a second read as fake (the player's report), so
+        // 110-150 m keep the third. VCS_CROWD_LOD_TIERS=a,b: the every-N past 150 / 220 m (3,3: as before)
+        const std::pair<int, int> kLodTiers = [] {
+            int far = 4, farther = 6;
+            if (const char *e = std::getenv("VCS_CROWD_LOD_TIERS"))
+                std::sscanf(e, "%d,%d", &far, &farther);
+            return std::make_pair(std::clamp(far, 1, 30), std::clamp(farther, 1, 30));
+        }();
+        constexpr float kLodTier = 150.0f, kLodFarther = 220.0f;
         PS2Runtime::RecompiledFunction g_updateAnim = nullptr, g_randomPedControl = nullptr, g_processCollision = nullptr,
                                        g_animUpdate = nullptr;
         struct LodState
@@ -1088,7 +1752,12 @@ namespace vcs::distance
                 const float dx = rdf(ent + 0x30u) - rdf(kCameraPos), dy = rdf(ent + 0x34u) - rdf(kCameraPos + 4u);
                 const float dz = rdf(ent + 0x38u) - rdf(kCameraPos + 8u);
                 const float d2 = dx * dx + dy * dy;
-                s.every = !random ? 1 : d2 > kLodFar * kLodFar ? 3 : d2 > kLodDistance * kLodDistance ? 2 : 1;
+                s.every = !random                         ? 1
+                          : d2 > kLodFarther * kLodFarther ? static_cast<uint8_t>(kLodTiers.second)
+                          : d2 > kLodTier * kLodTier       ? static_cast<uint8_t>(kLodTiers.first)
+                          : d2 > kLodFar * kLodFar         ? 3
+                          : d2 > kLodDistance * kLodDistance ? 2
+                                                             : 1;
                 s.skip = (static_cast<uint32_t>(frame) + slot) % s.every != 0;
                 // outside a cone of acos(0.2) = 78 degrees around the camera's direction (wider than any field of view)
                 const float along = dx * rdf(kCameraFront) + dy * rdf(kCameraFront + 4u) + dz * rdf(kCameraFront + 8u);
@@ -1233,7 +1902,9 @@ namespace vcs::distance
         // of view is the easiest to fill, so with the larger caps the crowd gathered around the player: 92 of 152 peds
         // within 30 m in Little Havana, the densest and slowest frames (game thread 15-27 ms). The ring out of view, and
         // the fill's both, are times the peds' population distance here - the area the caps were scaled for: 42 of 82
-        // within 30 m, 7 ms. The game's own at 0.
+        // within 30 m, 7 ms. The game's own at 0. Since 2026-11-12 the ring out of view is the game's (g_pedOutK = 1):
+        // with the in-view ring pushed far (since brought near) the crowd had gone from the player's street altogether,
+        // 1-2 peds in view within 50 m; the caps (104) keep the total down now.
         constexpr uint32_t kAddToPopulation = 0x002B17A8u, kFill = 0x002B0070u, kFillEnd = 0x002B0200u;
         PS2Runtime::RecompiledFunction g_addToPopulation = nullptr;
         PS2_GUEST_CC void addToPopulation(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1242,15 +1913,89 @@ namespace vcs::distance
             {
                 const uint32_t ra = GPR_U32(ctx, 31);
                 const float k = pedDistance(), kd = pedDensityDistance();
+                g_rdram = rdram;
+                g_handIn.active = g_handIn.made = false;
+                if (bandsOn())
+                {
+                    g_bandFill = ra >= kFill && ra < kFillEnd;
+                    bandRings(ctx);
+                    if (!g_bandFill && bandCounts().midCount < bandMid() &&
+                        bandCounts().nearCount + bandCounts().midCount < bandNear() + bandMid() && vcs::distant::pendingHandover(g_handIn.h) &&
+                        modelInfo(g_handIn.h.model) && pedsOfModel(g_handIn.h.model) > 0)
+                        g_handIn.active = true;
+                    return g_addToPopulation(rdram, ctx, runtime);
+                }
                 if (ra >= kFill && ra < kFillEnd)
                 {
                     ctx->f[12] *= kd; // nearest in view
-                    ctx->f[13] *= k;  // farthest in view
+                    ctx->f[13] *= std::min(k, kFillInViewK); // farthest in view: near, the picture has just been cut
                 }
-                ctx->f[14] *= kd; // nearest out of view
-                ctx->f[15] *= kd; // farthest out of view
+                const float ko = g_pedOutK > 0.0f ? g_pedOutK : kd;
+                ctx->f[14] *= ko; // nearest out of view
+                // farthest out of view: the side streets too - not for the camera-cut fill (already factor x 60 there)
+                ctx->f[15] *= ko * (k > 1.0f && !(ra >= kFill && ra < kFillEnd) ? g_pedOutFarK : 1.0f);
             }
             g_addToPopulation(rdram, ctx, runtime);
+        }
+
+        // the handover's AddPed (AddToPopulation's call): the walker's model, its ped type (model info +0x34, as
+        // AddToPopulation reads it) and its place (x, y: the game has spread the spot across the pavement since)
+        PS2Runtime::RecompiledFunction g_addPed = nullptr, g_setWanderPath = nullptr;
+        PS2_GUEST_CC void addPed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (ctx->pc == kAddPed && g_handIn.active && GPR_U32(ctx, 31) == kAddPedReturn)
+            {
+                g_rdram = rdram;
+                g_handIn.active = false; // (a group's next peds are the game's own)
+                const vcs::distant::Handover &h = g_handIn.h;
+                if (const uint32_t info = modelInfo(h.model))
+                {
+                    SET_GPR_U32(ctx, 4, static_cast<uint32_t>(rd32(info + 0x34u)));
+                    SET_GPR_U32(ctx, 5, h.model);
+                    const uint32_t pos = GPR_U32(ctx, 6);
+                    wrf(pos, h.x);
+                    wrf(pos + 4u, h.y);
+                    g_handIn.made = true;
+                    vcs::distant::handoverTaken(h.slot);
+                    g_handIns.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            g_addPed(rdram, ctx, runtime);
+        }
+        // the handover's new ped, set walking (AddToPopulation's call, right after AddPed): turned the walker's way, its
+        // wander direction the nearest of the eight
+        PS2_GUEST_CC void setWanderPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (ctx->pc == kSetWanderPath && g_handIn.made && GPR_U32(ctx, 31) == kSetWanderReturn)
+            {
+                g_rdram = rdram;
+                g_handIn.made = false;
+                const uint32_t ped = GPR_U32(ctx, 4);
+                if (ped < 0x00100000u) // (no ped)
+                    return g_setWanderPath(rdram, ctx, runtime);
+                const float h = g_handIn.h.heading, sn = std::sin(h), cs = std::cos(h);
+                wrf(ped + 0x8E0u, h);
+                wrf(ped + 0x8E4u, h);
+                wrf(ped, cs); // right
+                wrf(ped + 4u, sn);
+                wrf(ped + 8u, 0.0f);
+                wrf(ped + 0x10u, -sn); // forward
+                wrf(ped + 0x14u, cs);
+                wrf(ped + 0x18u, 0.0f);
+                const long dir = std::lround(-h / 0.78539816f);
+                SET_GPR_U32(ctx, 5, static_cast<uint32_t>(((dir % 8) + 8) % 8));
+                if (g_bandsLog)
+                {
+                    g_handWatch[g_handWatchNext++ % 8] = {ped, rd32(0x004CD124u), h, g_handIn.h.z};
+                }
+                if (g_bandsLog)
+                    std::fprintf(stderr, "[bands] in: walker %.1f %.1f %.1f model %u -> ped %.1f %.1f %.1f model %d (%.2f m off), %.0f m\n",
+                                 g_handIn.h.x, g_handIn.h.y, g_handIn.h.z, g_handIn.h.model, rdf(ped + 0x30u), rdf(ped + 0x34u),
+                                 rdf(ped + 0x38u), rd16(ped + 0x56u),
+                                 std::hypot(rdf(ped + 0x30u) - g_handIn.h.x, rdf(ped + 0x34u) - g_handIn.h.y),
+                                 std::hypot(g_handIn.h.x - rdf(kCameraPos), g_handIn.h.y - rdf(kCameraPos + 4u)));
+            }
+            g_setWanderPath(rdram, ctx, runtime);
         }
 
         // a slider 0..100 (0 the game's own) to a percent of the game's, up to `most`
@@ -1406,6 +2151,22 @@ namespace vcs::distance
                   "How many people walk around: 0 is the original (the PS2 keeps it low), 100 four times as many. "
                   "Missions still empty the streets when they want. More than the PS2 needs Streaming memory above PS2.",
                   "VCS_PEDESTRIAN_DENSITY", 400, g_pedestrians);
+        {
+            settings::Spec s;
+            s.key = "world.crowd_bands";
+            s.page = "Graphics";
+            s.section = "Distance and population (experimental)";
+            s.label = "Crowd bands";
+            s.help = "With the population distance raised: about 25 real people within 100 m and 25 more out to 200 m (at "
+                     "Pedestrian density 50; 10 at 0, 40 at 100), "
+                     "and past that the distant crowd (Distant crowds) - a person walking in from it becomes a real one in "
+                     "its place, and back. Fewer real people to simulate for the same busy streets.";
+            s.type = settings::Type::Toggle;
+            s.defaultValue = 0;
+            s.env = "VCS_CROWD_BANDS";
+            s.onChange = [](int v) { g_bands.store(v != 0, std::memory_order_relaxed); };
+            settings::add(s);
+        }
     }
 
     float realCarOuterRadius()
@@ -1416,8 +2177,21 @@ namespace vcs::distance
 
     float realPedOuterRadius()
     {
+        if (bandsOn()) // the walkers take over at the bands' edge (CROWD_BANDS_PLAN.md)
+            return kBandEdge;
         const float base = g_genBase > 0.0f ? g_genBase : 1.0f;
         return 65.0f * base * pedDistance();
+    }
+
+    bool crowdBands()
+    {
+        return bandsOn();
+    }
+
+    bool populationRaised()
+    {
+        return g_population.load(std::memory_order_relaxed) > 100 || g_traffic.load(std::memory_order_relaxed) > 100 ||
+               g_pedestrians.load(std::memory_order_relaxed) > 100;
     }
 
     void install(PS2Runtime &runtime)
@@ -1436,18 +2210,35 @@ namespace vcs::distance
             runtime.replaceFunction(kFunc3A53E0, &func3A53E0);
         if ((g_largestLodDistance = runtime.lookupFunction(kLargestLodDistance)))
             runtime.replaceFunction(kLargestLodDistance, &largestLodDistance);
-        if ((g_func35E590 = runtime.lookupFunction(kFunc35E590)))
-            runtime.replaceFunction(kFunc35E590, &func35E590);
-        if ((g_func35E620 = runtime.lookupFunction(kFunc35E620)))
-            runtime.replaceFunction(kFunc35E620, &func35E620);
-        if ((g_func3606C8 = runtime.lookupFunction(kFunc3606C8)))
-            runtime.replaceFunction(kFunc3606C8, &func3606C8);
+        if ((g_setupEntityVisibility = runtime.lookupFunction(kSetupEntityVisibility)))
+            runtime.replaceFunction(kSetupEntityVisibility, &setupEntityVisibility);
+        if ((g_origScanFrustumTriangle = runtime.lookupFunction(kScanFrustumTriangle)))
+            runtime.replaceFunction(kScanFrustumTriangle, &scanFrustumTriangleHook);
+        if ((g_storeCarLightShadow = runtime.lookupFunction(kStoreCarLightShadow)))
+            runtime.replaceFunction(kStoreCarLightShadow, &storeCarLightShadow);
+        if ((g_renderHeadLightBeams = runtime.lookupFunction(kRenderHeadLightBeams)))
+            runtime.replaceFunction(kRenderHeadLightBeams, &renderHeadLightBeams);
+        if ((g_process2dEffects = runtime.lookupFunction(kProcess2dEffects)))
+            runtime.replaceFunction(kProcess2dEffects, &process2dEffects);
         if ((g_pedPoolCtor = runtime.lookupFunction(kPedPoolCtor)))
             runtime.replaceFunction(kPedPoolCtor, &pedPoolCtor);
         if ((g_carPoolCtor = runtime.lookupFunction(kCarPoolCtor)))
             runtime.replaceFunction(kCarPoolCtor, &carPoolCtor);
         if ((g_pedGetAt = runtime.lookupFunction(kPedGetAt)))
             runtime.replaceFunction(kPedGetAt, &pedGetAt);
+        if (!(std::getenv("VCS_PED_VALID") && std::getenv("VCS_PED_VALID")[0] == '0'))
+        {
+            runtime.replaceFunction(kPedValidNotInWorld, &pedValidNotInWorld);
+            runtime.replaceFunction(kPedValid, &pedValid);
+        }
+        // pedvalid -> ok calls=N high=N: the ped pointer checks so far and their true answers for slots from 70 up
+        ps2control::addCommand("pedvalid", [](const std::string &, ps2control::Reply reply) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "ok calls=%llu high=%llu",
+                          static_cast<unsigned long long>(g_pedValidCalls.load(std::memory_order_relaxed)),
+                          static_cast<unsigned long long>(g_pedValidHigh.load(std::memory_order_relaxed)));
+            reply(text);
+        });
         if ((g_spotFinder = runtime.lookupFunction(kSpotFinder)))
             runtime.replaceFunction(kSpotFinder, &spotFinder);
         if ((g_pedSpotFinder = runtime.lookupFunction(kPedSpotFinder)))
@@ -1456,6 +2247,11 @@ namespace vcs::distance
             runtime.replaceFunction(kNodeList, &nodeList);
         if ((g_addToPopulation = runtime.lookupFunction(kAddToPopulation)))
             runtime.replaceFunction(kAddToPopulation, &addToPopulation);
+        // the crowd bands' handover (CROWD_BANDS_PLAN.md step 4; they pass the call on unless one is under way)
+        if ((g_addPed = runtime.lookupFunction(kAddPed)))
+            runtime.replaceFunction(kAddPed, &addPed);
+        if ((g_setWanderPath = runtime.lookupFunction(kSetWanderPath)))
+            runtime.replaceFunction(kSetWanderPath, &setWanderPath);
         if ((g_nodeNew = runtime.lookupFunction(kNodeNew)))
             runtime.replaceFunction(kNodeNew, &nodeNew);
         if ((g_nodeDelete = runtime.lookupFunction(kNodeDelete)))
@@ -1468,15 +2264,19 @@ namespace vcs::distance
             runtime.replaceFunction(kRandomPedControl, &randomPedControl);
         if ((g_processCollision = runtime.lookupFunction(kProcessCollision)))
             runtime.replaceFunction(kProcessCollision, &processCollision);
-        if ((g_carGeneratorsProcess = runtime.lookupFunction(kCarGeneratorsProcess)) &&
-            (g_findPlayerCoors = runtime.lookupFunction(kFindPlayerCoors)) &&
-            (g_findPlayerPed = runtime.lookupFunction(kFindPlayerPed)) &&
-            (g_func408058 = runtime.lookupFunction(kFunc408058)) &&
-            (g_checkForSpawning = runtime.lookupFunction(kCheckForSpawning)) &&
-            (g_carGenProcess = runtime.lookupFunction(kCarGeneratorProcess)))
-        {
-            runtime.replaceFunction(kCarGeneratorsProcess, &carGeneratorsProcess);
-        }
+        if ((g_carGeneratorsProcess = runtime.lookupFunction(kCarGeneratorsProcess)))
+            runtime.replaceFunction(kCarGeneratorsProcess, &carGeneratorsHook);
+        if ((g_csClear = runtime.lookupFunction(kClearRange)))
+            runtime.replaceFunction(kClearRange, &csClear);
+        // if ((g_carGeneratorsProcess = runtime.lookupFunction(kCarGeneratorsProcess)) &&
+        //     (g_findPlayerCoors = runtime.lookupFunction(kFindPlayerCoors)) &&
+        //     (g_findPlayerPed = runtime.lookupFunction(kFindPlayerPed)) &&
+        //     (g_func408058 = runtime.lookupFunction(kFunc408058)) &&
+        //     (g_checkForSpawning = runtime.lookupFunction(kCheckForSpawning)) &&
+        //     (g_carGenProcess = runtime.lookupFunction(kCarGeneratorProcess)))
+        // {
+        //     runtime.replaceFunction(kCarGeneratorsProcess, &carGeneratorsProcess);
+        // }
         phases::install(runtime, std::make_index_sequence<phases::kMaxTargets>{});
         // crowdlod -> ok skipped=<ped updates skipped> processed=<LOD updates run> overflow=<sector entries in the
         //             overflow pool> peak=<most at once>
@@ -1485,14 +2285,15 @@ namespace vcs::distance
                   " cheap=" + std::to_string(g_lodCheap) +
                   " overflow=" + std::to_string(g_overflowUsed) + " peak=" + std::to_string(g_overflowPeak));
         });
-        // lodstats -> ok clamp330_skips=<skips> prefetch_expanded=<lookaheads> sectors_expanded=<lookaheads> cargen_checks=<checks> cargen_active=<active> camspeed=<speed m/s>
+        // lodstats -> ok clamp330_skips=<skips> prefetch_expanded=<lookaheads> sectors_expanded=<lookaheads> props_boosted=<props> cargen_checks=<checks> cargen_active=<active> camspeed=<speed m/s>
         ps2control::addCommand("lodstats", [](const std::string &, ps2control::Reply reply) {
             char text[256];
             std::snprintf(text, sizeof(text),
-                          "ok clamp330_skips=%u prefetch_expanded=%u sectors_expanded=%u cargen_checks=%u cargen_active=%u camspeed=%.1f",
+                          "ok clamp330_skips=%u prefetch_expanded=%u sectors_expanded=%u props_boosted=%u cargen_checks=%u cargen_active=%u camspeed=%.1f",
                           g_statClamp330Bypasses.load(std::memory_order_relaxed),
                           g_statPrefetchLookahead.load(std::memory_order_relaxed),
                           g_statSectorLookaheads.load(std::memory_order_relaxed),
+                          g_statPropsBoosted.load(std::memory_order_relaxed),
                           g_statCarGenChecks.load(std::memory_order_relaxed),
                           g_statCarGenActive.load(std::memory_order_relaxed),
                           g_cameraSpeed.load(std::memory_order_relaxed));
@@ -1501,6 +2302,50 @@ namespace vcs::distance
         // distancestate -> ok view=<%> detail=<%> scale=<ms_lodDistScale> lod=<LODDistMultiplier>
         //                  gen=<GenerationDistMultiplier> population=<%> traffic=<%> pedestrians=<%> cars=<random>/<cap>
         //                  peds=<peds>/<cap> pools=<peds>,<vehicles> numbers=<car>,<ped>
+        // popview -> ok peds=<total> <in view within 50 / 100 / 200 m> cars=<total> <in view within 50 / 100 / 200 m>: what the
+        // player sees of the population (a cone of +-40 degrees round the camera's forward), not the pools' totals;
+        // bands=<on> near=<n>/<number> mid=<n>/<number> out=<past 200 m> fading=<n>: the crowd bands' counts (all around);
+        // births=<the ped count's rises so far> handin=<walkers made real> handout=<real peds made walkers> (the handovers)
+        ps2control::addCommand("popview", [](const std::string &, ps2control::Reply reply) {
+            if (!g_rdram)
+                return reply("error the camera has not run yet");
+            const float cx = rdf(kCameraPos), cy = rdf(kCameraPos + 4u);
+            float fx = rdf(kCameraFront), fy = rdf(kCameraFront + 4u);
+            const float fl = std::hypot(fx, fy);
+            fx /= fl > 0.0f ? fl : 1.0f;
+            fy /= fl > 0.0f ? fl : 1.0f;
+            auto count = [&](uint32_t global, uint32_t stride, int out[4]) {
+                const uint32_t pool = static_cast<uint32_t>(rd32(global));
+                if (!pool)
+                    return;
+                const uint32_t entries = static_cast<uint32_t>(rd32(pool)), flags = static_cast<uint32_t>(rd32(pool + 4u));
+                const uint32_t size = static_cast<uint32_t>(rd32(pool + 8u));
+                for (uint32_t i = 0; i < size; ++i)
+                {
+                    if (g_rdram[(flags + i) & PS2_RAM_MASK] & 0x80u)
+                        continue;
+                    ++out[0];
+                    const uint32_t e = entries + i * stride;
+                    const float dx = rdf(e + 0x30u) - cx, dy = rdf(e + 0x34u) - cy, d = std::hypot(dx, dy);
+                    if (d < 1.0f || (dx * fx + dy * fy) < 0.766f * d)
+                        continue;
+                    out[1] += d < 50.0f;
+                    out[2] += d < 100.0f;
+                    out[3] += d < 200.0f;
+                }
+            };
+            int peds[4] = {0, 0, 0, 0}, cars[4] = {0, 0, 0, 0};
+            count(kPedPool, 0xD20u, peds);
+            count(kCarPool, 0x8C0u, cars);
+            const Bands bands = countBands();
+            char text[256];
+            std::snprintf(text, sizeof(text), "ok peds=%d %d %d %d cars=%d %d %d %d bands=%d near=%d/%d mid=%d/%d out=%d fading=%d births=%u handin=%u handout=%u",
+                          peds[0], peds[1], peds[2], peds[3], cars[0], cars[1], cars[2], cars[3], bandsOn() ? 1 : 0,
+                          bands.nearCount, bandNear(), bands.midCount, bandMid(), bands.outCount, bands.fading,
+                          g_births.load(std::memory_order_relaxed), g_handIns.load(std::memory_order_relaxed),
+                          g_handOuts.load(std::memory_order_relaxed));
+            reply(text);
+        });
         ps2control::addCommand("distancestate", [](const std::string &, ps2control::Reply reply) {
             if (!g_rdram)
                 return reply("error the camera has not run yet");

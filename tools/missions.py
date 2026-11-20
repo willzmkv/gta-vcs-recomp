@@ -53,7 +53,7 @@ def main():
     ap.add_argument("--from", dest="first", type=int, default=6)
     ap.add_argument("--seconds", type=float, default=45.0)
     ap.add_argument("--port", type=int, default=47620)
-    ap.add_argument("--save", default=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"))
+    ap.add_argument("--save", default=rig.default_save())
     args = ap.parse_args()
     out = os.path.abspath(args.out or os.path.join(ROOT, "build", "missions", time.strftime("%Y%m%d-%H%M%S")))
     os.makedirs(out, exist_ok=True)

@@ -21,7 +21,7 @@ Texture replacement is not one of these mods: it comes from upstream PR #8 (PCSX
 
 | Effect (mod) | In VCS Recomp | Status |
 |---|---|---|
-| Distance fog density / start (Proper Shaders' fog, foggy weathers) | The game's own GS fog: its range scaled at the setter (game-internals.md 6l, `src/game/vcs_fog.cpp`) | **Done** 2026-11-02 - Graphics > Fog; `tools/fog_check.py` |
+| Distance fog density / start (Proper Shaders' fog, foggy weathers) | The game's own GS fog: its range scaled at the setter (game-internals.md 6t, `src/game/vcs_fog.cpp`) | **Done** 2026-11-02 - Graphics > Fog; `tools/fog_check.py` |
 | Object / LOD draw distance (Project2DFX `DrawDistance`) | VC's own mechanism in VCS: the entities' LOD distances times the camera's LODDistMultiplier, scaled through CRenderer::ms_lodDistScale `0x4887F8` (game-internals.md 9h, `src/game/vcs_distance.cpp`) | **Done** 2026-11-03 - Graphics > Draw distance > Object distance 100-400 %; `tools/distance_check.py` |
 | View distance, detail distance (Project2DFX `ViewDistance` / `DetailDistance`) | The city is not entities: a low-detail image of the whole map (resident) and the detailed sectors of the cell around the camera, ~260 m (game-internals.md 9h); further detail needs more cells drawn (their pieces read and relocated, the lists merged) or the cell chosen ahead of the camera; the far plane is 2000 | T2 (HD further) |
 | Population and car spawn / removal distance (follows the draw distance) | GenerationDistMultiplier `0x6F4CA0`: cars made 100-160 x, removed past 160 x, peds 35-60 x (game-internals.md 9h); scaling it spreads the same numbers wider - the counts have to grow with it | T2 |
@@ -93,7 +93,13 @@ each entry its sectors, and its model infos keep each name's key, so a file name
 - **How**: the mod loader hands the list to the stream layer (`vcs::setStreamFiles`); at the next read the stream
   thread resolves each name against the game's tables (the disc's file table for GTA3PS2.IMG's LSN, the model infos'
   keys, the streaming info's offset / size) and lays the mod's bytes over every disc read that covers the entry. An
-  entry already in memory changes when the game streams it again. `VCS_MOD_FILES=0`: none.
+  entry already in memory changes when the game streams it again (cars, peds, weapons: when they come back into the
+  scene). **Vic's model** the game never drops (the player's report, 2026-11-13: a mod switched off stayed on, even
+  after loading the save): an entry whose served bytes changed is "dirty", and where the game dresses the player (an
+  outfit change, a save's load) the request first has the game remove the dirty model - its dictionary goes with it
+  when nothing else holds it - so both are read anew; a switch of a mod holding his model or dictionary dresses him
+  again at once in his outfit (UNDRESS_CHAR, on foot; in a vehicle at the next dressing). Checked with HD Hands
+  switched off / on / off in play: the hands follow each switch. `VCS_MOD_FILES=0`: none.
 - **`tools/img.py`**: `table` (the directory from a hidden run into `build/img/streaming.json`), `list`, `extract`
   (from the player's disc image into `build/img/GTA3PS2`, named `admiral.mdl` / `#1234.bin`): an extracted folder is a
   mod as it is. The entries are the game's data - never in git.
@@ -275,7 +281,7 @@ python tools/weaponmod_check.py              # modloader/HD Weapons in the game:
   Vic's hand where VCS holds its own (the chainsaw's handles in his hands, the pistol's grip in his palm), each
   covering VCS's model better than at VC's place (silhouette overlap, e.g. the pistol 0.50 -> 0.78, the molotov
   0.14 -> 0.65), with VCS's HUD icon, no crash (`build/weaponmod_check/placed`).
-- **Cost**: an HD weapon in view costs 1-2 ms a frame in this build (PERFORMANCE.md 31): faceted HD meshes make one
+- **Cost**: an HD weapon in view costs 1-2 ms a frame in this build (PERFORMANCE.md 40): faceted HD meshes make one
   draw per ~70 strip vertices. The conversion at boot runs on every core (194 files in 1.7 s).
 
 ## The pre-HUD pass (the infrastructure T4-T7 need)

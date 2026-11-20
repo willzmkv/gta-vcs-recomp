@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include "runtime/ps2_host_std.h"
 
 namespace ps2hle
 {
@@ -47,8 +48,8 @@ namespace ps2hle
         uint64_t g_layout = 0x51A7ull, g_layoutVectors = 0;
         std::string g_layoutText;
         uint64_t g_chains = 0, g_vertsOutside = 0;
-        auto g_since = std::chrono::steady_clock::now();
-        auto g_reportAt = std::chrono::steady_clock::now();
+        auto g_since = ps2x::hostNow();
+        auto g_reportAt = ps2x::hostNow();
 
         // the MSCAL in flight
         ProgramStats *g_current = nullptr;
@@ -76,7 +77,7 @@ namespace ps2hle
 
         void report()
         {
-            const double secs = std::max(1e-3, std::chrono::duration<double>(std::chrono::steady_clock::now() - g_since).count());
+            const double secs = std::max(1e-3, std::chrono::duration<double>(ps2x::hostNow() - g_since).count());
             std::vector<ProgramStats *> order;
             uint64_t allVerts = g_vertsOutside, allNs = 0;
             for (auto &[key, p] : g_programs)
@@ -197,14 +198,14 @@ namespace ps2hle
         g_layoutText.clear();
         g_vertsOutside += g_gsVerticesRecorded - g_verts0; // since the last program: DIRECT / PATH3 drawing
         g_verts0 = g_gsVerticesRecorded;
-        g_t0 = std::chrono::steady_clock::now();
+        g_t0 = ps2x::hostNow();
     }
 
     void afterMscal(const uint8_t *vuData)
     {
         if (!g_current)
             return;
-        const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_t0).count());
+        const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(ps2x::hostNow() - g_t0).count());
         const uint64_t verts = g_gsVerticesRecorded - g_verts0;
         g_current->ns += ns;
         g_current->verts += verts;
@@ -245,7 +246,7 @@ namespace ps2hle
     void onChainEnd()
     {
         ++g_chains;
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = ps2x::hostNow();
         if (now - g_reportAt >= std::chrono::seconds(10))
         {
             g_reportAt = now;

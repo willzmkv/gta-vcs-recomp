@@ -11,7 +11,9 @@
 // Two scripts start the game's free aim themselves (game-internals.md 12c): in a car a mission's drive-by mode
 // (SET_PLAYER_DRIVEBY_MODE: Jive Drive, Vic shooting from the passenger seat while Lance drives), on foot the forced
 // free aim (SET_PLAYER_FORCE_FREE_AIMING: Phil's shooting range). There, with free aim on for either device, the mouse
-// and the right stick turn its dummy in place of the left stick, with no button to hold.
+// and the right stick turn its dummy in place of the left stick, with no button to hold. The same for a gun on a vehicle
+// a script attaches Vic to (ATTACH_CHAR_TO_CAR: Farewell To Arms, the helicopter's door), whose first-person camera is
+// the aim: the mouse and the right stick turn it.
 #pragma once
 
 #include <cstdint>
@@ -22,6 +24,8 @@ namespace vcs::aim
 {
     // Before runtime.run(): the hooks (applyVcs).
     void install(PS2Runtime &runtime);
+    // Enhancements > Combat: the free-aim reticle, the game's circle or a dot (main.cpp, with the other settings).
+    void registerSettings();
 
     // What the pad read hands over, once per game frame (game thread).
     struct Input
@@ -30,6 +34,8 @@ namespace vcs::aim
         bool on = false;          // free aim is on for either device (the game's own free aim a script starts is taken over)
         float turn = 0, tilt = 0; // radians this frame: left +, up + (the mouse)
         float turnRate = 0, tiltRate = 0; // -1..1: left +, up + (the right stick)
+        bool assist = false;      // aim assist (the gamepad's, pad.aim_assist): lock on first, free aim once the right
+                                  // stick moves or no one is there to lock on to - GTA V's assisted aim
     };
     // What the pad report gets.
     struct Output
@@ -45,6 +51,8 @@ namespace vcs::aim
 
     // The player's current weapon is one free aim works with (the guns: not melee, thrown, scopes, the camera).
     bool gunInHand();
+    // ... or a scoped one: the sniper rifles and the rocket launcher too (the triggers' fire point, the DualSense's feel).
+    bool firearmInHand();
     // Free aim is on (the game's free-aim lock is held, or a script's free aim is ours), as of the last pad read.
     bool aiming();
 

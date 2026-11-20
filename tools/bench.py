@@ -55,7 +55,7 @@ def run(out, fps, name, extra_env, settle=6.0):
     env.update(extra_env)
     # the Fort Baxter card copy when there is one; a new game from an empty card otherwise (a machine without the rig's
     # saves: the first mission runs meanwhile, the spots and the drive are the same)
-    save = os.path.join(ROOT, "build", "rig", "saves", "fortbaxter")
+    save = rig.default_save()
     have_save = os.path.isdir(os.path.join(save, "mc0"))
     if not have_save:
         print("[bench] no %s: starting a new game instead" % os.path.relpath(save, ROOT))

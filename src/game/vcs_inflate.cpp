@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "runtime/ps2_host_std.h"
 
 namespace
 {
@@ -436,8 +437,8 @@ namespace
 
     void report()
     {
-        static auto at = std::chrono::steady_clock::now();
-        const auto now = std::chrono::steady_clock::now();
+        static auto at = ps2x::hostNow();
+        const auto now = ps2x::hostNow();
         if (!g_log || now - at < std::chrono::seconds(10))
             return;
         at = now;
@@ -519,7 +520,7 @@ namespace
                 std::fprintf(stderr, "[inflate] fast verify: %llu calls the same, %llu differ\n", (unsigned long long)same,
                              (unsigned long long)differ);
         }
-        const auto t0 = std::chrono::steady_clock::now();
+        const auto t0 = ps2x::hostNow();
         if (!decode(rdram, rdram, 0u, strm, start, r)) // bad data: zlib's error path is the original's (it redoes the call
         {                                              // from the same input - nothing of the state was written)
             ++g_fallbacks;
@@ -540,7 +541,7 @@ namespace
         g_bytes += r.out - (nextOut & 0x1FFFFFFFu);
         if (g_log)
         {
-            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            const double ms = std::chrono::duration<double, std::milli>(ps2x::hostNow() - t0).count();
             g_ms += ms;
             if (ms > g_maxMs)
             {

@@ -664,7 +664,8 @@ namespace ps2x::iop::detail
             Core &c = m_cores[ci];
             if (c.non != 0u)
                 stepNoise(c);
-            int32_t dryL = 0, dryR = 0, wetL = 0, wetR = 0;
+            int32_t dryL = 0, dryR = 0, wetL = 0, wetR = 0, auxL = 0, auxR = 0;
+            const uint32_t auxMask = m_auxSink ? m_auxMask[ci] : 0u;
             for (uint32_t vi = 0; vi < 24; ++vi)
             {
                 Voice &v = c.voices[vi];
@@ -682,6 +683,12 @@ namespace ps2x::iop::detail
                     v.dbgSamplePeak = std::max<int32_t>(v.dbgSamplePeak, std::abs(s));
                 }
                 const uint32_t bit = 1u << vi;
+                if (auxMask & bit) // [gta-recomp] an aux voice: the second output only
+                {
+                    auxL += l;
+                    auxR += r;
+                    continue;
+                }
                 if (c.vmixL & bit)
                     dryL += l;
                 if (c.vmixR & bit)
@@ -752,17 +759,22 @@ namespace ps2x::iop::detail
                 mixL += revL;
                 mixR += revR;
             }
-            const int32_t l = clamp16((mixL * fixedVolume(c.mvolL, c.curMvolL)) >> 15);
-            const int32_t r = clamp16((mixR * fixedVolume(c.mvolR, c.curMvolR)) >> 15);
+            const int32_t mvL = fixedVolume(c.mvolL, c.curMvolL), mvR = fixedVolume(c.mvolR, c.curMvolR);
+            const int32_t l = clamp16((mixL * mvL) >> 15);
+            const int32_t r = clamp16((mixR * mvR) >> 15);
             if (ci == 0u)
             {
                 core0L = l;
                 core0R = r;
+                m_auxL = (auxL * mvL) >> 15; // [gta-recomp] (core 1's main volume below, as core 0's mix gets it)
+                m_auxR = (auxR * mvR) >> 15;
             }
             else
             {
                 outL = static_cast<int16_t>(l);
                 outR = static_cast<int16_t>(r);
+                m_auxL = clamp16(((m_auxL * mvL) >> 15) + ((auxL * mvL) >> 15));
+                m_auxR = clamp16(((m_auxR * mvR) >> 15) + ((auxR * mvR) >> 15));
             }
         }
     }
@@ -811,6 +823,16 @@ namespace ps2x::iop::detail
                 reportVoices();
             m_outBuffer.push_back(l);
             m_outBuffer.push_back(r);
+            if (m_auxSink) // [gta-recomp] the second output, sample for sample with the first
+            {
+                m_auxBuffer.push_back(static_cast<int16_t>(m_auxL));
+                m_auxBuffer.push_back(static_cast<int16_t>(m_auxR));
+                if (m_auxBuffer.size() >= 512u)
+                {
+                    m_auxSink(m_auxBuffer.data(), static_cast<uint32_t>(m_auxBuffer.size() / 2u));
+                    m_auxBuffer.clear();
+                }
+            }
             m_nextSampleCycle += kCyclesPerSample;
             if (m_outBuffer.size() >= 512u)
             {

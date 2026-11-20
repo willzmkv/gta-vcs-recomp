@@ -38,7 +38,7 @@ def main():
     ap.add_argument("--hour", type=int, default=12)
     ap.add_argument("--auto", action="store_true", help="an AI driver drives, the player rides along (realistic)")
     ap.add_argument("--speed", type=float, default=30.0, help="cruise speed with --auto")
-    ap.add_argument("--save", default=os.path.join(ROOT, "build", "rig", "saves", "fortbaxter"))
+    ap.add_argument("--save", default=rig.default_save())
     args = ap.parse_args()
     out = os.path.abspath(args.out or os.path.join(ROOT, "build", "drive", time.strftime("%Y%m%d-%H%M%S")))
     os.makedirs(out, exist_ok=True)

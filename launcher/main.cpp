@@ -5,11 +5,12 @@
 //   VCSLauncher.exe --build [--iso X]   tools/build.py --recompile-if-needed, output in the terminal
 //   VCSLauncher.exe --play [--iso X]    start the game and wait for it; its exit code
 //   VCSLauncher.exe --self-test [--iso X]   the launcher's own checks (CI): repository, Python, doctor, disc check
+//   VCSLauncher.exe --hardware          what the PC has and the graphics preset a first install gets (hardware.h)
 //   ... --out FILE                      the output to a file instead (scripts, CI)
 //   VCSLauncher.exe --screenshot F.png  the window rendered offscreen and saved (tests, docs; never a window):
 //       [--screen S] [--demo D]         what is shown (screens/screens.h: setup:disc, home, task, sheet:saves,
 //                                       dialog:quit, gallery...; demo: running, count (1% every 0.8 s), link, firstlink, error, done,
-//                                       playing, update, stale (the build out of date))
+//                                       playing, update, updated (Restart after an update), stale (the build out of date))
 //       [--then S --at T]               switch to S after T seconds (transitions)
 //       [--frames N]                    N consecutive frames from the start (or from --then): F-000.png...
 //       [--size WxH] [--scale K]        logical size (1100x700) and pixels per unit (1)
@@ -18,6 +19,8 @@
 //       [--step N]                      the old page numbers: 0-3 the setup steps, 4 Saves, 5 Settings, 6 Help
 //       [--action build --every S] [--iso X] [--wait S] [--pick-build-dir PATH]
 //   VCSLauncher.exe --stats             the window with a frame-time overlay (also Ctrl+Shift+F11)
+//   VCSLauncher.exe --after-update PID  (the Restart button after an update) wait for the old launcher to end, then
+//                                       the window
 //   VCSLauncher.exe --hidden --quit-after S [--out F]   the real window and frame loop, never shown, for S seconds;
 //                                       then the frames drawn and the CPU time used (the idle cost; tests)
 //
@@ -29,6 +32,9 @@
 // uses no CPU or GPU.
 #include "core/png.h"
 #include "model/disc_check.h"
+#include "model/hardware.h"
+#include "model/scskiller.h"
+#include "model/sound.h"
 #include "model/system.h"
 #include "model/tasks.h"
 #include "platform/platform.h"
@@ -42,6 +48,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -123,6 +130,18 @@ namespace
         };
         if (hasArg(args, "--check"))
             return runInConsole(tool("doctor.py"), app.root);
+        if (hasArg(args, "--hardware"))
+        {
+            const HardwareInfo hw = probeHardware();
+            std::string why;
+            static const char *const kNames[] = {"Custom", "Original (PS2)", "Low", "Medium", "High", "Vice Ultra"};
+            const GraphicsPreset preset = recommendPreset(hw, why);
+            std::printf("gpu=%s vram_mb=%llu integrated=%d threads=%d avx2=%d ram_mb=%llu\npreset=%s (%s)\n",
+                        hw.gpuName.c_str(), static_cast<unsigned long long>(hw.vramMb), hw.integrated ? 1 : 0, hw.threads,
+                        hw.avx2 ? 1 : 0, static_cast<unsigned long long>(hw.ramMb), kNames[static_cast<int>(preset)],
+                        why.c_str());
+            return 0;
+        }
         if (hasArg(args, "--build"))
         {
             auto argv = tool("build.py");
@@ -153,6 +172,32 @@ namespace
                 std::printf("[%s] %s\n", ok ? "ok" : "FAIL", what.c_str());
                 failed += ok ? 0 : 1;
             };
+            // the first install's preset (hardware.h): the lowest part decides, never Vice Ultra
+            {
+                struct Case
+                {
+                    const char *what;
+                    HardwareInfo hw;
+                    GraphicsPreset want;
+                };
+                const Case cases[] = {
+                    {"12 GB card, 16 threads, 32 GB", {"card", 12288, false, 16, true, 32768}, GraphicsPreset::High},
+                    {"24 GB card, 32 threads, 64 GB", {"card", 24576, false, 32, true, 65536}, GraphicsPreset::High},
+                    {"8 GB card, 8 threads, 16 GB", {"card", 8192, false, 8, true, 16384}, GraphicsPreset::Medium},
+                    {"4 GB card, 12 threads, 16 GB", {"card", 4096, false, 12, true, 16384}, GraphicsPreset::Medium},
+                    {"8 GB card, 16 threads, 8 GB", {"card", 8192, false, 16, true, 8000}, GraphicsPreset::Medium},
+                    {"2 GB card, 8 threads, 16 GB", {"card", 2048, false, 8, true, 16384}, GraphicsPreset::Low},
+                    {"integrated, 8 threads, 16 GB", {"igpu", 128, true, 8, true, 16384}, GraphicsPreset::Low},
+                    {"8 GB card, 4 threads, 16 GB", {"card", 8192, false, 4, false, 16384}, GraphicsPreset::Low},
+                    {"integrated, 2 threads, 4 GB", {"igpu", 0, true, 2, false, 4096}, GraphicsPreset::OriginalPS2},
+                    {"no card read (Linux), 16 threads, 32 GB", {"", 0, false, 16, true, 32768}, GraphicsPreset::Medium},
+                };
+                for (const Case &c : cases)
+                {
+                    std::string why;
+                    check(recommendPreset(c.hw, why) == c.want, std::string("first-install preset: ") + c.what);
+                }
+            }
             check(fs::is_regular_file(app.root / "tools" / "build.py"), "repository: " + pathText(app.root));
             check(!app.python.empty(), "python: " + app.pythonText);
             check(app.toolsProblem.empty(), app.toolsProblem.empty() ? "scripts: all in tools" : app.toolsProblem);
@@ -175,6 +220,95 @@ namespace
             check(rendered, rendered ? "renderer: " + render::rendererStats.api + " (" + render::rendererStats.adapter +
                                            "), " + render::fontRasterizer()
                                      : "renderer: " + renderError);
+            const bool imgsLoaded = render::imagesInit(app.assetsFolder());
+            check(imgsLoaded && render::imageInfo(render::ImageId::Background).valid &&
+                      render::imageInfo(render::ImageId::GameLogo).valid &&
+                      render::imageInfo(render::ImageId::BrandLogo).valid &&
+                      render::imageInfo(render::ImageId::GameIcon).valid &&
+                      render::imageInfo(render::ImageId::SteamLogo).valid,
+                  "image atlas: loaded fundo.png, logo.png, minha_logo.png, icone.png, steam.png");
+
+            // GameConfig vcs.ini roundtrip, mod classifier, and Steam VDF generator tests
+            {
+                const fs::path tmpDir = app.build / "self_test_tmp";
+                std::error_code ec;
+                fs::create_directories(tmpDir, ec);
+                const fs::path tmpIni = tmpDir / "test_vcs.ini";
+                {
+                    std::ofstream out(tmpIni, std::ios::binary);
+                    out << "iso=D:\\Games\\VCS.iso\n"
+                        << "display.scale=2\n"
+                        << "custom.keep_me=42\n";
+                }
+                GameConfig cfg;
+                const bool loaded = cfg.loadIni(tmpIni);
+                cfg.displayScale = 4;
+                cfg.worldHdRadius = 2;
+                const bool saved = cfg.saveIni(tmpIni);
+                GameConfig cfg2;
+                cfg2.loadIni(tmpIni);
+                std::ifstream checkIn(tmpIni);
+                const std::string iniContent((std::istreambuf_iterator<char>(checkIn)), {});
+                check(loaded && saved && cfg2.displayScale == 4 && cfg2.worldHdRadius == 2 &&
+                          iniContent.find("iso=D:\\Games\\VCS.iso") != std::string::npos &&
+                          iniContent.find("custom.keep_me=42") != std::string::npos,
+                      "GameConfig: vcs.ini load/save roundtrip preserves unknown keys");
+
+                // the launcher's old key names (before 2026-11-17) come in, the game's go out
+                {
+                    std::ofstream out(tmpIni, std::ios::binary | std::ios::trunc);
+                    out << "dualsense.triggers=0\ndualsense.lightbar=1\ndualsense.police_flash=0\ndualsense.speaker=1\n"
+                        << "enhance.button_prompts=4\npad.deadzone=20\n";
+                }
+                GameConfig old;
+                old.loadIni(tmpIni);
+                old.saveIni(tmpIni);
+                std::ifstream migratedIn(tmpIni);
+                const std::string migrated((std::istreambuf_iterator<char>(migratedIn)), {});
+                auto has = [&](const char *line) { return migrated.find(line) != std::string::npos; };
+                check(has("pad.ds_triggers=0") && has("pad.ds_lightbar=1") && has("pad.ds_police=0") && has("pad.ds_speaker=1") &&
+                          has("enhance.prompts=5") && has("pad.deadzone_left=20") && has("pad.deadzone_right=20"),
+                      "GameConfig: the DualSense, prompt and deadzone settings under the game's own keys");
+
+                // the subtitle and prompt style rows: the game's keys, read and written back as they are, defaults as the game's
+                {
+                    std::ofstream out(tmpIni, std::ios::binary | std::ios::trunc);
+                    out << "enhance.prompt_style=1\nenhance.subtitle_font=1\nenhance.subtitle_outline=40\nenhance.subtitle_size=130\n"
+                        << "enhance.subtitle_shadow=0\nenhance.subtitle_background=50\n";
+                }
+                GameConfig subs;
+                subs.loadIni(tmpIni);
+                subs.saveIni(tmpIni);
+                std::ifstream subsIn(tmpIni);
+                const std::string subsText((std::istreambuf_iterator<char>(subsIn)), {});
+                auto hasSub = [&](const char *line) { return subsText.find(line) != std::string::npos; };
+                check(hasSub("enhance.prompt_style=1") && hasSub("enhance.subtitle_font=1") && hasSub("enhance.subtitle_outline=40") &&
+                          hasSub("enhance.subtitle_size=130") && hasSub("enhance.subtitle_shadow=0") &&
+                          hasSub("enhance.subtitle_background=50") && hasSub("enhance.subtitle_colour=0"),
+                      "GameConfig: the subtitle options and the prompt icon style round trip, the colour at the game's default");
+
+                const fs::path modGood = tmpDir / "mod_good";
+                const fs::path modBad = tmpDir / "mod_bad";
+                fs::create_directories(modGood, ec);
+                fs::create_directories(modBad, ec);
+                std::ofstream(modGood / "vice_radar.png", std::ios::binary) << "png";
+                std::ofstream(modBad / "sa_hook.asi", std::ios::binary) << "asi";
+                const ModEntry eGood = GameConfig::classifyModFolder(modGood);
+                const ModEntry eBad = GameConfig::classifyModFolder(modBad);
+                check(eGood.compat == ModCompat::Compatible && eBad.compat == ModCompat::Incompatible,
+                      "GameConfig: mod compatibility classifier (.png compatible, .asi incompatible)");
+
+                const uint32_t appId = GameConfig::steamAppId("\"D:\\VCSLauncher.exe\"", "Grand Theft Auto: Vice City Stories");
+                const std::vector<uint8_t> vdf1 = GameConfig::upsertShortcutsVdf(
+                    {}, appId, "Grand Theft Auto: Vice City Stories", "\"D:\\VCSLauncher.exe\"", "\"D:\\\"", "D:\\icone.png");
+                const std::vector<uint8_t> vdf2 = GameConfig::upsertShortcutsVdf(
+                    vdf1, appId, "Grand Theft Auto: Vice City Stories", "\"D:\\VCSLauncher.exe\"", "\"D:\\\"", "D:\\icone.png");
+                check((appId & 0x80000000u) != 0 && vdf1.size() > 40 && vdf1 == vdf2,
+                      "GameConfig: Steam AppID CRC32 and shortcuts.vdf idempotent upsert");
+
+                fs::remove_all(tmpDir, ec);
+            }
+
             render::fontsShutdown();
             render::rendererShutdown();
             std::printf("%s\n", failed ? "self-test FAILED" : "self-test ok");
@@ -337,6 +471,8 @@ namespace
                 platform::errorBox(error);
             return 1;
         }
+        if (!shots && !hidden)
+            app.applyFirstInstallPreset(); // a player's window only: tests and screenshots leave vcs.ini alone
         g_loop.app = &app;
         g_loop.shots = shots;
         g_loop.stats = stats;
@@ -352,7 +488,7 @@ namespace
             if (!shots->iso.empty())
                 app.chooseDisc(pathFrom(shots->iso));
         }
-        else if (!platform::init("GTA: Vice City Stories - Launcher", kWidth, kHeight, kMinWidth, kMinHeight, error))
+        else if (!platform::init("VCS.rec Launcher - Grand Theft Auto: Vice City Stories", kWidth, kHeight, kMinWidth, kMinHeight, error))
         {
             platform::errorBox(error);
             return 1;
@@ -374,6 +510,8 @@ namespace
                 platform::errorBox(error);
             return 1;
         }
+        render::imagesInit(app.assetsFolder());
+        sound::init(app.assetsFolder());
         Process::setWakeHook(platform::wake);
         platform::setModalFrame(modalFrame);
         ui::state.scale = platform::window.dpiScale;
@@ -523,6 +661,7 @@ namespace
         const int code = shots && app.task && app.task->finished && !app.task->ok() ? 1 : 0;
         app.task.reset(); // a task cancelled on the way out: its job ends the tree
         Process::setWakeHook(nullptr);
+        sound::shutdown();
         render::fontsShutdown();
         render::rendererShutdown();
         if (!shots)
@@ -531,8 +670,27 @@ namespace
     }
 }
 
-int launcherMain(const std::vector<std::string> &args)
+int launcherMain(const std::vector<std::string> &argsIn)
 {
+    std::vector<std::string> args = argsIn;
+    if (hasArg(args, "--scskiller"))
+    {
+        const std::string dirStr = argValue(args, "--scskiller");
+        const std::string msaaStr = argValue(args, "--msaa");
+        const std::string langStr = argValue(args, "--lang");
+        const int msaa = msaaStr.empty() ? 4 : std::atoi(msaaStr.c_str());
+        const bool isPt = langStr != "en";
+        return runScsKillerCli(dirStr.empty() ? fs::current_path() : pathFrom(dirStr), msaa, isPt);
+    }
+    // started by the Restart button after an update (App::restart): the old launcher first ends, so its renamed exe
+    // (VCSLauncher.exe.old) can go and an AppImage's old mount is gone; then the window as usual
+    for (size_t i = 0; i + 1 < args.size(); ++i)
+        if (args[i] == "--after-update")
+        {
+            waitForProcessExit(std::strtoul(args[i + 1].c_str(), nullptr, 10), 15.0);
+            args.erase(args.begin() + long(i), args.begin() + long(i) + 2);
+            break;
+        }
     if (hasArg(args, "--screenshot"))
     {
         if (const std::string out = argValue(args, "--out"); !out.empty())

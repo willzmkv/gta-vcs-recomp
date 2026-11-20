@@ -13,6 +13,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <utility>
 #include <vector>
 
@@ -29,7 +30,46 @@ namespace render
         kLine = 3,   // antialiased segment with round caps
         kArc = 4,    // antialiased arc with round caps (spinners, rings)
         kQuad = 5,   // a filled convex quadrilateral, antialiased (corners in uv and radii)
+        kImage = 6,  // RGBA8 texture from image_atlas with SDF rounded corners and optional border
     };
+
+    enum class ImageId : int
+    {
+        None = 0,
+        Background = 1, // fundo.png
+        GameLogo = 2,   // logo.png
+        BrandLogo = 3,  // minha_logo.png
+        GameIcon = 4,   // icone.png
+        SteamLogo = 5,  // steam.png
+        ControllerPs2 = 6,    // controllers/ps2.png
+        ControllerXbox = 7,   // controllers/xbox.png
+        ControllerPs4 = 8,    // controllers/ps4.png
+        ControllerPs5 = 9,    // controllers/ps5.png
+        ControllerSwitch = 10,// controllers/switch.png
+        ControllerKbMouse = 11,// controllers/kb_mouse.png
+        MenuBackdrop = 12,     // menu_backdrop.png: a game frame for the game menu's mockups only (never shipped, .gitignore)
+        Count = 13
+    };
+
+    struct ImageEntry
+    {
+        float uv[4] = {}; // normalized [0, 1] u0, v0, u1, v1 in imageAtlas
+        int width = 0, height = 0;
+        float aspect = 1.0f;
+        bool valid = false;
+    };
+
+    struct ImageAtlas
+    {
+        int width = 0, height = 0;
+        std::vector<uint8_t> pixels; // RGBA8 premultiplied
+        uint32_t generation = 0;
+        ImageEntry entries[static_cast<int>(ImageId::Count)];
+    };
+    extern ImageAtlas imageAtlas;
+
+    bool imagesInit(const std::filesystem::path &assetsDir);
+    const ImageEntry &imageInfo(ImageId id);
 
     // Keep in sync with Instance in render/d3d11/ui.hlsl.
     struct Instance
@@ -110,4 +150,6 @@ namespace render
     // a convex quadrilateral, corners in order around it (x0 y0 x1 y1 x2 y2 x3 y3)
     void quad(const float corners[8], Color color);
     void glyph(Rect r, const float uv[4], Color color, float blur = 0); // blur: a radius in pixels
+    void image(Rect r, ImageId id, Corners radius = {}, Color tint = 0xFFFFFFFFu, Color border = 0, float borderWidth = 0);
+    void imageCover(Rect r, ImageId id, Corners radius = {}, Color tint = 0xFFFFFFFFu);
 }

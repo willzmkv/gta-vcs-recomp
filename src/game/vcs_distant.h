@@ -21,6 +21,7 @@ namespace vcs::distant
         float distance;
         uint32_t id;    // its slot (a stable choice of model when its own is not drawn)
         uint32_t model; // the model it wears (0: any)
+        bool still;     // a real ped standing (a still template's pose); walkers and cars false
     };
     // The latest frame's proxies (any thread): copies them out, returns the frame number they belong to (0: none).
     uint32_t snapshot(std::vector<Proxy> &out);
@@ -47,4 +48,22 @@ namespace vcs::distant
     bool workerProxies(Proxies &out);
     // Counters for the `proxies` command: a proxy draw's outcome (0 drawn, 1 culled or too small, 2 the draw not on its car)
     void noteProxy(int outcome);
+
+    // The crowd bands' handover (docs/CROWD_BANDS_PLAN.md step 4), on the game thread. A walker come in past the
+    // walkers' band in view waits there to become a real ped: where it is (z its pavement's), its heading (the ped's
+    // +0x8E0 sense: forward = (-sin h, cos h)), model and link (absolute node indices, the place along it).
+    struct Handover
+    {
+        uint32_t slot;
+        float x, y, z, heading;
+        uint32_t model;
+        uint16_t from, to;
+        float t;
+    };
+    bool pendingHandover(Handover &out);
+    // the game made the real ped in its place: the walker goes at the next tick
+    void handoverTaken(uint32_t slot);
+    // A real ped gone out past the bands in view: a walker of its model takes its place on the nearest pavement link,
+    // walking its way (false: no free walker, no pavement within a few metres)
+    bool adoptPed(float x, float y, float heading, uint32_t model);
 }

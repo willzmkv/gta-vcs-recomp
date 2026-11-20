@@ -97,6 +97,7 @@ namespace platform
         GAMEPAD_DPAD_DOWN,
         GAMEPAD_DPAD_LEFT,
         GAMEPAD_DPAD_RIGHT,
+        GAMEPAD_TOUCHPAD, // the DualShock 4 / DualSense touchpad's click (other pads: never down)
         GAMEPAD_BUTTON_COUNT,
     };
 
@@ -196,13 +197,46 @@ namespace platform
     bool keyDown(int key);
     bool keyPressed(int key); // main thread: went down at the last pumpEvents
     bool mouseDown(MouseButton button);
+    // The cursor in drawable pixels from the window's top-left (windowSize's units); false while it is not over the
+    // window, the mouse is captured or the window is hidden.
+    bool mousePosition(float &x, float &y);
     bool gamepadConnected();
     bool gamepadButton(GamepadButton button);
     float gamepadAxis(GamepadAxis axis);
     const char *gamepadName(); // "" without a gamepad (main thread)
+    // What kind of gamepad it is, from its maker's layout (any thread; None without one): the button prompts' glyphs.
+    enum class GamepadFamily : int
+    {
+        None,
+        Xbox,
+        PlayStation,
+        Nintendo,
+        Other,
+    };
+    GamepadFamily gamepadFamily();
     // Vibration, motors 0..1 (low = the large, slow motor; high = the small, fast one). Any thread; applied at the next
     // pumpEvents and held until changed (0, 0 stops).
     void gamepadRumble(float low, float high);
+
+    // The connected pad's family for the DualSense features (PS5 adaptive triggers, PS4 / PS5 light bar). Separate from
+    // GamepadFamily above (used for prompt glyphs) because it tells PS4 from PS5. Snapshot (any thread).
+    enum DsPadFamily : int
+    {
+        GAMEPAD_FAMILY_GENERIC, // an Xbox-style or unknown pad
+        GAMEPAD_FAMILY_PS4,     // DualShock 4 (a light bar, no adaptive triggers)
+        GAMEPAD_FAMILY_PS5,     // DualSense (a light bar and adaptive triggers)
+    };
+    DsPadFamily dsPadFamily();
+    bool gamepadHasLED();            // an RGB light bar (DualShock 4 / DualSense)
+    bool gamepadHasTriggerEffects(); // adaptive triggers through gamepadSendEffect (DualSense)
+
+    // The light bar's colour, 0..255 (DualShock 4 / DualSense); a no-op without one. Main thread, applied at once and
+    // held until changed. False when the pad took none (e.g. a DualSense still enabling its enhanced reports).
+    bool gamepadSetLED(uint8_t red, uint8_t green, uint8_t blue);
+    // A raw gamepad effect packet (SDL_SendGamepadEffect): the DualSense output-report body (a DS5EffectsState_t) that
+    // drives its adaptive triggers. Main thread; false when the pad takes none. The caller sets only the fields it
+    // owns, so a triggers-only packet leaves the light bar and rumble alone.
+    bool gamepadSendEffect(const void *data, int size);
 
     // Mouse capture (main thread): the cursor hidden and held in the window, motion reported as relative counts. Off
     // while the window is in the background.
@@ -219,6 +253,15 @@ namespace platform
     bool audioAvailable(); // a playback device exists
     bool audioOpen(uint32_t rate, uint32_t bufferFrames, AudioFill fill);
     void audioClose();
+    // Route the game's sound to the playback device whose name contains `nameSubstr` (e.g. a DualSense's speaker), or
+    // the system default when null / empty / no match. Main thread; reopens the stream (works before or after
+    // audioOpen). Returns whether sound is playing somewhere after the call.
+    bool audioUseDevice(const char *nameSubstr);
+    const char *audioDeviceName(); // the output device the stream is on ("" = none / the default)
+    // A second output, beside the game's (the police radio on a DualSense's speaker): a stream of its own on the
+    // playback device whose name contains `nameSubstr` - never the default device (false when none matches). Main thread.
+    bool audioOpenAux(const char *nameSubstr, uint32_t rate, uint32_t bufferFrames, AudioFill fill);
+    void audioCloseAux();
 
     // PNG (8-bit RGB, rows top-down) - screenshots.
     bool writePng(const char *path, const uint8_t *rgb, int width, int height);

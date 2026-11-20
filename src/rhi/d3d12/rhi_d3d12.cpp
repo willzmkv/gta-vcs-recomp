@@ -820,6 +820,7 @@ namespace rhi
                     if (FAILED(D3D12CreateDevice(a, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_core->device))))
                         return false;
                     m_adapterName = narrow(ad.Description);
+                    m_videoMemory = ad.DedicatedVideoMemory;
                     return true;
                 };
                 if (SUCCEEDED(m_factory.As(&factory6)))
@@ -945,6 +946,7 @@ namespace rhi
 
             Backend backend() const override { return Backend::D3D12; }
             const std::string &adapterName() const override { return m_adapterName; }
+            uint64_t videoMemory() const override { return m_videoMemory; }
 
             // ---- resources ----------------------------------------------------------------------------------------
             bool freeThreadedCreation() const override { return true; } // off the owner thread: stage()
@@ -1330,6 +1332,15 @@ namespace rhi
                 if (vertexCount && prepareDraw(false))
                 {
                     m_cmd->DrawInstanced(vertexCount, 1, firstVertex, 0);
+                    ++g_stats.draws;
+                }
+            }
+
+            void drawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex) override
+            {
+                if (vertexCount && instanceCount && prepareDraw(false))
+                {
+                    m_cmd->DrawInstanced(vertexCount, instanceCount, firstVertex, 0);
                     ++g_stats.draws;
                 }
             }
@@ -2532,6 +2543,7 @@ namespace rhi
             UINT m_swapFlags = 0;
             uint32_t m_width = 0, m_height = 0;
             std::string m_adapterName;
+            uint64_t m_videoMemory = 0;
             bool m_lostReported = false;
 
             ComPtr<ID3D12RootSignature> m_root;

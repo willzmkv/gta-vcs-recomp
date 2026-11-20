@@ -42,3 +42,5 @@ __pycache__/
 # the mod loader's folder: the player's mods, never committed - but its README
 /modloader/*
 !/modloader/README.md
+# a game frame for the game menu's mockups (launcher --screen gamemenu): game imagery, never committed
+launcher/assets/menu_backdrop.png

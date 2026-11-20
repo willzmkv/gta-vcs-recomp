@@ -28,6 +28,8 @@ namespace present
     void setBackend(int backend); // rhi::Backend
     int backend();                // rhi::Backend init uses (or used)
     bool backendNeedsVulkanWindow(); // platform::WindowDesc::vulkan
+    // The graphics card on a PC with more than one (Graphics > Graphics card; before init): an rhi::Gpu id.
+    void setGpu(int id);
 
     // On the platform layer's window (platform::init first).
     bool init(int width, int height);

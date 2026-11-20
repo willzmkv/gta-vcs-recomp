@@ -38,6 +38,22 @@ namespace screens
                 app.updateInfo = launcher::Json::parse(R"({"newer": true, "latest": "0.0.4", "url": "https://github.com"})");
                 return;
             }
+            if (demo == "updated") // an update put in place: Restart / Later
+            {
+                app.task = std::make_unique<launcher::Task>();
+                launcher::Task &t = *app.task;
+                const double now = ui::state.wall;
+                t.kind = "update";
+                t.title = "Updating";
+                t.stages = {{"download", "Downloading the new release", now - 40, now - 6},
+                            {"apply", "Putting the new release in place", now - 6, now}};
+                t.startTime = now - 40;
+                t.endTime = now;
+                t.finished = true;
+                t.result = launcher::Json::parse(R"({"result": "ok", "version": "0.2.1", "restart": true})");
+                app.updatedTo = "0.2.1";
+                return;
+            }
             if (demo == "stale")
                 return; // Home reads it: the build out of date
             if (demo == "gameerror")
@@ -46,6 +62,58 @@ namespace screens
                 app.gameExit = int(0xC0000005u);
                 return;
             }
+            if (demo == "buildconfirm")
+            {
+                shell.buildConfirmOpen = true;
+                shell.stagedBuildDir = app.build;
+                return;
+            }
+            if (demo == "c64build")
+            {
+                shell.c64TerminalOpen = true;
+            }
+            if (demo == "scskiller")
+            {
+                shell.c64TerminalOpen = true;
+                app.task = std::make_unique<launcher::Task>();
+                launcher::Task &st = *app.task;
+                st.kind = "shader_cache";
+                st.title = "Construindo Cache de Shaders (SCSKiller)";
+                const double now = ui::state.wall;
+                st.startTime = now - 1.25;
+                st.done = 1134;
+                st.total = 1134;
+                st.note = "PSOs";
+                st.finished = true;
+                st.exitCode = 0;
+                st.endTime = now;
+                st.log = {
+                    "[SCSKiller] ================================================================",
+                    "[SCSKiller] VCS.rec Shader Compilation Stutter Killer (Pipeline Precompiler)",
+                    "[SCSKiller] Based on BlueHeisenberg/SCSKiller PSO & Driver Cache architecture",
+                    "[SCSKiller] ================================================================",
+                    "[SCSKiller] GPU Adapter : AMD Radeon RX 7700 XT",
+                    "[SCSKiller] Hardware ID : Vendor 0x1002 | Device 0x747E | VRAM 12080 MB",
+                    "[SCSKiller] [D3D12] Root Signature reconstructed (4 CBVs, 8 SRVs, 8 Samplers)",
+                    "[SCSKiller] [D3D12] Queued 1134 Pipeline State Objects across 16 worker threads...",
+                    "[SCSKiller] [D3D12] Pre-compiled  350 / 1134 PSOs  (Native VCS World)",
+                    "[SCSKiller] [D3D12] Pre-compiled  770 / 1134 PSOs  (Native Distant Instanced)",
+                    "[SCSKiller] [D3D12] Pre-compiled 1134 / 1134 PSOs  (GS ShaderDepth Fallback)",
+                    "[SCSKiller] [D3D11] Pre-compiled 40 / 40 DXBC Shaders into GPU driver cache",
+                    "[SCSKiller] Cache File  : build/shaders/scskiller_pso_cache.bin (17881 KB)",
+                    "[SCSKiller] Summary     : 1134 D3D12 PSOs + 40 D3D11 Shaders in 1249 ms",
+                    "[SCSKiller] Driver Cache: Populated (0ms runtime shader stutter ready!)",
+                };
+                return;
+            }
+            if (demo == "en")
+            {
+                app.settings.language = "en";
+                app.settings.languageChosen = true;
+                return;
+            }
+            if (demo == "hoverplay")
+                return;
             app.task = std::make_unique<launcher::Task>();
             launcher::Task &t = *app.task;
             t.kind = "build";
@@ -102,15 +170,6 @@ namespace screens
                 return Mode::Task;
             if (shell.setupOpen)
                 return Mode::Setup;
-            if (!app.disc.ok)
-                return Mode::Setup;
-            if (!app.doctorDone || app.doctorFailed())
-                return Mode::Home; // Home says it is checking, or why it couldn't
-            const std::string next = app.next();
-            if (next == "tools" || cpuUnsupported(app))
-                return Mode::Setup;
-            if (next == "build" && !app.doctor["build"]["built"].boolean())
-                return Mode::Setup; // the first build is the last setup step; an update is Home's
             return Mode::Home;
         }
 
@@ -119,7 +178,16 @@ namespace screens
             switch (mode)
             {
             case Mode::Setup: drawSetup(content); break;
-            case Mode::Home: drawHome(content); break;
+            case Mode::Home:
+                switch (shell.tab)
+                {
+                case Tab::Game: drawHome(content); break;
+                case Tab::Mods: drawMods(content); break;
+                case Tab::Controls: drawControls(content); break;
+                case Tab::Settings: drawConfig(content); break;
+                case Tab::About: drawAbout(content); break;
+                }
+                break;
             case Mode::Task: drawTask(content); break;
             }
         }
@@ -291,7 +359,10 @@ namespace screens
 
     bool takesOver(const launcher::Task &t)
     {
-        return t.kind == "build" || t.kind == "tools" || t.kind == "update" || t.kind == "rip" || t.kind == "report" ||
+        // Build, Auto-Update, and SCSKiller Shader Cache tasks run directly inside the Commodore 64 Terminal on Home
+        if (t.kind == "build" || t.kind == "auto_update" || t.kind == "shader_cache")
+            return false;
+        return t.kind == "tools" || t.kind == "update" || t.kind == "rip" || t.kind == "report" ||
                t.kind == "restore" || t.kind == "install" || (t.finished && !t.ok() && !t.cancelled);
     }
 
@@ -372,10 +443,33 @@ namespace screens
     {
         shell.pending = [start] {
             fs::path picked;
-            if (platform::openFolderDialog(picked, "Choose where the game is built", start))
+            if (platform::openFolderDialog(picked, tr("Escolha a pasta de compilação do jogo", "Choose where the game is built"), start))
             {
                 shell.app->startBuildDirCheck(picked);
                 shell.awaitingBuildDir = true;
+            }
+        };
+    }
+
+    void chooseInstallDirForBuild()
+    {
+        const fs::path start = shell.stagedBuildDir.empty() ? shell.app->build : shell.stagedBuildDir;
+        shell.pending = [start] {
+            fs::path picked;
+            if (platform::openFolderDialog(picked,
+                                           tr("Escolha a pasta de instalação final do jogo",
+                                              "Choose the final installation folder for the game"),
+                                           start))
+            {
+                shell.stagedBuildDir = picked;
+                shell.buildConfirmOpen = true;
+                shell.c64TerminalOpen = false;
+            }
+            else if (shell.stagedBuildDir.empty())
+            {
+                shell.stagedBuildDir = shell.app->build;
+                shell.buildConfirmOpen = true;
+                shell.c64TerminalOpen = false;
             }
         };
     }
@@ -409,6 +503,20 @@ namespace screens
             platform::minimize();
             shell.minimizedForGame = true;
         }
+    }
+
+    void restartLauncher(App &app)
+    {
+        if (shell.options.screenshot)
+            return;
+        std::string error;
+        if (!app.restart(error))
+        {
+            toast("Could not start the new launcher: " + error + ". Close this one and start it again.", theme::kRed);
+            return;
+        }
+        app.dismissTask();
+        shell.quitNow = true; // the new one waits for this one to end
     }
 
     void openSheet(Sheet sheet)
@@ -508,8 +616,8 @@ namespace screens
 
     void show(App &app, const std::string &screen)
     {
-        const size_t colon = screen.find(':');
-        const std::string kind = screen.substr(0, colon), which = colon == std::string::npos ? "" : screen.substr(colon + 1);
+        const size_t sep = screen.find_first_of(":.");
+        const std::string kind = screen.substr(0, sep), which = sep == std::string::npos ? "" : screen.substr(sep + 1);
         if (kind == "setup")
         {
             static const char *steps[] = {"folder", "disc", "tools", "game"};
@@ -520,9 +628,49 @@ namespace screens
             openSetup(step);
             g_forcedMode = int(Mode::Setup);
         }
-        else if (kind == "home")
+        else if (kind == "home" || kind == "jogo")
         {
             shell.setupOpen = false;
+            shell.tab = Tab::Game;
+            g_forcedMode = int(Mode::Home);
+        }
+        else if (kind == "mods")
+        {
+            shell.setupOpen = false;
+            shell.tab = Tab::Mods;
+            if (!which.empty() && which[0] >= '0' && which[0] <= '3')
+                shell.modsSubTab = which[0] - '0';
+            g_forcedMode = int(Mode::Home);
+        }
+        else if (kind == "controls" || kind == "controles")
+        {
+            shell.setupOpen = false;
+            shell.tab = Tab::Controls;
+            if (!which.empty() && which[0] >= '0' && which[0] <= '6')
+                shell.controlsSubTab = which[0] - '0';
+            g_forcedMode = int(Mode::Home);
+        }
+        else if (kind == "settings" || kind == "config")
+        {
+            shell.setupOpen = false;
+            shell.tab = Tab::Settings;
+            if (!which.empty() && which[0] >= '0' && which[0] <= '6')
+                shell.configSubTab = which[0] - '0';
+            g_forcedMode = int(Mode::Home);
+        }
+        else if (kind == "about" || kind == "sobre")
+        {
+            shell.setupOpen = false;
+            shell.tab = Tab::About;
+            if (!which.empty() && which[0] >= '0' && which[0] <= '2')
+                shell.aboutSubTab = which[0] - '0';
+            g_forcedMode = int(Mode::Home);
+        }
+        else if (kind == "lang" || kind == "language")
+        {
+            shell.setupOpen = false;
+            shell.tab = Tab::Game;
+            shell.forceLanguagePrompt = true;
             g_forcedMode = int(Mode::Home);
         }
         else if (kind == "task")
@@ -543,6 +691,16 @@ namespace screens
         }
         else if (kind == "gallery")
             g_forcedMode = 100;
+        else if (kind == "gamemenu")
+        {
+            g_forcedMode = 200; // the in-game menu's screens (gamemenu.cpp), full window
+            if (!which.empty() && which[0] >= '0' && which[0] <= '6')
+                shell.gameMenuTab = which[0] - '0';
+            if (which.size() > 1 && which[1] >= '0' && which[1] <= '5')
+                shell.configSubTab = which[1] - '0'; // the Options page's tab
+            shell.gameMenuControllerLayout = which.size() > 2 && which[2] == 'L'; // and Adjust Control Layout open
+
+        }
     }
 
     void requestQuit(App &app)
@@ -630,6 +788,12 @@ namespace screens
             ui::wakeAt((steps + 1) * 0.8);
         }
 
+        if (g_forcedMode == 200)
+        {
+            drawGameMenu(window);
+            drawToasts(window);
+            return;
+        }
         if (g_forcedMode == 100)
         {
             drawBackdrop(window, 0);
@@ -654,10 +818,36 @@ namespace screens
                 shell.pinnedStep = -1;
             }
         }
-        ui::animate(g_hero, shell.mode == Mode::Home ? 1.0f : 0.0f, 3.5f);
-        drawBackdrop(window, g_hero, !app.gameRunning);
-        Rect content = window;
-        core::cutTop(content, drawTitleBar(window));
+        ui::animate(g_hero, (shell.mode == Mode::Home && shell.tab == Tab::Game) ? 1.0f : 0.15f, 5.0f);
+        const Rect sidebar{window.x, window.y, px(kSidebarWidth), window.h};
+        const Rect mainArea{window.x + px(kSidebarWidth), window.y, std::max(0.0f, window.w - px(kSidebarWidth)), window.h};
+
+        if (render::imageInfo(render::ImageId::Background).valid)
+        {
+            render::imageCover(mainArea, render::ImageId::Background);
+            const float scrimAlpha = 1.0f - core::clamp01((g_hero - 0.15f) / 0.85f);
+            if (scrimAlpha > 0.01f)
+            {
+                // 1980s GTA: Vice City Tropical Cyan/Aqua gradient wash over the palm tree silhouette
+                render::gradient(mainArea,
+                                 core::withAlpha(core::rgb(0xD2EFF4), 0.86f * scrimAlpha),
+                                 core::withAlpha(core::rgb(0x02CFDB), 0.88f * scrimAlpha));
+            }
+            else
+            {
+                // Subtle bottom gradient vignette for the bottom info bar on JOGO
+                render::gradient({mainArea.x, mainArea.bottom() - px(110), mainArea.w, px(110)},
+                                 core::rgb(0x100822, 0), core::rgb(0x100822, 160));
+            }
+        }
+        else
+        {
+            drawBackdrop(mainArea, g_hero, !app.gameRunning);
+        }
+
+        drawSidebar(sidebar);
+        const float topH = drawTitleBar(window);
+        Rect content{mainArea.x, mainArea.y + topH, mainArea.w, std::max(0.0f, mainArea.h - topH)};
 
         // the mode that is leaving fades and drifts up while the new one rises in
         const float out = ui::state.motion > 0 ? float((ui::state.time - shell.modeSince) / 0.22) : 1.0f;
@@ -676,6 +866,65 @@ namespace screens
 
         drawSheets(window);
         drawDialogs(window);
+
+        // First-launch Language Selection Prompt (Português do Brasil / English)
+        if ((!app.settings.languageChosen && !shell.options.screenshot) || shell.forceLanguagePrompt)
+        {
+            ui::beginLayer(kLayerDialog, true);
+            render::rect(window, core::rgb(0x06040C, 210));
+            const float boxW = px(480);
+            const float boxH = px(250);
+            const Rect box{window.cx() - boxW * 0.5f, window.cy() - boxH * 0.5f, boxW, boxH};
+
+            render::shadow(box.offset(0, px(10)), core::rgb(0x000000, 185), px(28), px(8));
+            render::rect(box, core::rgb(0xFBFDFE), px(6));
+            // Top Flamingo Pink header bar matching the Vice City menu
+            const Rect headR{box.x, box.y, box.w, px(52)};
+            render::rect(headR, core::rgb(0xFE7FB4), {px(6), px(6), 0, 0});
+            ui::label(render::kFontSemibold, px(16.0f), headR, core::rgb(0xFFFFFF),
+                      "SELECIONE O IDIOMA  /  SELECT LANGUAGE", ui::Align::Centre);
+
+            ui::label(render::kFontSemibold, px(14.0f), {box.x + px(24), headR.bottom() + px(22), box.w - px(48), px(22)},
+                      core::rgb(0x007A96), "Escolha o idioma da interface do VCS.rec Launcher:", ui::Align::Centre);
+            ui::label(render::kFontBody, px(13.0f), {box.x + px(24), headR.bottom() + px(44), box.w - px(48), px(20)},
+                      core::rgb(0x007A96, 190), "Choose your preferred language for the VCS.rec Launcher:", ui::Align::Centre);
+
+            const float btnW = px(196);
+            const float btnH = px(52);
+            const float btnY = box.bottom() - btnH - px(28);
+            const Rect ptR{box.cx() - btnW - px(10), btnY, btnW, btnH};
+            const Rect enR{box.cx() + px(10), btnY, btnW, btnH};
+
+            auto langChoiceBtn = [&](std::string_view idStr, std::string_view titleStr, std::string_view subStr, Rect rBtn) {
+                const ui::Interaction lin = ui::interact(ui::id(idStr), rBtn, true);
+                const float h = lin.w->hover;
+                const Rect b = rBtn.scaled(1.0f - 0.04f * lin.w->press);
+                const Color bg = core::mix(core::rgb(0xE8F7FA), core::rgb(0xFE7FB4), h);
+                const Color border = core::mix(core::rgb(0x0084A1, 90), core::rgb(0xFE7FB4), h);
+                render::rectEx(b, bg, bg, px(6), border, px(1.5f));
+                const Color txtCol = core::mix(core::rgb(0x007A96), core::rgb(0xFFFFFF), h);
+                ui::label(render::kFontSemibold, px(14.5f), {b.x, b.y + px(8), b.w, px(20)}, txtCol, titleStr, ui::Align::Centre);
+                ui::label(render::kFontBody, px(11.5f), {b.x, b.y + px(27), b.w, px(16)}, txtCol, subStr, ui::Align::Centre);
+                return lin.clicked;
+            };
+
+            if (langChoiceBtn("#first-lang-pt", "PORTUGUÊS", "Brasil (PT-BR)", ptR))
+            {
+                app.settings.language = "pt";
+                app.settings.languageChosen = true;
+                shell.forceLanguagePrompt = false;
+                app.saveSettings();
+            }
+            if (langChoiceBtn("#first-lang-en", "ENGLISH", "United States (EN)", enR))
+            {
+                app.settings.language = "en";
+                app.settings.languageChosen = true;
+                shell.forceLanguagePrompt = false;
+                app.saveSettings();
+            }
+            ui::endLayer();
+        }
+
         drawToasts(window);
     }
 }
