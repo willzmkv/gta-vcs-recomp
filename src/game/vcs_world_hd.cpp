@@ -1454,24 +1454,32 @@ namespace vcs::world_hd
             auto takenElsewhere = [&](uint16_t id, const Cell *c) { return taken.test(id) && takenBy[id] != c; };
             const uint32_t room = (kSynthBytes - 0x40u) / kRecord;
             uint32_t total = (b8 - b0) / kRecord;
+            auto isHidden = [&](const Rec &rec) {
+                return rec.hide == 1 || (rec.hide < 0 && (rd16(rec.from) & 0x8000u));
+            };
             // A detailed sector under another id with the same sphere as one already taken: the same geometry twice (the
             // same gid: 55 / 3193 by Fort Baxter's road, 3143 / 3184 and 3147 / 3185 by the docks) or two versions of one
             // large piece of ground (r >= 20: 2562 / 2527, the airport's apron) - drawn on the same plane they fought over
             // depth (#37, VCS_HD_DUPES). Taken from the first list that names it; small props sharing a sphere with a
-            // different gid are kept (two parts of one thing).
+            // different gid are kept (two parts of one thing), and multiple records of the same sector id (different
+            // buckets, e.g. opaque + translucent glass of Downtown's 914/915) are always kept.
             struct Sphere
             {
+                uint16_t id;
                 uint16_t gid;
                 float r;
             };
             std::unordered_map<uint64_t, Sphere> detailed;
             for (int k = 0; k < 8; ++k)
                 for (const Rec &rec : out[k])
-                    if (rec.id < kLodIds && rec.hide != 1)
-                        detailed.emplace(centreKey(rec.from), Sphere{rd16(rec.from + 2u), half(rd16(rec.from + 0xAu))});
-            auto sameSphere = [&](uint32_t r, uint16_t gid) {
+                    if (rec.id < kLodIds && !isHidden(rec))
+                        detailed.emplace(centreKey(rec.from), Sphere{rec.id, rd16(rec.from + 2u), half(rd16(rec.from + 0xAu))});
+            static const bool sameIdDupes = std::getenv("VCS_HD_SAME_ID_DUPES") && *std::getenv("VCS_HD_SAME_ID_DUPES") == '1';
+            auto sameSphere = [&](uint32_t r, uint16_t id, uint16_t gid) {
                 const auto it = detailed.find(centreKey(r));
                 if (it == detailed.end())
+                    return false;
+                if (!sameIdDupes && it->second.id == id)
                     return false;
                 const float rr = half(rd16(r + 0xAu));
                 return std::fabs(rr - it->second.r) <= 0.02f * std::max(rr, it->second.r) && (it->second.gid == gid || rr >= 20.0f);
@@ -1502,13 +1510,19 @@ namespace vcs::world_hd
                                 g_oscEntry[id] = rd32(table + gid * 0xCu);
                             }
                         }
+                        const char *skipWhy = id < 0x20u ? "SKIPPED (moving)" : takenElsewhere(id, c) ? "taken already" :
+                                              rd32(r + 0xCu) ? "SKIPPED (matrix)" : g_skipExtra.test(id) ? "SKIPPED (skipextra)" :
+                                              !drawable(c, gid) ? "SKIPPED (entry)" : nullptr;
+                        const bool isCond = !skipWhy && condGids.count(gid) != 0;
+                        const bool skipTwin = !skipWhy && drawMode() >= 3 && id >= kLodIds && !isCond && twin(r);
+                        const bool skipDupe = !skipWhy && id < kLodIds && !keepDupes && sameSphere(r, id, gid);
                         if (probing && probeNear(r))
                             std::fprintf(stderr, "[hdprobe]   cell %d,%d id %5u gid %5u at %.0f,%.0f r %.0f mat 0x%08x flag %u -> %s\n", c->x, c->y, id, gid,
                                          half(rd16(r + 4u)), half(rd16(r + 6u)), half(rd16(r + 0xAu)), rd32(r + 0xCu), rd16(r) >> 15,
-                                         id < 0x20u ? "SKIPPED (moving)" : takenElsewhere(id, c) ? "taken already" : rd32(r + 0xCu) ? "SKIPPED (matrix)" :
-                                         !drawable(c, gid) ? "SKIPPED (entry)" : id >= kLodIds && replaced(id, r, true) ? "coarser, replaced" :
+                                         skipWhy ? skipWhy : skipTwin ? "SKIPPED (twin)" : skipDupe ? "SKIPPED (dupe)" :
+                                         id >= kLodIds && replaced(id, r, true) ? "coarser, replaced" :
                                          switched(id) == 1 ? "added, switched off" : switched(id) == 0 ? "added, switched on" : "added");
-                        if (id < 0x20u || takenElsewhere(id, c) || rd32(r + 0xCu) || g_skipExtra.test(id) || !drawable(c, gid))
+                        if (skipWhy)
                             continue;
                         const float near = std::hypot(half(rd16(r + 4u)) - camX, half(rd16(r + 6u)) - camY); // (its centre)
                         if (id >= kLodIds && drawMode() < 3)
@@ -1519,13 +1533,12 @@ namespace vcs::world_hd
                         // over 2800 at -986,-1153 - the player's reports, 2026-11-17). replaced() keeps twins for the
                         // game's own list, where the game's flags pick the version (Phil's warehouse); from a neighbour's
                         // list the slot's own records already decide which version shows.
-                        const bool isCond = condGids.count(gid) != 0;
-                        if (id >= kLodIds && !isCond && twin(r))
+                        if (skipTwin)
                         {
                             ++coarser;
                             continue;
                         }
-                        if (id < kLodIds && !keepDupes && sameSphere(r, gid))
+                        if (skipDupe)
                             continue; // (the same detailed sector under another id: above)
                         const bool glowing = id >= kLodIds && replaced(id, r, true);
                         if (glowing && (!glowNow || isCond))
@@ -1535,11 +1548,11 @@ namespace vcs::world_hd
                         }
                         taken.set(id);
                         takenBy[id] = c;
-                        if (id < kLodIds)
-                            detailed.emplace(centreKey(r), Sphere{gid, half(rd16(r + 0xAu))});
                         int hide = switched(id);
                         if (hide < 0)
                             hide = 0;
+                        if (id < kLodIds && hide != 1)
+                            detailed.emplace(centreKey(r), Sphere{id, gid, half(rd16(r + 0xAu))});
                         out[k].push_back({id, r, c->cx - scx, c->cy - scy, -zShift, hide});
                         g_oscSource[id] = (uint64_t(uint32_t(c->y)) << 32 | uint32_t(c->x)) + 1u;
                         g_oscDist[id] = near;
@@ -1578,26 +1591,39 @@ namespace vcs::world_hd
             if (dupeLog && &b == &g_built[0] && t - dupeAt > 10.0)
             {
                 dupeAt = t;
-                std::unordered_map<uint64_t, uint32_t> byCentre; // centre -> record
-                uint32_t dupes = 0, drawn = 0;
+                struct Seen
+                {
+                    uint32_t from;
+                    bool own;
+                };
+                std::unordered_map<uint64_t, Seen> byCentre; // centre -> first drawn record
+                uint32_t dupes = 0, ownDupes = 0, extraDupes = 0, drawn = 0;
                 for (int k = 0; k < 8; ++k)
                     for (const Rec &rec : out[k])
                     {
-                        if (rec.id >= kLodIds || rec.hide == 1)
+                        if (rec.id >= kLodIds || isHidden(rec))
                             continue;
                         ++drawn;
-                        const auto [it, fresh] = byCentre.emplace(centreKey(rec.from), rec.from);
-                        if (fresh || (rd16(it->second) & 0x7FFFu) == rec.id)
+                        const bool own = rec.hide < 0;
+                        const auto [it, fresh] = byCentre.emplace(centreKey(rec.from), Seen{rec.from, own});
+                        if (fresh || (rd16(it->second.from) & 0x7FFFu) == rec.id)
                             continue;
-                        const float ra = half(rd16(it->second + 0xAu)), rb = half(rd16(rec.from + 0xAu));
+                        const float ra = half(rd16(it->second.from + 0xAu)), rb = half(rd16(rec.from + 0xAu));
                         if (std::fabs(ra - rb) > 0.02f * std::max(ra, rb))
                             continue;
+                        const bool bothOwn = it->second.own && own;
+                        if (bothOwn)
+                            ++ownDupes;
+                        else
+                            ++extraDupes;
                         if (dupes++ < 20u)
-                            std::fprintf(stderr, "[hddupe] %u (gid %u) and %u (gid %u) at %.0f,%.0f,%.0f r %.1f / %.1f\n",
-                                         rd16(it->second) & 0x7FFFu, rd16(it->second + 2u), rec.id, rd16(rec.from + 2u),
-                                         half(rd16(rec.from + 4u)), half(rd16(rec.from + 6u)), half(rd16(rec.from + 8u)), ra, rb);
+                            std::fprintf(stderr, "[hddupe] %u (gid %u) and %u (gid %u) at %.0f,%.0f,%.0f r %.1f / %.1f (%s)\n",
+                                         rd16(it->second.from) & 0x7FFFu, rd16(it->second.from + 2u), rec.id, rd16(rec.from + 2u),
+                                         half(rd16(rec.from + 4u)), half(rd16(rec.from + 6u)), half(rd16(rec.from + 8u)), ra, rb,
+                                         bothOwn ? "game list" : it->second.own ? "game+extra" : "extra");
                     }
-                std::fprintf(stderr, "[hddupe] %u detailed sectors drawn, %u twice under two ids\n", drawn, dupes);
+                std::fprintf(stderr, "[hddupe] %u detailed sectors drawn, %u twice under two ids (game: %u, extra: %u)\n",
+                             drawn, dupes, ownDupes, extraDupes);
             }
             // VCS_HD_TWINS=1 (once a minute): of the low-detail sectors left out as replaced, how many have a detailed
             // twin (a record of id < kLodIds at the very same centre and radius - the half floats equal) in the lists

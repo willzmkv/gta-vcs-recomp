@@ -92,18 +92,25 @@ def main():
         g.invincible(True)
         g.cmd("setting world.vehicle_density 0") # (the game's own numbers: the sliders' 0)
         g.cmd("setting world.pedestrian_density 0")
+        g.cmd("setting world.hd_radius 0")
+        g.set_time(a.hour)
         done = 0
         for x, y in points:
             if a.limit and done >= a.limit:
                 break
-            g.set_time(a.hour)
-            g.cmd("setting world.hd_radius 3")
             g.teleport(x, y, -100.0)
-            time.sleep(5)
+            time.sleep(0.5)
+            _, (px, py, pz0), _ = g.player()
+            if pz0 < 4.0 or abs(px - x) > 60 or abs(py - y) > 60: # the sea, or the game moved the player (a door)
+                continue
+            time.sleep(0.25)
             _, (px, py, pz), _ = g.player()
-            if pz < 4.0 or abs(px - x) > 60 or abs(py - y) > 60: # the sea, or the game moved the player (a door)
+            if pz < 4.0 or (pz0 - pz) > 0.25 or abs(px - x) > 60 or abs(py - y) > 60: # still falling over open ocean
                 continue
             done += 1
+            g.set_time(a.hour)
+            g.cmd("setting world.hd_radius 3")
+            time.sleep(5)
             views = []
             for yaw in (0, 90, 180, 270):
                 g.cmd("campose %.2f %.2f %.2f %d -15" % (px, py, pz + 3.0, yaw))
