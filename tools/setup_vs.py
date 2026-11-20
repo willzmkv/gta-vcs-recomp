@@ -99,16 +99,11 @@ def download(url, out):
     print("[setup] downloading " + url)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     try:
-        with urllib.request.urlopen(url, timeout=60) as r, open(out + ".part", "wb") as f:
-            total = int(r.headers.get("Content-Length") or 0)
-            done = 0
-            while True:
-                chunk = r.read(1 << 16)
-                if not chunk:
-                    break
-                f.write(chunk)
-                done += len(chunk)
-                tc.event(progress=done, total=total, eta=None, note="bytes")
+        done = [0]
+        def on_chunk(n, total):
+            done[0] += n
+            tc.event(progress=done[0], total=total, eta=None, note="bytes")
+        tc.download_file(url, out + ".part", timeout=60, allow_unverified=True, on_chunk=on_chunk)
     except OSError as e:
         tc.fail("download failed: %s" % e, "network")
     os.replace(out + ".part", out)

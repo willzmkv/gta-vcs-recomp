@@ -56,7 +56,7 @@ def latest(repo):
     req = urllib.request.Request("https://api.github.com/repos/%s/releases/latest" % repo,
                                  headers={"Accept": "application/vnd.github+json", "User-Agent": "vcs-recomp-update"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with tc.urlopen(req, timeout=30) as r:
             data = json.load(r)
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -136,26 +136,21 @@ def remove_set_aside():
                         pass
 
 
-def download(url, out):
+def download(url, out, allow_unverified=False):
     tc.stage("download", "Downloading the new release")
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    with urllib.request.urlopen(url, timeout=60) as r, open(out + ".part", "wb") as f:
-        total = int(r.headers.get("Content-Length") or 0)
-        done = 0
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-            done += len(chunk)
-            tc.event(progress=done >> 20, total=total >> 20, eta=None, note="MB")
+    done = [0]
+    def on_chunk(n, total):
+        done[0] += n
+        tc.event(progress=done[0] >> 20, total=total >> 20, eta=None, note="MB")
+    tc.download_file(url, out + ".part", timeout=60, allow_unverified=allow_unverified, on_chunk=on_chunk)
     os.replace(out + ".part", out)
 
 
 def verified_download(found, out):
-    download(found["zip"], out)
+    download(found["zip"], out, allow_unverified=bool(found["sha256"]))
     if found["sha256"]:
-        with urllib.request.urlopen(found["sha256"], timeout=30) as r:
+        with tc.urlopen(found["sha256"], timeout=30) as r:
             want = r.read().decode().split()[0].lower()
         got = hashlib.sha256(open(out, "rb").read()).hexdigest()
         if got != want:

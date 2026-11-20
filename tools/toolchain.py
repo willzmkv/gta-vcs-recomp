@@ -952,13 +952,95 @@ def long_path(path):
     return "\\\\?\\UNC\\" + path[2:] if path.startswith("\\\\") else "\\\\?\\" + path
 
 
+def _is_ssl_error(err):
+    return "CERTIFICATE_VERIFY_FAILED" in str(err) or "SSL" in str(err)
+
+
+def _curl_exe():
+    if IS_WINDOWS:
+        sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "curl.exe")
+        if os.path.isfile(sys32):
+            return sys32
+    return shutil.which("curl")
+
+
+def urlopen(req_or_url, timeout=60, allow_unverified=False):
+    """urllib.request.urlopen with a fallback when OpenSSL can't verify the host's certificate (Windows machines where
+    the root certificate isn't in OpenSSL's view of the Windows store yet, or an antivirus / proxy intercepts HTTPS):
+    when `allow_unverified` is True (caller checks SHA-256 or Authenticode signature), retries without OpenSSL's cert
+    check; otherwise falls back to the OS's curl (Windows Schannel) for a small request."""
+    import ssl
+    import urllib.request
+    try:
+        return urllib.request.urlopen(req_or_url, timeout=timeout)
+    except OSError as e:
+        if not _is_ssl_error(e):
+            raise
+        if allow_unverified:
+            return urllib.request.urlopen(req_or_url, timeout=timeout, context=ssl._create_unverified_context())
+        curl = _curl_exe()
+        if not curl:
+            raise
+        import io
+        url = req_or_url.full_url if hasattr(req_or_url, "full_url") else req_or_url
+        cmd = [curl, "-fsSL", "--max-time", str(int(timeout))]
+        for k, v in (req_or_url.header_items() if hasattr(req_or_url, "header_items") else ()):
+            cmd += ["-H", "%s: %s" % (k, v)]
+        cmd.append(url)
+        res = subprocess.run(cmd, capture_output=True)
+        if res.returncode != 0:
+            raise
+        return io.BytesIO(res.stdout)
+
+
+def download_file(url, dest, timeout=120, allow_unverified=False, on_chunk=None):
+    """Downloads `url` to `dest`, returning its SHA-256 hex digest. When OpenSSL's certificate check fails, falls back
+    to the OS's curl (Schannel on Windows) or, when `allow_unverified` is True (caller verifies SHA-256 / Authenticode),
+    an unverified SSL context."""
+    import hashlib
+    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+    try:
+        r = urlopen(url, timeout=timeout, allow_unverified=False)
+    except OSError as e:
+        if not _is_ssl_error(e):
+            raise
+        curl = _curl_exe()
+        r = None
+        if curl:
+            res = subprocess.run([curl, "-fsSL", "--max-time", str(int(timeout)), "-o", dest, url])
+            if res.returncode == 0 and os.path.isfile(dest):
+                digest = hashlib.sha256()
+                with open(dest, "rb") as f:
+                    while True:
+                        block = f.read(1 << 20)
+                        if not block:
+                            break
+                        digest.update(block)
+                        if on_chunk:
+                            on_chunk(len(block), 0)
+                return digest.hexdigest()
+        if not allow_unverified:
+            raise
+        r = urlopen(url, timeout=timeout, allow_unverified=True)
+    with r, open(dest, "wb") as f:
+        total = int(getattr(r, "headers", {}).get("Content-Length") or 0)
+        digest = hashlib.sha256()
+        while True:
+            block = r.read(1 << 20)
+            if not block:
+                break
+            f.write(block)
+            digest.update(block)
+            if on_chunk:
+                on_chunk(len(block), total)
+    return digest.hexdigest()
+
+
 def _download_tool(title, downloads, probe, minimum, names, hint=CMAKE_HINT, code="no_cmake", need=None):
     """Unpacks this platform's build from `downloads` into TOOLS_DIR (once) and returns its program; fails (`code`,
     with `hint` on what to do instead) when there is none for this machine or it can't be fetched."""
-    import hashlib
     import http.client
     import tarfile
-    import urllib.request
     import zipfile
     key = download_platform()
     need = need or "%s %s or newer" % (title, _version_text(minimum))
@@ -971,27 +1053,19 @@ def _download_tool(title, downloads, probe, minimum, names, hint=CMAKE_HINT, cod
     stage("download_" + title.lower(), "Downloading " + title)
     print("[toolchain] no %s found: downloading %s" % (need, url))
     try:
-        os.makedirs(TOOLS_DIR, exist_ok=True)
-        digest = hashlib.sha256()
-        with urllib.request.urlopen(url, timeout=120) as r, open(archive + ".part", "wb") as f, \
-                Progress("[toolchain] " + title) as progress:
-            total = int(r.headers.get("Content-Length") or 0)
-            done = 0
-            while True:
-                block = r.read(1 << 20)
-                if not block:
-                    break
-                f.write(block)
-                digest.update(block)
-                done += len(block)
-                progress.update(done >> 20, total >> 20, "MB")
+        done = [0]
+        with Progress("[toolchain] " + title) as progress:
+            def on_chunk(n, total):
+                done[0] += n
+                progress.update(done[0] >> 20, total >> 20, "MB")
+            got_sha256 = download_file(url, archive + ".part", timeout=120, allow_unverified=True, on_chunk=on_chunk)
     except (OSError, http.client.HTTPException) as e:
         fail("%s not found, and downloading it failed (%s). Check the internet connection, or %s" % (need, e, hint),
              "download_failed" if code != "no_cmake" else code)
-    if digest.hexdigest() != sha256:
+    if got_sha256 != sha256:
         os.remove(archive + ".part")
         fail("the %s download is not the file it should be (SHA-256 %s, expected %s): try again; a proxy or antivirus "
-             "may have changed it" % (title, digest.hexdigest(), sha256), "download_failed")
+             "may have changed it" % (title, got_sha256, sha256), "download_failed")
     os.replace(archive + ".part", archive)
     # unpacked into <folder>.unpack\<folder>\...: llvm-mingw's deepest files then pass Windows' 260-character limit
     # below a folder longer than ~86 characters (Quiver's are 105) and the build stopped at a FileNotFoundError with
