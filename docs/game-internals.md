@@ -2777,7 +2777,24 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   the doors cut, shifting with the camera. Found by bisecting with `VCS_HD_DRAWMODE` (1 and 2 clean, 3 not) at the
   player's spot (-1188,-1214, 00:30). A neighbour's twin is now never drawn: the slot's own records pick the version
   (the twin rule stays for the game's own list). The same spot then matches radius 0; the cruise route's checks 0.
-  `VCS_HD_DUPES=1` (every 10 s) counts detailed sectors drawn twice under two ids (2 on the mainland, none near).
+  `VCS_HD_DUPES=1` (every 10 s) counts detailed sectors drawn twice under two ids (`(game: N, extra: M)`, skipping
+  records hidden via `0x8000`): 0 along the cruise route (`tools/cruise.py`), 1-2 in the game's own slot list at the
+  south/airport spots (`2562 gid 3151 / 2527 gid 3088` at `-1435,-826,44 r 103.0 / 102.6`, and `55 / 3193 gid 71` at
+  `-1217,-340,16 r 46.2 / 46.2`, both `flag 0` in the game list - kept untouched as in radius 0, while duplicate
+  extra-cell records are suppressed by `sameSphere()` when same `gid` or `r >= 20`). `[hdprobe]` logs
+  `SKIPPED (twin)` / `SKIPPED (dupe)` / `SKIPPED (skipextra)` before `continue`.
+- **Same-id multi-bucket sectors at `r >= 20`** (`(-975, 475)` Downtown construction building, #36): a detailed sector
+  with the same `id` can have records in more than one bucket (opaque `bkt4` + translucent blue glass `bkt7`: `914`
+  `gids 1282, 1283` at `-794,478 r 31` and `915` `gids 1284, 1285` at `-795,528 r 23` in extra cell `12,23`). Because
+  `detailed` recorded the sector's sphere on `bkt4` (`k = 4`) and `r >= 20`, `sameSphere()` treated the `bkt7` glass
+  records under the same `id` as duplicate detailed sectors and dropped them (`VCS_HD_DRAWMODE=1` and `2` showed the
+  glass; `3` replaced low-detail `6039, 6040, 6041` while `914/915` `bkt7` was dropped - `[hdprobe]` still printed
+  `"added"` before the check; `VCS_WATCH` confirmed 0 guest writes to `b.buffers`, and `FUN_0023D740` only flips
+  `0x8000` inside `kSwapArea`/`kChooseArea`/`kAreaForPosition`/`kDropPrevious`/`kFlush`/`kLevelLoad`, not `FUN_00241278`).
+  `sameSphere()` now returns `false` when `it->second.id == id` (fallback switch `VCS_HD_SAME_ID_DUPES=1`) and
+  `detailed` filters hidden slot records via `0x8000` (`isHidden(rec)`). Verified across noon (`12:00`), afternoon
+  (`16:00`), and night (`22:00`) `R=3` vs `R=0` plus `VCS_HD_SAME_ID_DUPES=1` fallback, `tools/hdworld_missions.py`
+  (6/6 PASS), and `tools/cruise.py` (`VU1 reserved: 0`, `list record: 0`, `hdworld-draw: 0`, `hddupe extra: 0`).
 - **Entries emptied by a slot drop** (the player's "buildings switching between high and low quality", 2026-11-12):
   dropping a slot, the game clears the table entries that still hold that slot's copy (`FUN_0023CED0`) - gids our
   extra cells hold too. Until our next re-entry those sectors were left out of the built list, then back: models
