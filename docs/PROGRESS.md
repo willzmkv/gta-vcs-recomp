@@ -1523,6 +1523,11 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 - **#80:** F2 settings menu and F5 trainer restyled in the launcher's Miami Vice look (Global menu `#48` moved to 2.0.0).
 - **#35 (PR #81):** relaxed standing `clear20A` and extended-range `not_toward` in the car spawner for vehicle density while standing still.
 - **#36 (PR #82, closed):** fixed missing translucent blue glass on Downtown's construction building at `(-975, 475)` (same-id multi-bucket detailed sectors `914`/`915` at `r >= 20` kept in `sameSphere()`, fallback `VCS_HD_SAME_ID_DUPES=1`), filtered `0x8000` in `detailed`/`[hddupe]`, kept game-list pairs untouched (`R=0` faithful, Option B), updated `[hdprobe]` skip reasons and `tools/hd_overlap_scan.py` ocean/freefall skip. Verified visually (noon/afternoon/night + fallback), `hdworld_missions.py` 6/6, and `cruise.py` ThinLTO (`VU1 reserved: 0`, `list record: 0`, `hdworld-draw: 0`, `hddupe: 0`).
+- **Release `v1.0.0` published (`2026-11-20`):**
+  - Input & prompts: trigger schemes preserve keyboard/wheel bits and lock wheel-switch when wheel is bound (`aebe5fb`); Portuguese tilde glyphs (`Ã`, `ã`, `Õ`, `õ`) added to native PS2 fonts (`a209f0b`).
+  - Verified & closed `#41` (police chase), `#40` (Vic airport first frame), `#34` (distant proxies), `#46`/`#47` (PT-BR translation), `#56` (CI), `#57` (release notes), `#59` (merge + tag), `#31` (download link).
+  - Bundled `mods-pack` updated with **HD Hands** (all 14 Vic outfits `plr`..`plr14`, 0 clamped), **HD Hud**, and **PT-BR (VCS.rec)**; `tools/release.py` and `.github/workflows/launcher.yml` bundle all 3 mods on both Windows and Linux AppImage (PRs `#83`, `#84`).
+  - CI run `44672420138` published `v1.0.0` (`VCS.rec-Launcher-1.0.0.exe`, `VCS-Recomp-1.0.0-windows.zip`, `VCS-Recomp-1.0.0-x86_64.AppImage` + `.sha256`); `README.md` refreshed with GTA Vice City Stories.REC branding, banner, and logos (PR `#85`). Remaining open from 1.0.0 milestone: `#54` (full regression baseline rerun) and `#58` (PGO profile + full story playthrough).
 
 ## 2026-11-18 - the fork's first regression baseline and frame-rate audit (#54)
 

@@ -62,8 +62,8 @@ python tools/build.py --recompile <the ISO>      # generated/ is not in git: mak
   - `#80`: F2 settings menu and F5 trainer restyled in the launcher's Miami Vice look (Global menu `#48` moved to 2.0.0, see `docs/DECISIONS.md`).
   - `#35` (PR #81): vehicle density standing still (`clear20A` and extended-range `not_toward` relaxed in car spawner).
   - `#36` (PR #82, closed): HD world overlaps & dupes — same-id multi-bucket sectors (`r >= 20`, e.g. Downtown `914`/`915` opaque + glass) kept in `sameSphere()` (fallback `VCS_HD_SAME_ID_DUPES=1`), `0x8000` filtering in `detailed`/`[hddupe]`, Option B for game-list pairs, `[hdprobe]` skip reasons, `tools/hd_overlap_scan.py` ocean/freefall skip; wide night + noon scans, `hdworld_missions.py` 6/6, and `cruise.py` ThinLTO draw checks all 0.
-- **Fixed, waiting for the player to check in play (`player-test`):** police chase (#41), Vic at the airport via PS2 cutscene framing (#40), distant proxies' wrecks and seated poses (#34).
-- **Waiting for the player / main agent:** PT-BR translation review and mod packaging (#46, #47), full regression baseline rerun (#54), CI artifact check (#56), release notes (#57), RC PGO build + story playthrough (#58), merge to `main` + tag `v1.0.0` (#59), answer #31.
+- **v1.0.0 published (`2026-11-20`):** PRs `#83`/`#84`/`#85` merged to `main`, tag `v1.0.0` live with Windows standalone `.exe`, Windows `.zip`, and Linux `.AppImage` (all bundling HD Hands 14 Vic outfits + HD Hud + PT-BR). Closed: `#31`, `#34`, `#36`, `#40`, `#41`, `#46`, `#47`, `#56`, `#57`, `#59`.
+- **Remaining open in 1.0.0 milestone (follow-ups):** `#54` (full regression baseline rerun on ThinLTO) and `#58` (PGO profile training + full story playthrough).
 
 ## 5. Tasks suited to a second agent
 
