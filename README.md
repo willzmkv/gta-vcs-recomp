@@ -8,6 +8,7 @@
 [![Platform](https://img.shields.io/badge/Windows_10%2F11_%7C_Linux-00d4ff?style=for-the-badge&labelColor=181425&logo=windows&logoColor=white)](https://github.com/willzmkv/gta-vcs-recomp/releases/latest)
 [![Renderer](https://img.shields.io/badge/D3D12_%7C_D3D11_%7C_Vulkan-a855f7?style=for-the-badge&labelColor=181425)](docs/NATIVE_RENDERER.md)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-f59e0b?style=for-the-badge&labelColor=181425)](LICENSE)
+[![Support via LivePix](https://img.shields.io/badge/LivePix-Support_the_Project-32bcad?style=for-the-badge&labelColor=181425&logo=pix&logoColor=white)](https://widget.livepix.gg/embed/64ff82ca-afac-4618-8ebc-075021d5778f)
 
 <br />
 
@@ -213,6 +214,26 @@ After `git pull`, run `python tools/build.py --recompile-if-needed`.
 See [AGENTS.md](AGENTS.md) for contributor rules and [docs/](docs/) for internals ([docs/game-internals.md](docs/game-internals.md)), roadmap ([docs/FORK.md](docs/FORK.md)), and active plans ([docs/plans/](docs/plans/README.md)).
 
 </details>
+
+---
+
+## ☕ Support the Project
+
+This fork is developed and maintained in free time. If **GTA Vice City Stories.REC** brought you good memories and you'd like to support future updates, you can contribute via **LivePix**:
+
+<div align="center">
+
+[![Support via LivePix](https://img.shields.io/badge/Support_via_LivePix-PIX-32bcad?style=for-the-badge&logo=pix&logoColor=white)](https://widget.livepix.gg/embed/64ff82ca-afac-4618-8ebc-075021d5778f)
+
+<br />
+
+<a href="https://widget.livepix.gg/embed/64ff82ca-afac-4618-8ebc-075021d5778f">
+  <img src="docs/assets/livepix-qr.png" alt="LivePix QR Code" width="160" />
+</a>
+
+*Scan the QR code or click the button above to support via LivePix.*
+
+</div>
 
 ---
 
