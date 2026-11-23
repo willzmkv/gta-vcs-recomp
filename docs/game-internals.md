@@ -3784,7 +3784,7 @@ hidden run (rig `peek` / `poke`, snapshots diffed).
 - The passenger's shots go through FireInstantHit's line test at 0x2C47A4 like the on-foot ones (vcs_aim.cpp's shot
   line counted them: 62 shots in 3 s of fire in Jive Drive). vcs_aim.cpp takes the car's free aim over when free aim
   is on (either device): the dummy written at the pad read at the gun's range along the mouse / right stick's aim
-  (kept in the game's height limits), the lock-on camera turned by the same amount, the left stick centred; the game's
+  (20 degrees above level and widened to **35 degrees below** by default so adjacent vehicles' wheels and low targets are reachable in Jive Drive, with `VCS_CAR_AIM_PITCH=0` restoring the PS2 `-5` deg limit; FUN_002343E0 skips its `95.0f` clamp whenever the left stick is centred at `$f22 == 0`), the lock-on camera turned by the same amount, the left stick centred; the game's
   update then adds the car's movement and the line test, as for its own stick.
 - **The forced free aim on foot: Phil's shooting range** (2026-11-01; mission 13 `SRANGE`). **04D6
   SET_PLAYER_FORCE_FREE_AIMING** (handler FUN_002D5C20: the script handler table at 0x4BEAF0 is per opcode, 8 bytes

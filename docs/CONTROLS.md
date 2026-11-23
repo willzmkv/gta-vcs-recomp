@@ -80,8 +80,7 @@ game-internals.md 12c):
   mission starts itself): with free aim on for either device, the mouse and the right stick turn the circle instead of
   the left stick (the game's help text still says the left stick), no button to hold; the left button fires through
   the circle. On the gamepad **R1 fires** there (as Circle, which still fires too): the right thumb is on the stick.
-  Only in this car aim and Phil's shooting range (below) - R1 is the target button everywhere else. The circle keeps its direction while the car turns, up to 20 degrees above level and 5 below, as the game
-  allows there. With free aim off it is the PS2's left stick.
+  Only in this car aim and Phil's shooting range (below) - R1 is the target button everywhere else. The circle keeps its direction while the car turns, up to 20 degrees above level and 35 degrees below (`VCS_CAR_AIM_PITCH=0` restores the PS2's 5 degrees below). With free aim off it is the PS2's left stick.
 - **Phil's shooting range** (the game's free aim forced on foot, `SET_PLAYER_FORCE_FREE_AIMING`): the same - the mouse
   and the right stick turn the circle, no button to hold, the left button fires; the right button does nothing there
   (as R1 on the PS2), and on the gamepad **R1 fires** (as Circle), as in Jive Drive's car. Up to 110 degrees either
