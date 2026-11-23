@@ -62,7 +62,7 @@ namespace vcs::aim
         constexpr uint32_t kReticleTexture = 0x006EDD94u;
         constexpr uint32_t kReticlePixels = 64 * 64 / 2, kReticleBytes = kReticlePixels + 16 * 4;
         enum Reticle { ReticleCircle = 0, ReticleDot = 1 };
-        std::atomic<int> g_reticle{ReticleCircle};
+        std::atomic<int> g_reticle{ReticleDot};
         uint32_t g_reticleAt = 0;            // the pixels the original below was read from (0: none)
         uint8_t g_reticleOriginal[kReticleBytes];
         uint8_t g_reticleDot[kReticleBytes];     // a small white dot with a soft dark rim, for the aspect below
@@ -431,7 +431,7 @@ namespace vcs::aim
                  "with a dot. Dot: a small white dot alone, with a thin dark rim so it shows on a bright sky.";
         s.type = settings::Type::Choice;
         s.choices = {{"Circle", ReticleCircle}, {"Dot", ReticleDot}};
-        s.defaultValue = ReticleCircle;
+        s.defaultValue = ReticleDot;
         s.env = "VCS_RETICLE";
         s.onChange = [](int v) { g_reticle.store(v, std::memory_order_relaxed); };
         settings::add(s);

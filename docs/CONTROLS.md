@@ -70,9 +70,9 @@ game-internals.md 12c):
   third of its throw takes the aim **free from there** (the lock lets go for two frames, then the circle starts where
   the lock-on camera looked) - GTA V's assisted aim. With no one to lock on to after six frames it is free aim at
   once. Off: free aim only (the player's report, 2026-11-12: free aim on the DualSense had lost the lock-on).
-- **Free aim reticle** (Enhancements > Combat; Circle by default): **Dot** shows a small white dot with a thin dark
+- **Free aim reticle** (Enhancements > Combat; Dot by default): **Dot** shows a small white dot with a thin dark
   rim instead of the game's circle with a dot (made narrower in the texture by the picture's widening, so it stays
-  round in widescreen - the game stretches the sprite sideways) - the game's own texture (`sitem16`, game-internals.md 12c) rewritten
+  round in widescreen - the game stretches the circle sprite sideways) - the game's own texture (`sitem16`, game-internals.md 12c) rewritten
   in memory while it is on, put back when it goes back to Circle. `VCS_RETICLE=0|1`.
 - It is the game's own free aim (R1 then L3 on the PS2: the left stick moves an aiming point while Vic stands still),
   driven so that Vic can move and the mouse aims; `VCS_FREEAIM=0` leaves it out entirely.

@@ -201,15 +201,15 @@ class Check:
             rec = g.u32(0x6EDD94)
             return g.peek(g.u32(g.u32(rec) + 8) + 0x800, 4).hex()
 
-        circle = clut0()
-        self.setting("enhance.reticle", 1)
-        g.wait_frames(5)
         dot = clut0()
         self.setting("enhance.reticle", 0)
         g.wait_frames(5)
+        circle = clut0()
+        self.setting("enhance.reticle", 1)
+        g.wait_frames(5)
         back = clut0()
-        self.ok("free aim reticle: the dot, then the circle back", circle == "ffffff80" and dot == "00000000" and back == circle,
-                "circle %s dot %s back %s" % (circle, dot, back))
+        self.ok("free aim reticle: default dot, circle, then dot back", dot == "00000000" and circle == "ffffff80" and back == dot,
+                "dot %s circle %s back %s" % (dot, circle, back))
 
     def held(self, *keys):
         for k in keys:
