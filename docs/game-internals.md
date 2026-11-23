@@ -2795,6 +2795,7 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   `detailed` filters hidden slot records via `0x8000` (`isHidden(rec)`). Verified across noon (`12:00`), afternoon
   (`16:00`), and night (`22:00`) `R=3` vs `R=0` plus `VCS_HD_SAME_ID_DUPES=1` fallback, `tools/hdworld_missions.py`
   (6/6 PASS), and `tools/cruise.py` (`VU1 reserved: 0`, `list record: 0`, `hdworld-draw: 0`, `hddupe extra: 0`).
+- **Extra-cell hidden (`0x8000`) records and same-frame switch sync** (Fort Baxter blurry ground slab at `(-1640, -150)` at `07:01`, #90): an extra cell's sector list can carry records with bit 15 (`0x8000`, `flag 1`: hidden by that cell in disc data — notably low-detail Fort Baxter ground sectors `5889` gid `4705` at `-1700,-194 r 162` and `5890` gid `4706` at `-1687,-78 r 127` in nearby `cell 7,16` / `cell 6,15`). Previously `build()` overrode `if (hide < 0) hide = 0;` for every extra-cell record whose `switched(id) < 0`; whenever `replaced(id, r, true)` returned `false` (for example during the `07:00` / `20:00` `hourWindow(20, 7)` reload wave when `condMask` unloads extra cells, or when switching `world.hd_radius`), those coarse `flag 1` slabs were un-hidden and drawn over the detailed courtyard roads, burying characters' boots up to the ankles. `build()` now keeps `(rd16(r) & 0x8000u)` hidden (`hide = 1`, skipped by `added`/fades and `detailed`, while claiming `taken` so farther extra cells cannot re-introduce them) unless `switched(id) == 0` or `keepLod` overrides it (`VCS_HD_SHOW_HIDDEN_EXTRA=1` restores the override for A/B comparison). `syncCondCells()` is also shared between `update()` and `install()` so script switches toggled after `chooseHook` (`MEN_C6` `kind=9`) unload stale conditional extra cells before `drawHook` on the same frame.
 - **Entries emptied by a slot drop** (the player's "buildings switching between high and low quality", 2026-11-12):
   dropping a slot, the game clears the table entries that still hold that slot's copy (`FUN_0023CED0`) - gids our
   extra cells hold too. Until our next re-entry those sectors were left out of the built list, then back: models
@@ -3649,7 +3650,11 @@ timing at 60 fps; independent timing at 60 / 144 fps got through, by luck (below
     hip); with the cap at 0 that turn does nothing. (5) Three ways to use these were played and none kept: the keys
     keeping one direction through every turn of the camera (the mouse then did not steer: "disconnected"), the keys
     following a camera that held still and then turned slowly, and the camera coming round behind where he travels
-    with the keys keeping their heading through that turn only.
+    with the keys keeping their heading through that turn only. **2026-11-23 (`src/game/vcs_footcam.cpp`):** Kept the
+    clean GTA PC movement model only (`mouse.camera_only` removed after playtesting showed locked world-heading WASD felt
+    disconnected): `CCam::FollowPed` (`0x0029DAB0`) suppresses PS2 auto-swing (`kSwingCap = 0`) and translates camera source
+    points (`+0x220/+0x230`) so `A`/`D`/`S` strafing holds camera angle while idle 360° orbit and `W` camera steering work
+    natively; `VCS_FOOTCAM=0` restores PS2 auto-swing for A/B comparison.
 - **The camera update** (2026-10-30, for the trainer's free camera; FUN_00378dd8 decompiled with `tools/eedecomp.py`):
   FUN_00378dd8 = CCamera::Process. At `0x378FC0` it calls **FUN_00294540 = CCam::Process** on the active CCam
   (`TheCamera + 0x70 + ActiveCam x 0x270`, ActiveCam = byte `TheCamera + 0x50`; the only caller), then

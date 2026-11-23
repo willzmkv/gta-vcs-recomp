@@ -148,15 +148,19 @@ namespace screens
         {
             app.settings.language = "pt";
             app.settings.languageChosen = true;
+            app.setGameLanguagePt(true);
             sound::play(sound::Sfx::Nav);
             app.saveSettings();
+            toast("Idioma: Português do Brasil (Launcher e Jogo).");
         }
         if (drawLangPill("#lang-en", "ENGLISH", enBtn, !isPt) && isPt)
         {
             app.settings.language = "en";
             app.settings.languageChosen = true;
+            app.setGameLanguagePt(false);
             sound::play(sound::Sfx::Nav);
             app.saveSettings();
+            toast("Language: English (Launcher and Game).");
         }
     }
 

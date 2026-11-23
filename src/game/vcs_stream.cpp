@@ -373,7 +373,8 @@ namespace vcs
                         char text[64] = {};
                         std::memcpy(text, rdram + (rd32(rdram, entry) & PS2_RAM_MASK), sizeof(text) - 1);
                         std::string disc = text;
-                        disc = disc.substr(disc.find_last_of('\\') + 1);
+                        if (const size_t sep = disc.find_last_of("\\/"); sep != std::string::npos)
+                            disc = disc.substr(sep + 1);
                         disc = disc.substr(0, disc.find(';'));
                         if (disc.size() == f.name.size() &&
                             std::equal(disc.begin(), disc.end(), f.name.begin(), [](char a, char b) { return std::toupper(static_cast<unsigned char>(a)) == std::toupper(static_cast<unsigned char>(b)); }))
@@ -734,6 +735,17 @@ namespace vcs
             ++g_filesGeneration; // resolved at the next read - also an empty list: the game's records put back
         }
         redressPlayer(); // (a mod with the player's model or textures: in the game at once)
+    }
+
+    bool hasStreamOverride(const std::string &name)
+    {
+        std::lock_guard<std::mutex> lock(g_filesMutex);
+        for (const StreamFile &f : g_files)
+            if (f.name.size() == name.size() &&
+                std::equal(f.name.begin(), f.name.end(), name.begin(),
+                           [](char a, char b) { return std::toupper(static_cast<unsigned char>(a)) == std::toupper(static_cast<unsigned char>(b)); }))
+                return true;
+        return false;
     }
 
     bool installStreamHooks(PS2Runtime &runtime)

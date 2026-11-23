@@ -554,8 +554,8 @@ namespace vcs::aim
             const float dt = std::clamp(rdf(kTimeStep), 0.05f, 3.4f) / 50.0f;
             const float turn = in.turn + in.turnRate * kStickRate * dt;
             const float tilt = in.tilt + in.tiltRate * kStickRate * dt;
-            // signed: wrapped into 0..2 pi a turn right of the middle became the limit on the left (the user's report)
-            wrf(cam + kCamBeta, std::remainder(rdf(cam + kCamBeta) + turn, 6.2831855f));
+            // signed (clamped within [-pi, pi] so large flicks hit the attachment limit instead of wrapping across +-pi)
+            wrf(cam + kCamBeta, std::clamp(rdf(cam + kCamBeta) + turn, -3.1415926f, 3.1415926f));
             wrf(cam + kCamAlpha, rdf(cam + kCamAlpha) + tilt);
             return out;
         }

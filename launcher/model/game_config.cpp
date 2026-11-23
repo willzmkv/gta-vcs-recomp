@@ -78,6 +78,8 @@ namespace launcher
     bool GameConfig::loadIni(const fs::path &iniPath)
     {
         graphicsConfigured = false;
+        explicitModKeys.clear();
+        modStates.clear();
         bool promptsSeen = false; // enhance.prompts read: the old enhance.button_prompts no longer counts
         std::ifstream in(iniPath);
         if (!in)
@@ -104,7 +106,17 @@ namespace launcher
             else if (key == "display.fps") displayFps = parseInt(val, displayFps);
             else if (key == "display.vsync") displayVsync = std::clamp(parseInt(val, displayVsync), 0, 2);
             else if (key == "display.fps_counter") displayFpsCounter = std::clamp(parseInt(val, displayFpsCounter), 0, 4);
-            else if (key == "display.renderer") displayRenderer = std::clamp(parseInt(val, displayRenderer), 0, 2);
+            else if (key == "display.renderer")
+            {
+                // UI index: 0 = D3D11, 1 = D3D12, 2 = Vulkan; vcs.ini stores rhi::Backend (0 = D3D11, 1 = Vulkan, 3 = D3D12).
+                const int raw = parseInt(val, -1);
+                if (raw == 0)
+                    displayRenderer = 0;
+                else if (raw == 3)
+                    displayRenderer = 1;
+                else if (raw == 1)
+                    displayRenderer = 2;
+            }
             else if (key == "display.scale") displayScale = std::clamp(parseInt(val, displayScale), 0, 8);
             else if (key == "display.msaa") displayMsaa = std::clamp(parseInt(val, displayMsaa), 1, 8);
             else if (key == "display.aniso") displayAniso = std::clamp(parseInt(val, displayAniso), 0, 16);
@@ -163,13 +175,22 @@ namespace launcher
             else if (key == "pad.ds_speaker" || key == "dualsense.speaker") dualsenseSpeaker = std::clamp(parseInt(val, dualsenseSpeaker), 0, 2);
             else if (key == "mouse.camera") mouseCamera = std::clamp(parseInt(val, mouseCamera), 0, 1);
             else if (key == "mouse.sensitivity") mouseSensitivity = std::clamp(parseInt(val, mouseSensitivity), 10, 400);
+            else if (key == "mouse.car_sensitivity") mouseCarSensitivity = std::clamp(parseInt(val, mouseCarSensitivity), 10, 400);
+            else if (key == "mouse.car_return")
+            {
+                const int v = parseInt(val, mouseCarReturn);
+                mouseCarReturn = (v < 0) ? -1 : std::clamp(v, 5, 50);
+            }
             else if (key == "mouse.free_aim") mouseFreeAim = std::clamp(parseInt(val, mouseFreeAim), 0, 1);
             else if (key == "mouse.invert_y") mouseInvertY = std::clamp(parseInt(val, mouseInvertY), 0, 1);
             else if (key == "mouse.wheel") mouseWheel = std::clamp(parseInt(val, mouseWheel), 0, 1);
             else if (key == "mods.enabled") modsEnabled = std::clamp(parseInt(val, modsEnabled), 0, 1);
             else if (key == "graphics.texture_replacements") graphicsTextureReplacements = std::clamp(parseInt(val, graphicsTextureReplacements), 0, 1);
             else if (key.rfind("mods.", 0) == 0)
+            {
+                explicitModKeys.insert(key);
                 modStates[key] = parseInt(val, 1) ? 1 : 0;
+            }
         }
         for (ModEntry &m : mods)
             if (auto it = modStates.find(m.key); it != modStates.end())
@@ -188,7 +209,7 @@ namespace launcher
             {"display.fps", std::to_string(displayFps)},
             {"display.vsync", std::to_string(displayVsync)},
             {"display.fps_counter", std::to_string(displayFpsCounter)},
-            {"display.renderer", std::to_string(displayRenderer)},
+            {"display.renderer", std::to_string(displayRenderer == 1 ? 3 : displayRenderer == 2 ? 1 : 0)},
             {"display.scale", std::to_string(displayScale)},
             {"display.msaa", std::to_string(displayMsaa)},
             {"display.aniso", std::to_string(displayAniso)},
@@ -237,6 +258,8 @@ namespace launcher
             {"pad.ds_speaker", std::to_string(dualsenseSpeaker)},
             {"mouse.camera", std::to_string(mouseCamera)},
             {"mouse.sensitivity", std::to_string(mouseSensitivity)},
+            {"mouse.car_sensitivity", std::to_string(mouseCarSensitivity)},
+            {"mouse.car_return", std::to_string(mouseCarReturn)},
             {"mouse.free_aim", std::to_string(mouseFreeAim)},
             {"mouse.invert_y", std::to_string(mouseInvertY)},
             {"mouse.wheel", std::to_string(mouseWheel)},
@@ -571,7 +594,7 @@ namespace launcher
             ".chk", ".xtx", ".gxt", ".dat", ".cfg", ".ped", ".ide", ".ipl", ".zon", ".cut",
             ".dir", ".img", ".col", ".ifp", ".txd", ".dff", ".fxt", ".scm", ".adf", ".vag",
             ".nam", ".sfx", ".raw", ".sdt", ".wav", ".ogg", ".mp3", ".png", ".dds", ".p2s",
-            ".prx", ".ovl", ".rel", ".vcs", ".mdl"
+            ".prx", ".ovl", ".rel", ".vcs", ".mdl", ".psp"
         };
         static const std::set<std::string> kIncompatibleCodeExts = {
             ".asi", ".dll", ".cleo", ".cs", ".csa", ".csi", ".flt", ".sf", ".elf", ".so"
@@ -590,7 +613,11 @@ namespace launcher
                 continue;
             const std::string ext = toLowerAscii(pathText(it->path().extension()));
             if (kCompatibleExts.count(ext))
+            {
                 ++entry.compatibleCount;
+                if (ext == ".gxt")
+                    entry.hasGxt = true;
+            }
             else if (kIncompatibleCodeExts.count(ext))
             {
                 ++codeFiles;
@@ -642,20 +669,27 @@ namespace launcher
         return entry;
     }
 
+    fs::path GameConfig::modloaderDir(const fs::path &rootDir, const fs::path &buildDir)
+    {
+        fs::path dir = rootDir / "modloader";
+        std::error_code ec;
+        if (!fs::is_directory(dir, ec) && !buildDir.empty() && fs::is_directory(buildDir / "modloader", ec))
+            dir = buildDir / "modloader";
+        return dir;
+    }
+
     void GameConfig::scanMods(const fs::path &rootDir, const fs::path &buildDir)
     {
         mods.clear();
-        fs::path modloaderDir = rootDir / "modloader";
+        const fs::path dir = modloaderDir(rootDir, buildDir);
         std::error_code ec;
-        if (!fs::is_directory(modloaderDir, ec) && fs::is_directory(buildDir / "modloader", ec))
-            modloaderDir = buildDir / "modloader";
-        if (!fs::is_directory(modloaderDir, ec))
-            fs::create_directories(modloaderDir, ec);
+        if (!fs::is_directory(dir, ec))
+            fs::create_directories(dir, ec);
 
         // Read priorities from modloader/modloader.ini ([Profiles.Default.Priority])
         std::map<std::string, int> priorities;
         {
-            std::ifstream in(modloaderDir / "modloader.ini");
+            std::ifstream in(dir / "modloader.ini");
             std::string line, section;
             while (std::getline(in, line))
             {
@@ -677,7 +711,7 @@ namespace launcher
             }
         }
 
-        for (fs::directory_iterator it(modloaderDir, ec), end; it != end && !ec; it.increment(ec))
+        for (fs::directory_iterator it(dir, ec), end; it != end && !ec; it.increment(ec))
         {
             if (!it->is_directory(ec))
                 continue;
@@ -690,7 +724,7 @@ namespace launcher
             if (auto sit = modStates.find(entry.key); sit != modStates.end())
                 entry.enabled = sit->second != 0;
             else
-                entry.enabled = entry.compat != ModCompat::Incompatible;
+                entry.enabled = entry.compat != ModCompat::Incompatible && entry.key != "mods.pt_br__vcs_rec_";
             modStates[entry.key] = entry.enabled ? 1 : 0;
             mods.push_back(std::move(entry));
         }
@@ -702,14 +736,39 @@ namespace launcher
         });
     }
 
+    bool GameConfig::hasExternalGxtMod() const
+    {
+        for (const ModEntry &m : mods)
+            if (m.enabled && m.hasGxt && m.key != "mods.pt_br__vcs_rec_")
+                return true;
+        return false;
+    }
+
+    void GameConfig::setModEnabledByKey(const std::string &key, bool enabled)
+    {
+        modStates[key] = enabled ? 1 : 0;
+        explicitModKeys.insert(key);
+        for (ModEntry &m : mods)
+            if (m.key == key)
+                m.enabled = enabled;
+    }
+
+    bool GameConfig::modEnabledByKey(const std::string &key, bool fallback) const
+    {
+        for (const ModEntry &m : mods)
+            if (m.key == key)
+                return m.enabled;
+        if (auto it = modStates.find(key); it != modStates.end())
+            return it->second != 0;
+        return fallback;
+    }
+
     bool GameConfig::saveModPriorities(const fs::path &rootDir, const fs::path &buildDir) const
     {
-        fs::path modloaderDir = rootDir / "modloader";
+        const fs::path dir = modloaderDir(rootDir, buildDir);
         std::error_code ec;
-        if (!fs::is_directory(modloaderDir, ec) && fs::is_directory(buildDir / "modloader", ec))
-            modloaderDir = buildDir / "modloader";
-        fs::create_directories(modloaderDir, ec);
-        std::ofstream out(modloaderDir / "modloader.ini", std::ios::trunc | std::ios::binary);
+        fs::create_directories(dir, ec);
+        std::ofstream out(dir / "modloader.ini", std::ios::trunc | std::ios::binary);
         if (!out)
             return false;
         out << "; Gerenciado pelo VCS.rec Launcher\n"

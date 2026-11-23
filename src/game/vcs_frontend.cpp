@@ -21,6 +21,7 @@
 // alignment included). The map is panned by its own offset (+0xE4 / +0xE8, menu units).
 #include "game/vcs_frontend.h"
 
+#include "game/vcs_stream.h"
 #include "platform/platform.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -998,16 +999,140 @@ namespace vcs::frontend
 
     uint32_t drawingItem(uint32_t sp) { return g_inMenu && g_item && sp < g_itemSp ? g_item : 0u; }
 
+    namespace
+    {
+        struct MasterTabState
+        {
+            uint32_t page = 0;
+            struct Entry
+            {
+                uint32_t item = 0;
+                int32_t origX = 0;
+            };
+            std::vector<Entry> orig;
+            std::array<float, 2> rowWidth{};
+            std::array<bool, 2> rowSpaced{};
+        } g_masterTabs;
+        bool g_tabsSpacingEnabled = true;
+
+        int32_t itemX(uint32_t item) { return static_cast<int32_t>(rd32(item + 0x10)); }
+        void setItemX(uint32_t item, int32_t x) { wr32(item + 0x10, static_cast<uint32_t>(x)); }
+        const Drawn *drawnNow(uint32_t item)
+        {
+            for (const Drawn &d : g_drawing)
+                if (d.item == item)
+                    return &d;
+            return nullptr;
+        }
+
+        // Space MASTER bar tabs in 480x272 virtual coords when translated strings collide (e.g. PT-BR/Spanish),
+        // unless disabled via VCS_MENU_TABS=0 or replaced by a mod supplying MASTER.PSP.
+        void spaceMasterTabs()
+        {
+            if (!g_rdram || !rd8(kManagerBuilt) || !menuUp())
+                return;
+            const uint32_t root = rd32(kManager);
+            if (!inRam(root))
+                return;
+            const bool skip = !g_tabsSpacingEnabled || vcs::hasStreamOverride("MASTER.PSP");
+            if (skip)
+            {
+                if (g_masterTabs.page == root)
+                {
+                    for (const auto &e : g_masterTabs.orig)
+                        if (inRam(e.item))
+                            setItemX(e.item, e.origX);
+                    g_masterTabs = {};
+                }
+                return;
+            }
+            if (g_masterTabs.page != root)
+            {
+                g_masterTabs = {};
+                g_masterTabs.page = root;
+                for (uint32_t it : pointers(root + 0x2C))
+                    g_masterTabs.orig.push_back({it, itemX(it)});
+            }
+
+            const auto findEntry = [&](const char *name) -> std::pair<uint32_t, int32_t> {
+                for (const auto &e : g_masterTabs.orig)
+                    if (itemName(e.item) == name && rd8(e.item + 0x24))
+                        return {e.item, e.origX};
+                return {0, 0};
+            };
+            const auto adjustRow = [&](int rowIdx, std::initializer_list<const char *> names, float minX, float maxX) {
+                std::vector<uint32_t> items;
+                std::vector<int32_t> origXs;
+                std::vector<const Drawn *> boxes;
+                for (const char *n : names)
+                {
+                    const auto [it, ox] = findEntry(n);
+                    // Read current frame's g_drawing (not stale g_drawn) so bias matches itemX(it) without lag.
+                    const Drawn *d = it ? drawnNow(it) : nullptr;
+                    if (!it || !d || !d->box.any())
+                        return;
+                    items.push_back(it);
+                    origXs.push_back(ox);
+                    boxes.push_back(d);
+                }
+                if (items.size() < 2)
+                    return;
+                constexpr float kToVirtual = 480.0f / 640.0f;
+                float curMinGap = 1e9f, origMinGap = 1e9f, totalW = 0.0f;
+                std::vector<float> vw(items.size()), bias(items.size()), origLeft(items.size());
+                for (size_t i = 0; i < items.size(); ++i)
+                {
+                    vw[i] = (boxes[i]->box.x1 - boxes[i]->box.x0) * kToVirtual;
+                    bias[i] = boxes[i]->box.x0 * kToVirtual - static_cast<float>(itemX(items[i]));
+                    origLeft[i] = static_cast<float>(origXs[i]) + bias[i];
+                    totalW += vw[i];
+                    if (i + 1 < items.size())
+                        curMinGap = std::min(curMinGap, (boxes[i + 1]->box.x0 - boxes[i]->box.x1) * kToVirtual);
+                }
+                for (size_t i = 0; i + 1 < items.size(); ++i)
+                    origMinGap = std::min(origMinGap, origLeft[i + 1] - (origLeft[i] + vw[i]));
+
+                if (origMinGap >= 6.0f)
+                {
+                    for (size_t i = 0; i < items.size(); ++i)
+                        if (itemX(items[i]) != origXs[i])
+                            setItemX(items[i], origXs[i]);
+                    g_masterTabs.rowSpaced[rowIdx] = false;
+                    return;
+                }
+                if (g_masterTabs.rowSpaced[rowIdx] && curMinGap >= 6.0f && std::fabs(totalW - g_masterTabs.rowWidth[rowIdx]) < 6.0f)
+                    return;
+
+                const float avail = maxX - minX;
+                const float gap = std::clamp((avail - totalW) / static_cast<float>(items.size() - 1), 3.0f, 16.0f);
+                const float span = totalW + gap * static_cast<float>(items.size() - 1);
+                float cur = std::clamp(0.5f * (minX + maxX - span), minX, std::max(minX, maxX - span));
+                for (size_t i = 0; i < items.size(); ++i)
+                {
+                    setItemX(items[i], static_cast<int32_t>(std::lround(cur - bias[i])));
+                    cur += vw[i] + gap;
+                }
+                g_masterTabs.rowWidth[rowIdx] = totalW;
+                g_masterTabs.rowSpaced[rowIdx] = true;
+            };
+            adjustRow(0, {"Map_t", "Brief_t", "Game_t", "Stats_t"}, 90.0f, 388.0f);
+            adjustRow(1, {"Controls_t", "Audio_t", "Display_t"}, 112.0f, 388.0f);
+        }
+    }
+
     void onFrameKick()
     {
         g_inMenu = false;
         g_item = 0;
         hideWidescreenRow();
+        spaceMasterTabs();
     }
 
     void install(PS2Runtime &runtime)
     {
         g_rdram = runtime.memory().getRDRAM();
+        const char *tabsEnv = std::getenv("VCS_MENU_TABS");
+        g_tabsSpacingEnabled = !(tabsEnv && tabsEnv[0] == '0');
         const char *env = std::getenv("VCS_MENU_MOUSE");
         g_mouseOn = !(env && env[0] == '0');
         const char *hide = std::getenv("VCS_HIDE_WIDESCREEN"), *wide = std::getenv("VCS_WIDESCREEN");

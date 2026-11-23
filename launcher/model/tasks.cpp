@@ -372,6 +372,8 @@ namespace launcher
         loadSettings();
         gameConfig.loadIni(build / "vcs.ini");
         gameConfig.scanMods(root, build);
+        if (settings.languageChosen && !gameConfig.hasModKeyInIni(kPtBrModKey))
+            gameConfig.setModEnabledByKey(kPtBrModKey, isPt());
 
         // the disc vcs.exe would use
         std::string iniIso;
@@ -586,7 +588,9 @@ namespace launcher
             build = pathFrom(t.result["path"].str());
             loadSettings();
         gameConfig.loadIni(build / "vcs.ini");
-        gameConfig.scanMods(root, build); // launcher.ini came along
+        gameConfig.scanMods(root, build);
+        if (settings.languageChosen && !gameConfig.hasModKeyInIni(kPtBrModKey))
+            gameConfig.setModEnabledByKey(kPtBrModKey, isPt()); // launcher.ini came along
             say(t.result["old_built"].boolean()
                     ? "Build folder changed. The game is built again there; the old folder can be deleted afterwards: " +
                           t.result["previous"].str()
@@ -872,6 +876,10 @@ namespace launcher
         gameLog = build / "run" / "launcher_game.log";
         Process::Options options;
         options.cwd = build;
+        std::error_code ec;
+        const fs::path modsDir = GameConfig::modloaderDir(root, build);
+        if (fs::is_directory(modsDir, ec))
+            options.env.push_back({"VCS_MODLOADER_DIR", pathText(modsDir)});
         options.outputFile = gameLog;
         options.killOnClose = false; // the game plays on when the launcher closes
         game = std::make_unique<Process>();
@@ -1050,6 +1058,15 @@ namespace launcher
         };
         writeIniFile(build / "launcher.ini", true);
         writeIniFile(root / "launcher.ini", false);
+    }
+
+    bool App::isGameLanguagePt() const { return gameConfig.modEnabledByKey(kPtBrModKey, false); }
+
+    void App::setGameLanguagePt(bool ptBr, bool save)
+    {
+        gameConfig.setModEnabledByKey(kPtBrModKey, ptBr);
+        if (save)
+            saveGameConfig();
     }
 
     void App::saveGameConfig()

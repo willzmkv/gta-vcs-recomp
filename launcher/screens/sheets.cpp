@@ -406,8 +406,9 @@ namespace screens
                                 tr("< Abrir Pasta >", "< Open Folder >"), 0, &hov))
             {
                 std::error_code ec;
-                fs::create_directories(app.root / "modloader", ec);
-                launcher::openFolder(app.root / "modloader");
+                const fs::path modsDir = launcher::GameConfig::modloaderDir(app.root, app.build);
+                fs::create_directories(modsDir, ec);
+                launcher::openFolder(modsDir);
             }
             if (hov)
             {
@@ -1368,6 +1369,72 @@ namespace screens
             }
             {
                 bool hov = false;
+                if (ui::vcCycleRow("#ctrl-opt-moufreeaim", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Mira Livre com o Mouse (Botão Direito)", "Mouse Free Aim (Right Click)"),
+                                   {tr("Não (Trava PS2)", "Off (PS2 Lock-On)"), tr("Sim (Mira PC)", "On (PC Crosshair)")},
+                                   cfg.mouseFreeAim, &hov))
+                    changed = true;
+                if (hov)
+                {
+                    inspector.title = tr("MIRA LIVRE COM O MOUSE", "MOUSE FREE AIM");
+                    inspector.desc = tr("Com armas de fogo, segurar o botão direito abre a mira livre guiada pelo mouse em vez da trava automática de PS2.",
+                                        "With firearms, holding right click activates mouse-steered free aim with reticle instead of PS2 lock-on.");
+                    inspector.badge = tr("RECOMENDADO: SIM", "RECOMMENDED: ON");
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
+                if (ui::vcCycleRow("#ctrl-opt-mouinv", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Inverter Eixo Y do Mouse", "Invert Mouse Up / Down"),
+                                   {tr("Não", "Off"), tr("Sim", "On")}, cfg.mouseInvertY, &hov))
+                    changed = true;
+                if (hov)
+                {
+                    inspector.title = tr("INVERTER EIXO Y DO MOUSE", "INVERT MOUSE UP / DOWN");
+                    inspector.desc = tr("Inverte o movimento vertical da câmera ao mover o mouse para frente ou para trás.",
+                                        "Inverts vertical camera pitch when moving the mouse forward or backward.");
+                    inspector.badge = "AXIS Y";
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
+                if (ui::vcSliderRow("#ctrl-opt-moucarsens", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                    tr("Sensibilidade da Câmera em Veículos", "Car Camera Sensitivity"),
+                                    cfg.mouseCarSensitivity, 10, 400, 5, "%", &hov))
+                    changed = true;
+                if (hov)
+                {
+                    inspector.title = tr("SENSIBILIDADE DA CÂMERA EM VEÍCULOS", "CAR CAMERA SENSITIVITY");
+                    inspector.desc = tr("Multiplicador extra da velocidade do mouse enquanto dirige carros, motos ou barcos.",
+                                        "Multiplier applied to mouse camera sensitivity while driving vehicles.");
+                    inspector.badge = "CAR CAMERA";
+                }
+                y += rowH;
+            }
+            {
+                static const int kCarReturnVals[] = {5, 10, 15, 20, 30, 50, -1};
+                int retIdx = indexInList(cfg.mouseCarReturn, kCarReturnVals, 7, 2);
+                bool hov = false;
+                if (ui::vcCycleRow("#ctrl-opt-moucarret", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Retorno da Câmera em Veículos", "Car Camera Return"),
+                                   {"0.5 s", "1 s", "1.5 s", "2 s", "3 s", "5 s", tr("Nunca", "Never")}, retIdx, &hov))
+                {
+                    cfg.mouseCarReturn = kCarReturnVals[retIdx];
+                    changed = true;
+                }
+                if (hov)
+                {
+                    inspector.title = tr("RETORNO DA CÂMERA EM VEÍCULOS", "CAR CAMERA AUTO-CENTER");
+                    inspector.desc = tr("Tempo após soltar o mouse para a câmera retornar suavemente atrás do veículo.",
+                                        "Delay after mouse stops moving before the camera smoothly centers behind the vehicle.");
+                    inspector.badge = "AUTO-CENTER";
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
                 if (ui::vcCycleRow("#ctrl-opt-mouwheel", {tableR.x, y, tableR.w, rowH}, rowIdx++,
                                    tr("Roda do Mouse (Troca de Armas & Zoom)", "Mouse Wheel Weapons & Zoom"),
                                    {tr("Não", "Off"), tr("Sim", "On")}, cfg.mouseWheel, &hov))
@@ -1400,7 +1467,9 @@ namespace screens
                     cfg.dualsenseSpeaker = 0;
                     cfg.mouseCamera = 1;
                     cfg.mouseSensitivity = 100;
-                    cfg.mouseFreeAim = 0;
+                    cfg.mouseCarSensitivity = 100;
+                    cfg.mouseCarReturn = 15;
+                    cfg.mouseFreeAim = 1;
                     cfg.mouseInvertY = 0;
                     cfg.mouseWheel = 1;
                     changed = true;
@@ -1666,7 +1735,7 @@ namespace screens
                     inspector.title = tr("API DE RENDERIZAÇÃO", "GRAPHICS BACKEND API");
                     inspector.desc = tr("Direct3D 12 oferece menor overhead de CPU e suporte ao Cache de Shaders SCSKiller; D3D11 é o mais compatível.",
                                         "Direct3D 12 offers lower CPU overhead and SCSKiller PSO Shader Cache support; D3D11 has widest compatibility.");
-                    inspector.badge = (cfg.displayRenderer == 1) ? "DIRECT3D 12" : "DIRECT3D 11";
+                    inspector.badge = (cfg.displayRenderer == 2) ? "VULKAN" : (cfg.displayRenderer == 1 ? "DIRECT3D 12" : "DIRECT3D 11");
                 }
                 y += rowH;
             }
@@ -1777,6 +1846,11 @@ namespace screens
                                     tr("< Restaurar >", "< Restore >"), 0, &hov))
                 {
                     cfg.applyPreset(launcher::GraphicsPreset::Medium);
+#ifdef _WIN32
+                    cfg.displayRenderer = 1;
+#else
+                    cfg.displayRenderer = 2;
+#endif
                     changed = true;
                     toast(tr("Configurações restauradas para o padrão Médio.", "Settings restored to Medium defaults."));
                 }
@@ -2050,6 +2124,36 @@ namespace screens
                 y += rowH;
             }
             {
+                const bool ptBrModInstalled = cfg.hasModKeyInIni(launcher::App::kPtBrModKey) ||
+                                              std::any_of(cfg.mods.begin(), cfg.mods.end(),
+                                                          [](const launcher::ModEntry &m) { return m.key == launcher::App::kPtBrModKey; });
+                const bool extGxt = cfg.hasExternalGxtMod();
+                int gameLangIdx = app.isGameLanguagePt() ? 1 : 0;
+                bool hov = false;
+                if (ui::vcCycleRow("#vc-aud-gamelang", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Idioma do Jogo", "Game Language"),
+                                   {tr("English (Original)", "English (Original)"), "Português (Brasil — PT-BR)"},
+                                   gameLangIdx, &hov))
+                {
+                    app.setGameLanguagePt(gameLangIdx == 1);
+                }
+                if (hov)
+                {
+                    inspector.title = tr("IDIOMA DO JOGO (TEXTOS E LEGENDAS)", "GAME LANGUAGE (TEXTS & SUBTITLES)");
+                    if (extGxt)
+                        inspector.desc = tr("Outro mod de idioma (.GXT) está ativo na pasta modloader/ e pode sobrescrever os textos do jogo.",
+                                            "Another translation mod (.GXT) is currently active in modloader/ and may override in-game text.");
+                    else if (!ptBrModInstalled)
+                        inspector.desc = tr("Pasta 'PT-BR (VCS.rec)' não encontrada em modloader/. Sem ela o jogo iniciará em Inglês.",
+                                            "Folder 'PT-BR (VCS.rec)' was not found in modloader/. Without it, the game starts in English.");
+                    else
+                        inspector.desc = tr("Ativa ou desativa automaticamente o pacote de tradução PT-BR (VCS.rec) antes de iniciar o jogo.",
+                                            "Automatically enables or disables the PT-BR (VCS.rec) translation mod in vcs.ini before launch.");
+                    inspector.badge = extGxt ? tr("MOD EXTERNO (.GXT)", "EXTERNAL MOD (.GXT)") : (gameLangIdx == 1 ? "PT-BR MOD" : "ENGLISH");
+                }
+                y += rowH;
+            }
+            {
                 bool hov = false;
                 if (ui::vcSliderRow("#vc-aud-vol", {tableR.x, y, tableR.w, rowH}, rowIdx++,
                                     tr("Volume Principal", "Master Volume"),
@@ -2098,7 +2202,7 @@ namespace screens
                 bool hov = false;
                 // the game's enhance.prompts values in the order shown (Nintendo Switch is the game's 5, after Keyboard)
                 static const int kPromptValues[] = {0, 1, 2, 3, 5, 4};
-                int promptIdx = indexInList(cfg.enhanceButtonPrompts, kPromptValues, 6, 0);
+                int promptIdx = indexInList(cfg.enhanceButtonPrompts, kPromptValues, 6, 1);
                 if (ui::vcCycleRow("#vc-aud-prompts", {tableR.x, y, tableR.w, rowH}, rowIdx++,
                                    tr("Ícones de Botões do Controle", "Controller Button Prompts"),
                                    {"Original (PS2)", tr("Automático", "Automatic"), "PlayStation", "Xbox", "Nintendo Switch",

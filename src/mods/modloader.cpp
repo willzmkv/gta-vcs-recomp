@@ -299,7 +299,7 @@ namespace vcs::mods
                 else if (it->is_regular_file(ec))
                 {
                     const std::string stem = utf8(it->path().stem()), ext = lower(it->path().extension().string());
-                    if (ext == ".mdl" || ext == ".xtx" || ext == ".gxt" || ext == ".scm" || ext == ".dff" || ext == ".txd" ||
+                    if (ext == ".mdl" || ext == ".xtx" || ext == ".gxt" || ext == ".scm" || ext == ".psp" || ext == ".dff" || ext == ".txd" ||
                         (stem.size() > 1 && stem[0] == '#'))
                         out.push_back(it->path());
                 }
@@ -378,7 +378,7 @@ namespace vcs::mods
                         for (const fs::path &file : list)
                         {
                             const std::string ext = lower(file.extension().string());
-                            const bool loose = ext == ".gxt" || ext == ".scm"; // a disc file, by its whole name
+                            const bool loose = ext == ".gxt" || ext == ".scm" || ext == ".psp"; // a disc file, by its whole name
                             const bool txd = ext == ".xtx" && file.stem().string()[0] != '#';
                             vcs::StreamFile f{utf8(loose ? file.filename() : file.stem()), utf8(file), m.name, m.priority, txd};
                             if (ext == ".dff" || ext == ".txd")
@@ -487,7 +487,8 @@ namespace vcs::mods
                 std::snprintf(what, sizeof(what), "Nothing in it this version reads (texture packs, GTA3PS2.IMG entries). ");
             s.help = what + utf8(m.path);
             s.type = Type::Toggle;
-            s.defaultValue = 1;
+            // Language packs stay opt-in (selected in Launcher) so fresh English installs never launch in PT-BR.
+            s.defaultValue = (m.key == "mods.pt_br__vcs_rec_") ? 0 : 1;
             s.partner = m.key + ".priority";
             s.onChange = [](int) { g_dirty = true; };
             settings::add(s);

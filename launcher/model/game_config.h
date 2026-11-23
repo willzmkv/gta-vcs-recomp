@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,7 @@ namespace launcher
         int compatibleCount = 0;
         int unsupportedCount = 0;
         bool hasTextures = false;
+        bool hasGxt = false;
         std::string summary;
         std::string detail;
     };
@@ -54,7 +56,11 @@ namespace launcher
         int displayFpsCounter = 0;   // 0..4
 
         // Graphics & Post-Process
-        int displayRenderer = 0;        // 0 = D3D11, 1 = D3D12, 2 = Vulkan
+#ifdef _WIN32
+        int displayRenderer = 1;        // 0 = D3D11, 1 = D3D12 (default on Windows), 2 = Vulkan
+#else
+        int displayRenderer = 2;        // Vulkan on Linux
+#endif
         int displayScale = 0;           // 1, 2, 3, 4, 6, 8, 0 = Match window
         int displayMsaa = 4;            // 1, 2, 4, 8
         int displayAniso = 16;          // 0, 2, 4, 8, 16
@@ -84,7 +90,7 @@ namespace launcher
         int audioOutput = 0;            // 0 = Stereo, 1 = Mono, 2 = Pro Logic II
         int displaySkipIntro = 0;       // 0 = Off, 1 = On
         int gameBackground = 0;         // 0 = Pause, 1 = Mute, 2 = Play
-        int enhanceButtonPrompts = 0;   // enhance.prompts, the game's: 0 Original (PS2), 1 Automatic, 2 PlayStation, 3 Xbox, 4 Keyboard, 5 Nintendo Switch
+        int enhanceButtonPrompts = 1;   // enhance.prompts, the game's: 0 Original (PS2), 1 Automatic, 2 PlayStation, 3 Xbox, 4 Keyboard, 5 Nintendo Switch
         int enhancePromptStyle = 0;     // enhance.prompt_style: 0 Kenney, 1 Classic
         // the subtitles (the game's defaults): enhance.subtitle_font 0 Original / 1 Oswald, _outline 0..100, _size 80..150,
         // _shadow 1 On / 0 Off, _background 0 / 25 / 50 / 75, _colour 0 Game's / 1 White
@@ -112,7 +118,9 @@ namespace launcher
         int dualsenseSpeaker = 0;       // pad.ds_speaker: 0 = Off, 1 = All sound, 2 = Police radio
         int mouseCamera = 1;            // 0 = Off, 1 = On
         int mouseSensitivity = 100;     // 10..400%
-        int mouseFreeAim = 0;           // 0 = Off, 1 = On
+        int mouseCarSensitivity = 100;  // 10..400%
+        int mouseCarReturn = 15;        // 5..50 (0.5..5.0 s), -1 = Never
+        int mouseFreeAim = 1;           // 0 = Off, 1 = On (PC default)
         int mouseInvertY = 0;           // 0 = Off, 1 = On
         int mouseWheel = 1;             // 0 = Off, 1 = On
 
@@ -125,6 +133,11 @@ namespace launcher
         void applyPadPreset(int preset);
 
         bool graphicsConfigured = false; // the last vcs.ini read held graphics settings (not a first install)
+        bool hasModKeyInIni(const std::string &key) const { return explicitModKeys.count(key) != 0; }
+        std::set<std::string> explicitModKeys; // mods.* keys present in the last vcs.ini read
+        bool hasExternalGxtMod() const;
+        void setModEnabledByKey(const std::string &key, bool enabled);
+        bool modEnabledByKey(const std::string &key, bool fallback = false) const;
         bool loadIni(const std::filesystem::path &iniPath);
         bool saveIni(const std::filesystem::path &iniPath) const;
 
@@ -140,6 +153,7 @@ namespace launcher
         void recalculateStreamingMemory();
 
         // Mod Loader scanning & priority persistence
+        static std::filesystem::path modloaderDir(const std::filesystem::path &rootDir, const std::filesystem::path &buildDir);
         static std::string normalizeModKey(std::string_view folderName);
         static ModEntry classifyModFolder(const std::filesystem::path &modDir);
         void scanMods(const std::filesystem::path &rootDir, const std::filesystem::path &buildDir);

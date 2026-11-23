@@ -1515,6 +1515,13 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `python tools/eedis.py <elf> <addr or name>` | EE disassembly with function names |
 | `python tools/minidbg.py <exe> <iso>` | catch fail-fast crashes with a stack |
 | `VCS_HD_SAME_ID_DUPES=1` | HD world: fallback to old `sameSphere()` behavior that also drops second-bucket records of the same detailed sector `id` at `r >= 20` (reproduces #36 missing Downtown construction glass) |
+| `VCS_HD_SHOW_HIDDEN_EXTRA=1` | HD world: fallback restoring the prior extra-cell `hide = 0` override on `0x8000` hidden records (reproduces #90 Fort Baxter `5889`/`5890` coarse ground overlap during `07:00`/live reloads) |
+
+## 2026-11-23 - Hotfix v1.0.06 (#90, input, prompts, menu tabs, HD world Fort Baxter LOD)
+
+- **#90 (`vcs_world_hd.cpp`):** preserved `0x8000` (`flag 1`) hidden records in extra cells unless `switched(id) == 0` or `keepLod` overrides them (`VCS_HD_SHOW_HIDDEN_EXTRA=1` fallback), preventing Fort Baxter low-detail slabs (`5889`/`5890`) from un-hiding over detailed streets during `07:00` `hourWindow` reloads or `world.hd_radius` switches; shared `syncCondCells()` with `install()` so same-frame script switches unload stale conditional extra cells before draw (`tools/hdworld_missions.py` `6/6 PASS`, A/B `diff_035_vs_r0=94`/`diff_tog_vs_r0=70` vs `1106`/`11156`, `'flag 1 -> added'=0` vs `112`).
+- **Launcher & Mod Loader sync / D3D12 mapping:** mapped UI renderer index (`0=D3D11, 1=D3D12, 2=Vulkan`) to engine `rhi::Backend` (`0=D3D11, 1=Vulkan, 3=D3D12`), set Windows default to D3D12, passed `VCS_MODLOADER_DIR` from `VCSLauncher.exe` to `vcs.exe` across custom build dirs, added `.psp` support + `Game Language` UI option + `spaceMasterTabs()` pause tab spacing for PT-BR/ES translations.
+- **Controls & Prompts:** defaulted `enhance.prompts = 1` (`Automatic`) and `mouse.free_aim = 1`, removed `mouse.camera_only` (native GTA PC behavior via `vcs_footcam.cpp`, `VCS_FOOTCAM=0` fallback), and fixed smooth/uncaptured mouse + radial deadzone/trigger device switching in `vcs_input.cpp`.
 
 ## 2026-11-20 - HD world overlaps (#36), vehicle density (#35), building switches (#61), UI (#80)
 

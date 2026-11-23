@@ -32,6 +32,8 @@ namespace vcs
         std::string companion;
     };
     void setStreamFiles(std::vector<StreamFile> files);
+    // True when an enabled mod overrides a disc file or entry by name (e.g. "MASTER.PSP", case-insensitive).
+    bool hasStreamOverride(const std::string &name);
 
     // The EE side of CDSTREAM.IRX's stream server (SIF RPC 0x65686577): read / poll / fn 5 replaced by reads from the
     // disc image on a host thread straight into EE RAM, the server's init call answered on the host. False with
