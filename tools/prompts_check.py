@@ -125,6 +125,23 @@ def main():
         ok("automatic", pad.get("device") == "gamepad" and pad.get("shown") in ("xbox", "ps") and
            keys.get("device") == "keyboard" and keys.get("shown") == "keyboard",
            {"after the pad": pad.get("shown"), "after a key": keys.get("shown")})
+        # smooth gentle mouse panning and light trigger pull must also switch Automatic immediately
+        g.cmd("gamepad on")
+        g.cmd("gamepad lt 0.35")
+        frames(4)
+        g.cmd("gamepad lt 0")
+        frames(4)
+        trig = state(g)
+        for _ in range(3):
+            g.cmd("mouse 4 0")
+            frames(2)
+        frames(4)
+        slow_mouse = state(g)
+        g.cmd("gamepad off")
+        ok("automatic_smooth_mouse",
+           trig.get("device") == "gamepad" and
+           slow_mouse.get("device") == "keyboard" and slow_mouse.get("shown") == "keyboard",
+           {"after trigger": trig.get("shown"), "after smooth mouse": slow_mouse.get("shown")})
 
         # scheme: the Modern scheme's triggers move the PS2's buttons - R2 accelerates and L2 brakes in a vehicle, R2
         # fires and L2 aims on foot; Classic leaves them on the bound buttons

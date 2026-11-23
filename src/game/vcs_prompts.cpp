@@ -112,7 +112,7 @@ namespace vcs::prompts
 
         uint8_t *g_rdram = nullptr;
         bool g_installed = false;
-        std::atomic<int> g_setting{Original};
+        std::atomic<int> g_setting{Automatic};
         PS2Runtime::RecompiledFunction g_origExpand = nullptr, g_origFontRender = nullptr, g_origRender = nullptr,
                                        g_origRenderIndexed = nullptr;
 
@@ -1814,7 +1814,7 @@ namespace vcs::prompts
                      {"Xbox", Xbox},
                      {"Nintendo Switch", NintendoSwitch},
                      {"Keyboard & mouse", Keyboard}};
-        s.defaultValue = Original;
+        s.defaultValue = Automatic;
         s.env = "VCS_PROMPTS";
         s.onChange = [](int v) { g_setting.store(v, std::memory_order_relaxed); };
         settings::add(s);

@@ -46,9 +46,10 @@ PC GTA's Mod Loader (LINK/2012; the copy in `Mods/ModLoader/`) made mods folders
 on disc, everything is injected at run time, each mod can be switched off in a menu, and mods can be swapped while
 the game runs. `src/mods/modloader.cpp` does the same for this port:
 
-- **Where**: `modloader/` beside vcs.exe, or in the checkout's root when vcs.exe is in `build/` (`VCS_MODLOADER_DIR`
-  elsewhere). Not `mods/`: on Windows that is the `Mods/` folder of PC mods kept for reference. `modloader/README.md`
-  is the only file of it in git.
+- **Where**: `modloader/` beside `vcs.exe`, or in the checkout's root when `vcs.exe` is in `build/` (`VCS_MODLOADER_DIR`
+  overrides; `VCSLauncher.exe` passes `VCS_MODLOADER_DIR` to `vcs.exe` using `GameConfig::modloaderDir(root, build)` so
+  custom build folders load and toggle the exact same `modloader/` seen in the Launcher). Not `mods/`: on Windows
+  that is the `Mods/` folder of PC mods kept for reference. `modloader/README.md` is the only file of it in git.
 - **A mod** is any folder in it (a leading `.` hides one). `modloader/modloader.ini` is read in Mod Loader's own
   format, so a player's knowledge carries over: `[Folder.Config] Profile`, and the profile's `[...Priority]
   Mod=1..100` (50 by default, 0 ignores the mod; a higher one wins a file two mods have), `[...IgnoreMods]`
@@ -86,7 +87,7 @@ those from the mod. VCS's model archive has no directory on the disc (game-inter
 each entry its sectors, and its model infos keep each name's key, so a file named after a model finds its entry.
 
 - **In a mod**: `<model name>.mdl` (`admiral.mdl`), `<texture dictionary>.xtx` (`admiral.xtx`: the TXD store's
-  names) or `#<streaming index>.<anything>` (`#1234.bin`) for an archive entry, and a loose disc file by its own name (`AMERICAN.GXT`, `ENGLISH.GXT`, `MAIN.SCM`), anywhere in the mod's folder. The priority slider decides between two mods with the same entry. **Any size**: a smaller file is
+  names) or `#<streaming index>.<anything>` (`#1234.bin`) for an archive entry, and a loose disc file by its own name (`AMERICAN.GXT`, `ENGLISH.GXT`, `MAIN.SCM`, `MASTER.PSP` and other `.psp` frontend layouts), anywhere in the mod's folder. The priority slider decides between two mods with the same entry. **Any size**: a smaller file is
   padded with zeros; a larger one has its record moved past the end of the disc (the streaming info's offset and
   size, LSN 0x180000 on, and the archive's size raised to reach it), where only the mod's bytes are served - the
   game allocates the mod's size and the entry touches no neighbour; the game's values come back when the mod goes.

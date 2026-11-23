@@ -25,6 +25,7 @@ Screenshots go to OUT (default build/menu_check); OUT/results.json holds the che
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -137,6 +138,19 @@ def main():
         c.press("escape", 2.0)
         c.ok("keys: Escape opens the menu", c.where() == ("1", "1", "MAP_PAGE", "Map_t"), c.where())
         c.shot("01_open")
+        def check_tab_rows(prefix, st):
+            row1 = ["Map_t", "Brief_t", "Game_t", "Stats_t"]
+            row2 = ["Controls_t", "Audio_t", "Display_t"]
+            for row_name, row in (("row1", row1), ("row2", row2)):
+                gaps = []
+                for a, b in zip(row, row[1:]):
+                    ba, bb = st["items"].get(a, ([], []))[0], st["items"].get(b, ([], []))[0]
+                    if len(ba) == 4 and len(bb) == 4:
+                        gaps.append((a, b, bb[0] - ba[2]))
+                c.ok("%s: %s tabs do not overlap" % (prefix, row_name),
+                     len(gaps) == len(row) - 1 and all(g >= 0.5 for _, _, g in gaps),
+                     ", ".join("%s->%s gap=%.1f" % x for x in gaps))
+        check_tab_rows("tabs", c.state())
         c.press("right")
         c.press("return", 1.2)
         c.ok("keys: Enter selects (Brief)", c.where()[1:3] == ("0", "BRIEF_PAGE"), c.where())
@@ -334,6 +348,44 @@ def main():
         g.cmd("gamepad off")
     finally:
         g.quit()
+
+    pt_src = os.path.join(ROOT, "modloader", "PT-BR (VCS.rec)")
+    if os.path.isfile(os.path.join(pt_src, "ENGLISH.GXT")):
+        pt_mods = os.path.join(out, "ptbr_mods")
+        pt_dst = os.path.join(pt_mods, "PT-BR (VCS.rec)")
+        os.makedirs(pt_dst, exist_ok=True)
+        shutil.copy2(os.path.join(pt_src, "ENGLISH.GXT"), os.path.join(pt_dst, "ENGLISH.GXT"))
+        gp = rig.Game.start(save=rig.default_save(), name="menu_check_ptbr",
+                            data_dir=os.path.join(out, "data_ptbr"), port=a.port + 1,
+                            env={"VCS_ASPECT": "169", "VCS_TEST_MODS": "1",
+                                 "VCS_MODLOADER_DIR": pt_mods})
+        cp = Check(gp, out)
+        try:
+            gp.wait_ingame()
+            gp.cmd("setting mods.pt_br__vcs_rec_ 1")
+            gp.wait_frames(3)
+            cp.press("escape", 2.0)
+            cp.shot("06_ptbr_tabs")
+            st = cp.state()
+            row1 = ["Map_t", "Brief_t", "Game_t", "Stats_t"]
+            row2 = ["Controls_t", "Audio_t", "Display_t"]
+            for row_name, row in (("row1", row1), ("row2", row2)):
+                gaps = []
+                for left, right in zip(row, row[1:]):
+                    bl, br = st["items"].get(left, ([], []))[0], st["items"].get(right, ([], []))[0]
+                    if len(bl) == 4 and len(br) == 4:
+                        gaps.append((left, right, br[0] - bl[2]))
+                c.ok("ptbr tabs: %s do not overlap" % row_name,
+                     len(gaps) == len(row) - 1 and all(g >= 0.5 for _, _, g in gaps),
+                     ", ".join("%s->%s gap=%.1f" % x for x in gaps))
+            cp.click("Brief_t", wait=1.0)
+            c.ok("ptbr tabs: click Brief_t opens BRIEF_PAGE", cp.where()[1:3] == ("0", "BRIEF_PAGE"), cp.where())
+            cp.press("escape", 0.8)
+            cp.click("Game_t", wait=1.0)
+            c.ok("ptbr tabs: click Game_t opens LOAD_PAGE", cp.where()[1:3] == ("0", "LOAD_PAGE"), cp.where())
+        finally:
+            gp.quit()
+
     json.dump(c.results, open(os.path.join(out, "results.json"), "w"), indent=1)
     bad = [k for k, v in c.results.items() if not v["ok"]]
     print("%d checks, %d failed%s" % (len(c.results), len(bad), (": " + ", ".join(bad)) if bad else ""))

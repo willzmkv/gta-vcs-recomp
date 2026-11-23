@@ -241,18 +241,38 @@ namespace
                         << "custom.keep_me=42\n";
                 }
                 GameConfig cfg;
+                check(cfg.displayRenderer ==
+#ifdef _WIN32
+                          1
+#else
+                          2
+#endif
+                      && cfg.enhanceButtonPrompts == 1 && cfg.mouseFreeAim == 1 &&
+                          cfg.mouseCarSensitivity == 100 && cfg.mouseCarReturn == 15,
+                      "GameConfig: D3D12 (Windows) / Vulkan (Linux), Auto prompts, and PC mouse defaults");
                 const bool loaded = cfg.loadIni(tmpIni);
                 cfg.displayScale = 4;
                 cfg.worldHdRadius = 2;
+                cfg.mouseCarSensitivity = 150;
+                cfg.mouseCarReturn = -1;
                 const bool saved = cfg.saveIni(tmpIni);
                 GameConfig cfg2;
                 cfg2.loadIni(tmpIni);
                 std::ifstream checkIn(tmpIni);
                 const std::string iniContent((std::istreambuf_iterator<char>(checkIn)), {});
                 check(loaded && saved && cfg2.displayScale == 4 && cfg2.worldHdRadius == 2 &&
+                          cfg2.mouseCarSensitivity == 150 && cfg2.mouseCarReturn == -1 &&
+                          cfg2.displayRenderer == cfg.displayRenderer &&
                           iniContent.find("iso=D:\\Games\\VCS.iso") != std::string::npos &&
                           iniContent.find("custom.keep_me=42") != std::string::npos,
                       "GameConfig: vcs.ini load/save roundtrip preserves unknown keys");
+#ifdef _WIN32
+                check(iniContent.find("display.renderer=3") != std::string::npos,
+                      "GameConfig: Windows D3D12 writes rhi::Backend::D3D12 (3) to vcs.ini");
+#else
+                check(iniContent.find("display.renderer=1") != std::string::npos,
+                      "GameConfig: Linux Vulkan writes rhi::Backend::Vulkan (1) to vcs.ini");
+#endif
 
                 // the launcher's old key names (before 2026-11-17) come in, the game's go out
                 {
@@ -288,15 +308,34 @@ namespace
                       "GameConfig: the subtitle options and the prompt icon style round trip, the colour at the game's default");
 
                 const fs::path modGood = tmpDir / "mod_good";
+                const fs::path modPsp = tmpDir / "mod_psp";
+                const fs::path modPt = tmpDir / "PT-BR (VCS.rec)";
                 const fs::path modBad = tmpDir / "mod_bad";
                 fs::create_directories(modGood, ec);
+                fs::create_directories(modPsp, ec);
+                fs::create_directories(modPt, ec);
                 fs::create_directories(modBad, ec);
                 std::ofstream(modGood / "vice_radar.png", std::ios::binary) << "png";
+                std::ofstream(modPsp / "MASTER.PSP", std::ios::binary) << "psp";
+                std::ofstream(modPt / "ENGLISH.GXT", std::ios::binary) << "gxt";
                 std::ofstream(modBad / "sa_hook.asi", std::ios::binary) << "asi";
                 const ModEntry eGood = GameConfig::classifyModFolder(modGood);
+                const ModEntry ePsp = GameConfig::classifyModFolder(modPsp);
                 const ModEntry eBad = GameConfig::classifyModFolder(modBad);
-                check(eGood.compat == ModCompat::Compatible && eBad.compat == ModCompat::Incompatible,
-                      "GameConfig: mod compatibility classifier (.png compatible, .asi incompatible)");
+                check(eGood.compat == ModCompat::Compatible && ePsp.compat == ModCompat::Compatible &&
+                          eBad.compat == ModCompat::Incompatible,
+                      "GameConfig: mod compatibility classifier (.png/.psp compatible, .asi incompatible)");
+                GameConfig scanCfg;
+                fs::create_directories(tmpDir / "modloader", ec);
+                fs::rename(modPt, tmpDir / "modloader" / "PT-BR (VCS.rec)", ec);
+                const fs::path customBuild = tmpDir / "custom-build";
+                fs::create_directories(customBuild / "modloader", ec);
+                std::error_code eqEc;
+                check(fs::equivalent(GameConfig::modloaderDir(tmpDir, customBuild), tmpDir / "modloader", eqEc),
+                      "GameConfig: modloaderDir prefers root/modloader over custom build/modloader");
+                scanCfg.scanMods(tmpDir, customBuild);
+                check(!scanCfg.modEnabledByKey(App::kPtBrModKey, true),
+                      "GameConfig: PT-BR (VCS.rec) defaults off until chosen by user/launcher");
 
                 const uint32_t appId = GameConfig::steamAppId("\"D:\\VCSLauncher.exe\"", "Grand Theft Auto: Vice City Stories");
                 const std::vector<uint8_t> vdf1 = GameConfig::upsertShortcutsVdf(

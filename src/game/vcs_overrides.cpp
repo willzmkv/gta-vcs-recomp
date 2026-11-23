@@ -32,6 +32,7 @@
 #include "game/vcs_distance.h"
 #include "game/vcs_distant.h"
 #include "game/vcs_carcam.h"
+#include "game/vcs_footcam.h"
 #include "game/vcs_freecam.h"
 #include "game/vcs_frontend.h"
 #include "game/vcs_hud.h"
@@ -1200,6 +1201,7 @@ namespace
         vcs::distance::install(runtime);   // the draw distance settings, around aim's CCamera::Process (game/vcs_distance.h)
         vcs::distant::install(runtime);    // decorative distant traffic's simulation (game/vcs_distant.h)
         vcs::carcam::install(runtime);     // the mouse on the camera behind a vehicle (game/vcs_carcam.h)
+        vcs::footcam::install(runtime);    // on-foot mouse camera stabilisation (game/vcs_footcam.h)
         vcs::world::install(runtime);      // density and draw distance (game/vcs_world_detail.h)
         vcs::driveby::install(runtime);    // the NPC drive-by's fire rate (game/vcs_driveby.h)
         vcs::installFrameRateHooks(runtime); // 30 / 60 fps (game/vcs_framerate.h)

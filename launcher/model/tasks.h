@@ -139,6 +139,10 @@ namespace launcher
         bool isPt() const { return settings.language != "en"; }
         void saveSettings();
 
+        static constexpr const char *kPtBrModKey = "mods.pt_br__vcs_rec_";
+        bool isGameLanguagePt() const;
+        void setGameLanguagePt(bool ptBr, bool save = true);
+
         GameConfig gameConfig;
         void saveGameConfig();
         void applyFirstInstallPreset(); // once: the graphics preset from the PC's hardware (hardware.h)

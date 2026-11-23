@@ -9,6 +9,7 @@
 #include "game/vcs_aim.h"
 #include "game/vcs_carcam.h"
 #include "game/vcs_dualsense.h"
+#include "game/vcs_footcam.h"
 #include "game/vcs_freecam.h"
 #include "game/vcs_frontend.h"
 #include "platform/platform.h"
@@ -195,7 +196,7 @@ namespace vcs::input
             float mouseLook = 0.0025f; // radians per mouse count (the on-foot camera, turned directly)
             float carLook = 0.0025f;   // ... the camera behind a vehicle (Car camera sensitivity on top)
             bool mouseInvertY = false;
-            bool freeAimMouse = false, freeAimPad = false; // free aim (game/vcs_aim.h) on the keyboard / mouse, the gamepad
+            bool freeAimMouse = true, freeAimPad = false; // free aim (game/vcs_aim.h) on the keyboard / mouse, the gamepad
             bool aimAssist = true;     // the gamepad's free aim locks on first (pad.aim_assist)
             bool mouseWheel = true;                        // the wheel changes weapons on foot and zooms scopes
             bool swapSticks = false, invertX = false, invertY = false;
@@ -355,7 +356,12 @@ namespace vcs::input
             int radioFrames = 0;       // ... and the game frames since the last press
             bool footTurn = false;     // the mouse is turning the on-foot camera (walls: the stick's path, below)
             uint32_t footTurned = 0;   // ... last at this game time, ms
+            float moved = 0.0f;        // mouse counts seen this frame (switches back from gamepad to mouse)
+            std::chrono::steady_clock::time_point footMouseAt{}; // last non-zero mouse motion time
         } g_mouse;
+        bool g_footKeyboard = true;
+        float g_footMouse = 0.0f;
+        std::atomic<float> g_uncapturedMoved{0.0f}; // cursor deltas while uncaptured (pause menu / mouseCamera off)
 
         std::mutex g_injectedMutex;
         float g_injectedX = 0.0f, g_injectedY = 0.0f; // "mouse <dx> <dy>" (tests): counts, as from the mouse
@@ -393,11 +399,21 @@ namespace vcs::input
             bool padUsed = false, keysUsed = false; // the player's device this read (lastDevice)
             if (padConnected(physical) && !freeCamera)
             {
-                // a button, or a stick / trigger past half way: the gamepad is in use (a resting stick's drift is not)
+                // Any button, radial stick deflection past deadzone + margin, or trigger past m.trigger: gamepad is in use
                 for (int b = 0; b < GAMEPAD_BUTTON_COUNT && !padUsed; ++b)
                     padUsed = padButton(static_cast<GamepadButton>(b));
-                for (int a = 0; a < AXIS_COUNT && !padUsed; ++a)
-                    padUsed = std::fabs(padAxis(static_cast<GamepadAxis>(a))) > 0.5f;
+                if (!padUsed)
+                {
+                    const float dzL = std::clamp(std::max(0.35f, m.deadzoneLeft + 0.15f), 0.35f, 0.70f);
+                    const float dzR = std::clamp(std::max(0.35f, m.deadzoneRight + 0.15f), 0.35f, 0.70f);
+                    const float lxRaw = padAxis(AXIS_LEFT_X), lyRaw = padAxis(AXIS_LEFT_Y);
+                    const float rxRaw = padAxis(AXIS_RIGHT_X), ryRaw = padAxis(AXIS_RIGHT_Y);
+                    const float trig = std::max(0.25f, m.trigger);
+                    padUsed = (lxRaw * lxRaw + lyRaw * lyRaw > dzL * dzL) ||
+                              (rxRaw * rxRaw + ryRaw * ryRaw > dzR * dzR) ||
+                              padAxis(AXIS_LEFT_TRIGGER) > trig ||
+                              padAxis(AXIS_RIGHT_TRIGGER) > trig;
+                }
                 for (size_t i = 0; i < kControlCount; ++i)
                     if (kControls[i].target == Target::Button && padSource(m.pad[i], m.trigger))
                     {
@@ -499,8 +515,9 @@ namespace vcs::input
                     dy += g_injectedY;
                     g_injectedX = g_injectedY = 0.0f;
                 }
-                // a hand on the mouse moves it more than a nudge of the desk does
-                keysUsed = keysUsed || std::fabs(dx) + std::fabs(dy) > 12.0f;
+                // A hand on the mouse moves it intentionally (gentle glide or fast flick)
+                g_mouse.moved = std::fabs(dx) + std::fabs(dy);
+                keysUsed = keysUsed || g_mouse.moved >= 6.0f;
                 const bool on = m.mouseCamera && !blocked;
                 // up (+) for a mouse moved forward (SDL: y grows downwards); the game looks up for a stick pulled
                 // back (y > 0)
@@ -557,7 +574,7 @@ namespace vcs::input
                     const float turn = -dx * look;
                     float beta = std::fmod(rdf(cam + 0x7C) + turn, 6.2831855f);
                     if (rd32(rd32(kPlayerPed) + 0x858))
-                        beta = std::remainder(rdf(cam + 0x7C) + turn, 6.2831855f);
+                        beta = std::clamp(rdf(cam + 0x7C) + turn, -3.1415926f, 3.1415926f);
                     else if (beta < 0.0f)
                         beta += 6.2831855f;
                     wrf(cam + 0x7C, beta);
@@ -744,8 +761,13 @@ namespace vcs::input
             }
             // the right stick (the gamepad's, or the camera keys) on the camera behind a vehicle hands it back to the
             // game at once, should the mouse have held it a moment before (game/vcs_carcam.h)
-            if ((rx != 0.0f || ry != 0.0f) && game.driving)
-                carcam::stickMoved();
+            if (rx != 0.0f || ry != 0.0f)
+            {
+                if (game.driving)
+                    carcam::stickMoved();
+                else
+                    footcam::stickMoved();
+            }
             rx += g_mouse.x;
             ry += g_mouse.y;
             buttons |= g_mouse.wheelButton;
@@ -866,8 +888,26 @@ namespace vcs::input
             if (!blocked)
                 for (int k : {KEY_ENTER, KEY_KP_ENTER, KEY_ESCAPE, KEY_MOUSE_LEFT, KEY_MOUSE_RIGHT})
                     keysUsed = keysUsed || ps2control::keyDown(k);
+            // Smooth or uncaptured mouse motion (pause menu, mouseCamera off, or gentle panning) switches prompts + camera to K&M
+            const float uncapMoved = (!blocked && !mouseCaptured()) ? g_uncapturedMoved.exchange(0.0f, std::memory_order_relaxed) : 0.0f;
+            const float frameMouse = g_mouse.moved + uncapMoved;
+            if (frameMouse > 0.0f)
+            {
+                if (g_mouse.footMouseAt.time_since_epoch().count() && now - g_mouse.footMouseAt > std::chrono::milliseconds(400))
+                    g_footMouse = 0.0f;
+                g_mouse.footMouseAt = now;
+                g_footMouse += frameMouse;
+                if (frameMouse >= 6.0f || g_footMouse >= 8.0f)
+                    keysUsed = true;
+            }
             if (padUsed != keysUsed) // both at once: as it was
+            {
                 g_lastDevice.store(static_cast<int>(padUsed ? Device::Gamepad : Device::Keyboard), std::memory_order_relaxed);
+                g_footKeyboard = keysUsed;
+                g_footMouse = 0.0f;
+            }
+            g_mouse.moved = 0.0f;
+            footcam::enable(m.mouseCamera && g_footKeyboard);
 
             const uint16_t word = static_cast<uint16_t>(~buttons);
             data[2] = static_cast<uint8_t>(word & 0xFF);
@@ -1025,7 +1065,7 @@ namespace vcs::input
                          "game's aiming circle, instead of locking on; shots go through the circle. You move while aiming "
                          "as you do locked on with that gun. Fists, melee and scoped weapons lock on as on the PS2.";
                 s.type = Type::Toggle;
-                s.defaultValue = 0;
+                s.defaultValue = 1;
                 s.onChange = onChange;
                 settings::add(s);
 
@@ -1416,7 +1456,33 @@ namespace vcs::input
             camera = g_map.mouseCamera || g_map.freeAimMouse;
         }
         // the cursor shows over the game's pause menu (game/vcs_frontend.h), as over ours
-        setMouseCaptured(((g_enabled && camera) || freecam::flying()) && !menuOpen && !frontend::open() && ps2control::physicalInputOn());
+        const bool capture = ((g_enabled && camera) || freecam::flying()) && !menuOpen && !frontend::open() && ps2control::physicalInputOn();
+        setMouseCaptured(capture);
+        {
+            static int uncapSettle = 0;
+            static float prevCurX = 0.0f, prevCurY = 0.0f;
+            float curX = 0.0f, curY = 0.0f;
+            if (!menuOpen && ps2control::physicalInputOn() && !capture && platform::mousePosition(curX, curY))
+            {
+                if (uncapSettle >= 2)
+                {
+                    const float d = std::fabs(curX - prevCurX) + std::fabs(curY - prevCurY);
+                    if (d > 0.0f)
+                    {
+                        float expected = g_uncapturedMoved.load(std::memory_order_relaxed);
+                        while (!g_uncapturedMoved.compare_exchange_weak(expected, expected + d, std::memory_order_relaxed))
+                        {
+                        }
+                    }
+                }
+                else
+                    ++uncapSettle;
+                prevCurX = curX;
+                prevCurY = curY;
+            }
+            else
+                uncapSettle = 0;
+        }
         frontend::onHostFrame();
 
         // the window in the background (Game > In the background): a hidden test run never is

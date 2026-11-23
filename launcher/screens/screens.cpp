@@ -885,9 +885,9 @@ namespace screens
                       "SELECIONE O IDIOMA  /  SELECT LANGUAGE", ui::Align::Centre);
 
             ui::label(render::kFontSemibold, px(14.0f), {box.x + px(24), headR.bottom() + px(22), box.w - px(48), px(22)},
-                      core::rgb(0x007A96), "Escolha o idioma da interface do VCS.rec Launcher:", ui::Align::Centre);
+                      core::rgb(0x007A96), "Escolha o idioma do Launcher e do Jogo:", ui::Align::Centre);
             ui::label(render::kFontBody, px(13.0f), {box.x + px(24), headR.bottom() + px(44), box.w - px(48), px(20)},
-                      core::rgb(0x007A96, 190), "Choose your preferred language for the VCS.rec Launcher:", ui::Align::Centre);
+                      core::rgb(0x007A96, 190), "Choose the preferred language for the Launcher and Game:", ui::Align::Centre);
 
             const float btnW = px(196);
             const float btnH = px(52);
@@ -913,6 +913,7 @@ namespace screens
                 app.settings.language = "pt";
                 app.settings.languageChosen = true;
                 shell.forceLanguagePrompt = false;
+                app.setGameLanguagePt(true);
                 app.saveSettings();
             }
             if (langChoiceBtn("#first-lang-en", "ENGLISH", "United States (EN)", enR))
@@ -920,6 +921,7 @@ namespace screens
                 app.settings.language = "en";
                 app.settings.languageChosen = true;
                 shell.forceLanguagePrompt = false;
+                app.setGameLanguagePt(false);
                 app.saveSettings();
             }
             ui::endLayer();

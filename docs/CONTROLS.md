@@ -44,7 +44,7 @@ does on the PS2; left mouse button (Circle) attacks / fires. With **Free aim** o
 
 ## Free aim
 
-Keyboard > **Free aim** (off by default) and Gamepad > **Free aim** (off), each for its own device (src/game/vcs_aim.cpp,
+Keyboard > **Free aim** (on by default; `mouse.free_aim = 1`) and Gamepad > **Free aim** (off), each for its own device (src/game/vcs_aim.cpp,
 game-internals.md 12c):
 
 - With a gun in hand (pistols, shotguns, SMGs, rifles, the M249, minigun and flame-thrower), holding the target button
@@ -70,9 +70,9 @@ game-internals.md 12c):
   third of its throw takes the aim **free from there** (the lock lets go for two frames, then the circle starts where
   the lock-on camera looked) - GTA V's assisted aim. With no one to lock on to after six frames it is free aim at
   once. Off: free aim only (the player's report, 2026-11-12: free aim on the DualSense had lost the lock-on).
-- **Free aim reticle** (Enhancements > Combat; Circle by default): **Dot** shows a small white dot with a thin dark
+- **Free aim reticle** (Enhancements > Combat; Dot by default): **Dot** shows a small white dot with a thin dark
   rim instead of the game's circle with a dot (made narrower in the texture by the picture's widening, so it stays
-  round in widescreen - the game stretches the sprite sideways) - the game's own texture (`sitem16`, game-internals.md 12c) rewritten
+  round in widescreen - the game stretches the circle sprite sideways) - the game's own texture (`sitem16`, game-internals.md 12c) rewritten
   in memory while it is on, put back when it goes back to Circle. `VCS_RETICLE=0|1`.
 - It is the game's own free aim (R1 then L3 on the PS2: the left stick moves an aiming point while Vic stands still),
   driven so that Vic can move and the mouse aims; `VCS_FREEAIM=0` leaves it out entirely.
@@ -116,7 +116,10 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
   a radian), moving the mouse forward looks up. Looking up / down goes through the game's own stick pitch, which has a
   top speed (about 1.5 rad/s at 100%); a faster movement still arrives, a few frames later. Turned toward a wall, the
   camera is pulled in toward the player, as the gamepad's is (`VCS_FOOT_WALL=0`: it stops at the wall's edge, as
-  before 2026-11-11). **In the scopes and free
+  before 2026-11-11). On keyboard + mouse (`src/game/vcs_footcam.cpp`), PS2 sideways/backward camera auto-swing on
+  `A`/`D`/`S` is disabled so strafing keeps your camera angle while `W` steers smoothly with the camera (standard
+  GTA PC behavior; standing still orbits 360° freely without rotating Vic; `VCS_FOOTCAM=0` restores PS2 camera swing).
+  **In the scopes and free
   aim** it turns the view itself too (above). **Behind a car, bike or boat** it turns the camera itself as well, and
   while the mouse moves the camera stays where it is put - the car neither drags it along nor pulls it back; **Car
   camera return** (1.5 s; 0.5-5 s or Never) after the mouse stops it eases back behind the vehicle (about 2 s) and the
@@ -221,9 +224,10 @@ game-internals.md 6m; before 2026-11-05 Start was Enter and the menu took the pa
 
 ## Button prompts
 
-F2 > Enhancements > **Button prompts** (default Original): the controls the game's help text and pause menu show.
-Automatic follows the device used last - the keys and mouse buttons bound on the Keyboard page, or the gamepad's own
-buttons (PlayStation or Xbox glyphs, from the pad's maker) as mapped on the Gamepad page. PlayStation, Xbox and
+F2 > Enhancements > **Button prompts** (default Automatic): the controls the game's help text and pause menu show.
+Automatic follows the device used last - moving the mouse (even slowly, or in the pause menu) or pressing bound keys
+switches immediately to Keyboard & mouse, while pressing any gamepad button, pulling a trigger, or deflecting a stick
+switches to the gamepad's buttons (PlayStation, Xbox, or Nintendo Switch). PlayStation, Xbox, Nintendo Switch, and
 Keyboard & mouse fix a set; Original is the PS2's text. game-internals.md 6n, DECISIONS.md 2026-11-07.
 
 ## Menus

@@ -201,15 +201,15 @@ class Check:
             rec = g.u32(0x6EDD94)
             return g.peek(g.u32(g.u32(rec) + 8) + 0x800, 4).hex()
 
-        circle = clut0()
-        self.setting("enhance.reticle", 1)
-        g.wait_frames(5)
         dot = clut0()
         self.setting("enhance.reticle", 0)
         g.wait_frames(5)
+        circle = clut0()
+        self.setting("enhance.reticle", 1)
+        g.wait_frames(5)
         back = clut0()
-        self.ok("free aim reticle: the dot, then the circle back", circle == "ffffff80" and dot == "00000000" and back == circle,
-                "circle %s dot %s back %s" % (circle, dot, back))
+        self.ok("free aim reticle: default dot, circle, then dot back", dot == "00000000" and circle == "ffffff80" and back == dot,
+                "dot %s circle %s back %s" % (dot, circle, back))
 
     def held(self, *keys):
         for k in keys:
@@ -570,6 +570,107 @@ class Check:
             g.cmd("press backspace 150")
             time.sleep(1.5)
             steps += 1
+
+    def foot_gta_pc_and_prompts(self):
+        """Native GTA PC foot movement: mouse orbits freely when idle, W steers smoothly with the camera,
+        A/D/S walk straight relative to camera without PS2 auto-swing, and smooth mouse / light triggers
+        switch enhance.prompts=1 (Automatic)."""
+        g = self.g
+
+        def angle(a, b):
+            return (b - a + math.pi) % (2 * math.pi) - math.pi
+
+        def walk_dir(dt=0.35):
+            _, (x0, y0, _), _ = g.player()
+            time.sleep(dt)
+            _, (x1, y1, _), _ = g.player()
+            return math.atan2(y1 - y0, x1 - x0), math.hypot(x1 - x0, y1 - y0)
+
+        def pstate():
+            return dict(kv.split("=", 1) for kv in g.cmd("prompts").split() if "=" in kv)
+
+        g.teleport(575.0, 175.0, -100.0, 0.0)
+        time.sleep(1.5)
+        g.cmd("press q 150")
+        time.sleep(0.5)
+        # Idle 360 orbit: camera turns freely while Vic stays in place
+        _, p_idle0, _ = g.player()
+        _, _, ch_idle0 = self.cam()
+        for _ in range(10):
+            g.cmd("mouse 40 0")
+            g.wait_frames(1)
+        g.wait_frames(3)
+        _, p_idle1, _ = g.player()
+        _, _, ch_idle1 = self.cam()
+        idle_dist = math.hypot(p_idle1[0] - p_idle0[0], p_idle1[1] - p_idle0[1])
+
+        # Moving with W + mouse orbit: Vic steers smoothly with the camera
+        g.cmd("key w down")
+        time.sleep(0.35)
+        dir0, dist0 = walk_dir(0.35)
+        _, _, h0 = self.cam()
+        for _ in range(10):
+            g.cmd("mouse 40 0")
+            g.wait_frames(1)
+        g.wait_frames(4)
+        _, _, h1 = self.cam()
+        dir_orbit, dist_orbit = walk_dir(0.35)
+        g.cmd("key w up")
+        time.sleep(0.3)
+        self.ok("GTA PC on-foot: idle orbits freely, W steers with camera",
+                idle_dist < 0.05 and abs(angle(ch_idle0, ch_idle1) + 1.0) < 0.08 and
+                dist0 > 0.3 and dist_orbit > 0.3 and abs(angle(h0, h1) + 1.0) < 0.08 and
+                abs(angle(dir0, dir_orbit) + 1.0) < 0.25,
+                "idle=%.2f(%+.3f) cam=%+.3f dir=%+.3f->%+.3f" %
+                (idle_dist, angle(ch_idle0, ch_idle1), angle(h0, h1), dir0, dir_orbit))
+
+        # A and D walk cleanly sideways without PS2 auto-swing turning the camera
+        g.cmd("press q 150")
+        time.sleep(0.5)
+        _, _, h_a0 = self.cam()
+        g.cmd("key a down")
+        time.sleep(0.8)
+        g.cmd("key a up")
+        time.sleep(0.2)
+        _, _, h_a1 = self.cam()
+        g.cmd("key d down")
+        time.sleep(0.8)
+        g.cmd("key d up")
+        time.sleep(0.2)
+        _, _, h_d1 = self.cam()
+        self.ok("A/D strafe holds camera without PS2 auto-swing",
+                abs(angle(h_a0, h_a1)) < 0.03 and abs(angle(h_a1, h_d1)) < 0.03,
+                "dH(A)=%+.4f dH(D)=%+.4f" % (angle(h_a0, h_a1), angle(h_a1, h_d1)))
+
+        # Automatic prompt switching: gamepad -> slow smooth mouse (4 px x3) -> light trigger pull -> mouse
+        self.setting("enhance.prompts", 1)
+        g.wait_frames(4)
+        g.cmd("gamepad on")
+        g.cmd("gamepad a 1")
+        g.wait_frames(3)
+        g.cmd("gamepad a 0")
+        g.wait_frames(4)
+        st_pad = pstate()
+        for _ in range(3):
+            g.cmd("mouse 4 0")
+            g.wait_frames(2)
+        g.wait_frames(3)
+        st_mouse = pstate()
+        g.cmd("gamepad lt 0.35")
+        g.wait_frames(3)
+        st_trig = pstate()
+        g.cmd("gamepad lt 0")
+        g.cmd("gamepad off")
+        g.wait_frames(2)
+        g.cmd("mouse 6 0")
+        g.wait_frames(3)
+        st_back = pstate()
+        self.ok("automatic prompts switch on smooth mouse and light trigger",
+                st_pad.get("device") == "gamepad" and
+                st_mouse.get("device") == "keyboard" and st_mouse.get("shown") == "keyboard" and
+                st_trig.get("device") == "gamepad" and
+                st_back.get("device") == "keyboard",
+                "pad=%s slow_mouse=%s trig=%s mouse=%s" % (st_pad, st_mouse, st_trig, st_back))
 
     # ---- free aim (src/game/vcs_aim.cpp, game-internals.md 12c) ----
     PED_POOL, PED_SIZE = 0x487A94, 0xD20
@@ -1282,9 +1383,10 @@ class Check:
             self.setting("audio.volume", 40)
             self.setting("pad.vibration", 0)
             self.setting("advanced.reset_all")
-            got = {k: self.setting(k) for k in ("keys.cross", "audio.volume", "pad.vibration", "controls.menu_key")}
+            got = {k: self.setting(k) for k in ("keys.cross", "audio.volume", "pad.vibration", "controls.menu_key",
+                                              "enhance.prompts")}
             self.ok("Reset all settings", got == {"keys.cross": str(KEY_SHIFT), "audio.volume": "100", "pad.vibration": "100",
-                                                  "controls.menu_key": str(KEY_F2)}, str(got))
+                                                  "controls.menu_key": str(KEY_F2), "enhance.prompts": "1"}, str(got))
             p = self.held("shift")
             self.ok("bindings after the reset", p["buttons"] == CROSS, str(p))
 
@@ -1320,7 +1422,9 @@ class Check:
             # the mouse's camera at a wall. Here, after the weapon checks, not among them: it moves Vic across the map
             # and back, the city around him loads anew, and with it before them the shot and wheel checks failed
             # now and then (a 50 ms wheel press lost to a long frame, a shot that missed its man)
+            # Re-check wall camera after weapons checks; then GTA PC movement & gentle mouse prompt switch
             self.foot_wall()
+            self.foot_gta_pc_and_prompts()
 
             # vibration: an explosion next to Vic (the game shakes the pad; god mode so he lives)
             g.cmd("trainer toggle god 1")
