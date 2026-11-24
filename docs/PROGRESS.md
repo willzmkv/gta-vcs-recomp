@@ -1516,6 +1516,11 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `python tools/minidbg.py <exe> <iso>` | catch fail-fast crashes with a stack |
 | `VCS_HD_SAME_ID_DUPES=1` | HD world: fallback to old `sameSphere()` behavior that also drops second-bucket records of the same detailed sector `id` at `r >= 20` (reproduces #36 missing Downtown construction glass) |
 | `VCS_HD_SHOW_HIDDEN_EXTRA=1` | HD world: fallback restoring the prior extra-cell `hide = 0` override on `0x8000` hidden records (reproduces #90 Fort Baxter `5889`/`5890` coarse ground overlap during `07:00`/live reloads) |
+| `VCS_BMX_CAM=0` | Camera: disable the #166 BMX follow-camera fix in `vcs_carcam.cpp` (leaves `CBmx` `+0x354 == 8` unmapped in `FUN_0029FAF0` for A/B comparison) |
+
+## 2026-11-24 - v1.0.1 Block A (#166 BMX camera)
+
+- **#166 (`vcs_carcam.cpp`):** mapped `CBmx` (`veh + 0x354 == 8`) to `CBike` (`6`) and floored `CColModel +0x28` `max.z` (`0.538 m` / `0.685 m`) to `0.71f` across `FUN_0029FAF0` (`FollowVehicle`), then restored both immediately after the call (`VCS_BMX_CAM=0` restores original). Fixes Rockstar's omission of `type == 8` next to `type == 6` / Quad (`230`), moving BMX from car `row[0]` (`0x487BE8`, `tgtZ +0.300 / srcZ +0.801 m`) to motorcycle `row[2]` + bike speed FOV + `+0x668` wheel checks at motorcycle rider framing (`tgtZ +0.681 / srcZ +1.30..+1.33 m`, aligned with `Sanchez` `+0.681 / +1.388 m`; verified A/B `4:3` & `16:9` widescreen, `30/60/144/240 FPS`, and `tools/controls_check.py` `94/94 PASS`).
 
 ## 2026-11-23 - Hotfix v1.0.06 (#90, input, prompts, menu tabs, HD world Fort Baxter LOD)
 
