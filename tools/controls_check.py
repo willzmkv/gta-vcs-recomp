@@ -458,23 +458,27 @@ class Check:
 
         # the mouse wheel on the radio (game-internals.md 12a "The radio"): a notch down is the next station, a notch up
         # the one before (the vehicle's +0x2BA: 0..8 the stations, 9 off). The game drops L1 while the radio plays an
-        # announcement (15 - 40 s after getting in, in this save), so a step is waited for.
+        # announcement (15 - 40 s after getting in, or right after retuning, in this save), so each step waits if dropped.
         station = lambda: g.peek(car + 0x2BA, 1)[0]
-        s0, t0, took = station(), time.time(), False
-        while time.time() - t0 < 80 and not took:
-            g.cmd("press wheeldown 100")
-            time.sleep(2.0)
-            took = station() == (s0 + 1) % 10
-            if not took:
+        s0 = station()
+        deadline = time.time() + 100
+
+        def wheel_step(cmd, want):
+            while time.time() < deadline:
+                g.cmd("press %s 100" % cmd)
+                time.sleep(2.0)
+                if station() == want:
+                    return True
                 time.sleep(4.0)
-        g.cmd("press wheelup 100")
-        time.sleep(2.0)
+            return False
+
+        took = wheel_step("wheeldown", (s0 + 1) % 10)
+        up1 = took and wheel_step("wheelup", s0)
         s1 = station()
-        g.cmd("press wheelup 100")
-        time.sleep(2.0)
+        up2 = up1 and wheel_step("wheelup", (s0 + 9) % 10)
         s2 = station()
-        self.ok("wheel: radio stations", took and s1 == s0 and s2 == (s0 + 9) % 10,
-                "from %d: down %s, up %d, up %d" % (s0, "took" if took else "not taken in 80 s", s1, s2))
+        self.ok("wheel: radio stations", took and up1 and up2 and s1 == s0 and s2 == (s0 + 9) % 10,
+                "from %d: down %s, up %d, up %d" % (s0, "took" if took else "not taken in 100 s", s1, s2))
 
         # out of the car: the on-foot keys and the mouse look again
         g.cmd("key space down")

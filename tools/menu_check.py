@@ -345,6 +345,20 @@ def main():
         pad("start", 2.0)
         pad("start", 1.5)
         c.ok("gamepad: Start closes it", c.where()[0] == "0", c.where())
+        # Trigger / GTA V gameplay remaps must not eat D-pad left/right while the pause menu is open.
+        prev_shoot = g.cmd("setting pad.trigger_shoot").strip()
+        prev_v = g.cmd("setting pad.v_layout").strip()
+        try:
+            g.cmd("setting pad.trigger_shoot 1")
+            g.cmd("setting pad.v_layout 1")
+            pad("start", 2.0)
+            pad("right")
+            c.ok("gamepad (Modern/GTA V): D-pad right moves tabs in pause menu", c.where()[3] == "Brief_t", c.where())
+            pad("left")
+            pad("start", 1.5)
+        finally:
+            g.cmd("setting pad.trigger_shoot " + prev_shoot)
+            g.cmd("setting pad.v_layout " + prev_v)
         g.cmd("gamepad off")
     finally:
         g.quit()

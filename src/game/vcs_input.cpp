@@ -461,9 +461,10 @@ namespace vcs::input
             // stick).
             const GameState game = gameState();
             const bool blocked = ps2control::gameInputBlocked() || freeCamera;
+            const bool gameplayPad = !blocked && !game.paused && !frontend::open();
             // "Shoot with the triggers": L2 is the aim button on foot, so free aim must key off it too (it reaches the
             // report as R1 in the trigger-shoot block below). Set before the aim update reads padR1.
-            if (m.triggerShoot && game.onFoot && !blocked && padAxis(AXIS_LEFT_TRIGGER) > m.trigger)
+            if (m.triggerShoot && game.onFoot && gameplayPad && padAxis(AXIS_LEFT_TRIGGER) > m.trigger)
                 padR1 = true;
             const bool alt = !blocked && (ps2control::keyDown(KEY_LEFT_ALT) || ps2control::keyDown(KEY_RIGHT_ALT));
             auto drivingKey = [&](int key) {
@@ -734,7 +735,7 @@ namespace vcs::input
                         wheelBound = wheelBound || k == KEY_WHEEL_UP || k == KEY_WHEEL_DOWN;
                 // GTA V's buttons (pad.v_layout): while driving the D-pad's left / right is the previous / next station,
                 // a press each - the wheel's notch up / down below (the wheel's own notches only when the wheel is on)
-                const bool padRadioOn = m.vLayout && game.driving && !game.remote;
+                const bool padRadioOn = m.vLayout && game.driving && !game.remote && gameplayPad;
                 if (padRadioOn && (!m.mouseWheel || wheelBound))
                     notch[0] = notch[1] = false;
                 for (int w = 0; w < 2; ++w)
@@ -850,7 +851,7 @@ namespace vcs::input
             // "Driving with the triggers" (pad.trigger_drive): while the player drives, R2 accelerates (Cross) and L2
             // brakes / reverses (Square), so the adaptive triggers (game/vcs_dualsense.cpp) have something to resist;
             // look left / right (R2 / L2 on the PS2) move to the D-pad so nothing is lost.
-            if (m.triggerDrive && game.driving && !blocked)
+            if (m.triggerDrive && game.driving && gameplayPad)
             {
                 // Only clear the gamepad's own bits so keyboard bindings and the mouse wheel keep working.
                 buttons &= static_cast<uint16_t>(~(padBits & ~(keyBits | g_mouse.wheelButton) & (kL2 | kR2 | kLeft | kRight)));
@@ -875,13 +876,13 @@ namespace vcs::input
             // Getting in or out of a vehicle (neither on foot nor driving) with a trigger scheme on: the triggers held
             // (for the throttle to come, or still from a shot) are nothing - not a shot, not a weapon change (the
             // player's report, 2026-11-12: holding them while getting in fired the gun's trigger feel)
-            if ((m.triggerShoot || m.triggerDrive) && !game.onFoot && !game.driving)
+            if ((m.triggerShoot || m.triggerDrive) && !game.onFoot && !game.driving && gameplayPad)
                 buttons &= static_cast<uint16_t>(~(padBits & ~keyBits & (kL2 | kR2)));
 
             // "Shoot with the triggers" (pad.trigger_shoot): on foot R2 fires (Circle), L2 aims (R1), and weapon
             // next / previous (R2 / L2 on the PS2) move to the D-pad - the modern GTA IV / V layout. On a vehicle it
             // does nothing (driving has its own trigger scheme).
-            if (m.triggerShoot && game.onFoot && !blocked)
+            if (m.triggerShoot && game.onFoot && gameplayPad)
             {
                 // Only clear the gamepad's own bits so keyboard bindings (L2/R2, D-pad) and the mouse wheel keep working.
                 buttons &= static_cast<uint16_t>(~(padBits & ~(keyBits | g_mouse.wheelButton) & (kL2 | kR2 | kLeft | kRight)));
@@ -910,7 +911,7 @@ namespace vcs::input
             // above), its down starts a sub-mission (R3 on the PS2: taxi, vigilante...); on foot R2 fires guns only
             // (above). L3 is the horn and R1 the handbrake already, as in GTA V. On the default bindings of those
             // buttons (the physical button is read here).
-            if (m.vLayout && !blocked)
+            if (m.vLayout && gameplayPad)
             {
                 if (padButton(GAMEPAD_TOUCHPAD))
                     buttons |= kSelect;
