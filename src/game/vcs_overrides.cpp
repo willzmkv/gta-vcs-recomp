@@ -24,6 +24,7 @@
 #include "game/vcs_particle_timing.h"
 #include "game/vcs_physics_timing.h"
 #include "game/vcs_music_timing.h"
+#include "game/vcs_siren_timing.h"
 #include "game/vcs_inflate.h"
 #include "game/vcs_sound.h"
 #include "game/vcs_stream.h"
@@ -1210,6 +1211,7 @@ namespace
         vcs::installMusicTimingHooks(runtime);   // the radio off the air on the time step (game/vcs_music_timing.h)
         vcs::installParticleTimingHooks(runtime); // particle fades and emitters on the time step (game/vcs_particle_timing.h)
         vcs::installEffectsTimingHooks(runtime);  // lightning, clouds, shake ... at 30 a second (game/vcs_effects_timing.h)
+        vcs::installSirenTimingHooks(runtime);    // emergency siren / horn tap history (game/vcs_siren_timing.h)
         vcs::installScriptFixHooks(runtime); // mission scripts stuck above 30 fps (game/vcs_script_fixes.h)
         vcs::installMovieHooks(runtime);     // STINGS / INTRO played natively (game/vcs_movie.h)
         const bool stream = vcs::installStreamHooks(runtime); // disc streaming without the IOP (game/vcs_stream.h)

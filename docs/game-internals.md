@@ -411,6 +411,17 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
   - timestamps (stored, compared with frame - 1: "seen last frame"): FUN_00383028 .. 003868c0, 003ac9c8 - harmless.
   - The four outside the 2D pass (identified 2026-11-14, below): FUN_001419d0 / 0033dca0 gate wheel spray / sand
     particles, 003f29d8 a hull splash, 002af6e0 the HUD bar flash's countdown.
+  - **Emergency lights / siren horn-tap history** (2026-11-24, `gothamor#209`): `CPad::Update` (`0x002843D8`, single
+    caller `CPad::UpdatePads` `0x00284390`) advances `m_nCurrentHornHistory` (`CPad+0xA2`, `0..7`) and stores
+    `GetHorn` (`0x00285E08`) into `m_bHornHistory[8]` (`CPad+0x9A..0xA1`) once per frame (`CPad 0 = 0x005147A8`). Both
+    `CAutomobile::ProcessControl` (`0x0013A0A0` at `0x13E5EC`) and `CBike::ProcessControl` (`0x00337208` at `0x33BF9C`)
+    check `CVehicle::UsesSiren` (`0x003E9768`) and inspect three ring slots (`cur`, `(cur + 7) & 7`, `(cur + 1) & 7`):
+    releasing within `< 7` frames (`hist[cur] == 0 && prev != 0 && old == 0`, ~233 ms at 30 fps) toggles bit `0x200000` at
+    `veh+0x268` (`m_bSirenOrAlarm`), while holding `>= 7` frames (`cur != 0 && prev != 0 && old != 0`) sets `veh+0x2B4 = 1`
+    for the continuous horn. Above 30 fps (e.g. 48.6 ms at 144 fps), quick taps exceeded 7 frames and failed to toggle
+    the lights. `src/game/vcs_siren_timing.cpp` hooks `0x002843D8` and `CPad::Clear` (`0x00283788` at `ra == 0x002843BC`
+    after `CPad::Update(pad0, 0)`) to pace `pad0+0x9A..0xA2` on `CTimer`'s unscaled ms clock (`0x00488280`, ~230 ms hold
+    threshold; `VCS_SIREN_TIMING=0` = before).
 - **Effects that run per frame** (survey 2026-11-14, after the motion blur's trails were found to be per frame (6g);
   `tools/eedecomp.py` of the readers of the frame counter, the step and the particle entry, decompiles in
   `build/analysis/decomp/particle_*.c` / `fx_*.c`; static unless said. x4.8 = 144 fps against the PS2's 30):
