@@ -50,11 +50,12 @@ namespace vcs
         constexpr uint32_t kIm2DRender = 0x002FBE08u;        // (prim, vertices, count): RwIm2DRenderPrimitive
         constexpr uint32_t kIm2DRenderIndexed = 0x002FBE68u; // (prim, vertices, count, indices, indexCount)
         constexpr uint32_t kHudDraw = 0x0031C628u;           // CHud::Draw
+        constexpr uint32_t kHudAfterFade = 0x0031CA80u;      // CHud::DrawAfterFade (subtitles, mission titles over fades)
         constexpr uint32_t kHudZ = 0x00FFFFFEu;              // the HUD's Im2D z (the far plane)
         constexpr uint32_t kRenderStateSet = 0x00175198u;    // RwRenderStateSet(state, value); 6 = rwRENDERSTATEZTESTENABLE
 
         PS2Runtime::RecompiledFunction g_origRender = nullptr, g_origRenderIndexed = nullptr, g_origHudDraw = nullptr,
-                                       g_origRenderStateSet = nullptr;
+                                       g_origHudAfterFade = nullptr, g_origRenderStateSet = nullptr;
         bool g_inHud = false;    // game thread
         bool g_inMenu = false;   // the frontend's draw (FUN_003b53f8) to the frame kick; game thread
         constexpr uint32_t kMenuDraw = 0x003B53F8u; // the frontend / pause menu's draw, called from FUN_0021f7d8
@@ -467,6 +468,20 @@ namespace vcs
             g_origHudDraw(rdram, ctx, runtime);
         }
 
+        // CHud::DrawAfterFade runs even when CHud::Draw is skipped (fade-out and cutscene entry);
+        // keep subtitles and mission titles in the 16:9 HUD bucket rather than 4:3 centre fallback.
+        PS2_GUEST_CC void hudAfterFade(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (g_hooked && !g_inMenu && !g_inLoading)
+            {
+                if (traceNow() && !g_inHud)
+                    std::fprintf(stderr, "[im2d] --- hud-after-fade (%08x)\n", kHudAfterFade);
+                g_inHud = true;
+                g_inRadar = false;
+            }
+            return g_origHudAfterFade(rdram, ctx, runtime);
+        }
+
         PS2_GUEST_CC void radarDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             g_inRadar = true;
@@ -611,6 +626,13 @@ namespace vcs
         runtime.replaceFunction(kRenderStateSet, &renderStateSet);
         runtime.replaceFunction(kIm2DRender, &im2dRender);
         runtime.replaceFunction(kIm2DRenderIndexed, &im2dRenderIndexed);
+        const char *afterFadeEnv = std::getenv("VCS_HUD_AFTER_FADE");
+        if (!(afterFadeEnv && afterFadeEnv[0] == '0'))
+        {
+            g_origHudAfterFade = runtime.lookupFunction(kHudAfterFade);
+            if (g_origHudAfterFade)
+                runtime.replaceFunction(kHudAfterFade, &hudAfterFade);
+        }
         if (on)
         {
             const char *menus = std::getenv("VCS_MENU_NATIVE"); // 0: menus drawn into the frame buffer as before
