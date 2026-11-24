@@ -520,10 +520,10 @@ dropped on uploads (lazy render-target patching).
       faster at 144 fps). The mission adds fixed amounts per frame (heat floor +0.015, heat +-1); a survey of all of
       MAIN.SCM (disassembled: every bar's variables, every per-frame float rate, every int counter) found the same in 11
       more: LOU_B1 girls, UMB_B2 havoc, DIA_C2 time, REN_C3 Phil, UMB_B3 stress rates, FIREHEL water / heli damage,
-      MEN_C6 pressure, the driving range / GON_C2 aim, DIA_C4 searchlights, LOU_B2 escape distances. 30 instructions
+      MEN_C6 pressure, the driving range / GON_C2 aim, DIA_C4 searchlights, LOU_B2 escape distances; plus (`2026-11-24`, `gothamor#208`) TAXI's passenger tip bar (`$G1532` at `+0x15B7`, `+0x1646`, `+0x16EE`, which drained `57.70 / s` at 144 fps vs `12.00 / s` at 30 fps). 33 instructions
       scaled by step / (50/30) in the script VM's arithmetic handlers (`src/game/vcs_script_timing.cpp`), only when
       the frame isn't the PS2's. PHI_A2 at 1/144: heat floor 2.162 -> 0.4496 a second (0.450 at 1/30), heat at +1:
-      144 -> 29.5 (29.1 at 1/30). `framerate_audit.py` scenario `heat`, `--sites` (all 30 found). game-internals.md 11f.
+      144 -> 29.5 (29.1 at 1/30); TAXI at 60/144/240: `12.00`/`11.98`/`12.40` / s (`57.50` with `VCS_SCRIPT_TIMESTEP=0`). `framerate_audit.py` scenario `heat`, `--sites`. game-internals.md 11f.
 - [x] Vehicle physics on the time step (2026-10-28, user report: at high frame rates a car running over someone jumped
       far more than it should, and a stolen bike sometimes flipped forward). Two per-frame amounts without the step:
       FUN_003F34F0 pushes a wheel up once a frame while a dead or knocked-down ped is under it (the bump of a body;
