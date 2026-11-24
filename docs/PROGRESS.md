@@ -1549,3 +1549,9 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
   1.19 / 1.20 s, a car's first second 11.2 -> 10.4 / 9.95 m/s, run-over throw 1.37 -> 0.99 / 0.72 m/s, bike lean per g
   0.56 -> 0.60 / 0.63, bike braking lean 5.9 -> 8.8 / 7.4 deg; bikewater depth 2.68 -> 2.86 / 2.93 m. The `brake`
   scenario's 30 fps column did not run (the car never moved): no comparison there. These are after 1.0.0.
+
+## 2026-11-24 - Diagonal Walk & Analog Left-Stick Square Deadzone (`willzmkv/gta-vcs-recomp#93`)
+
+- **Cause**: `FUN_002843d8` calls `FUN_002842e8` per stick axis (`|byte - 128| <= 42 -> 0`, `43..127 -> (|v|-42)*127/85`), applying an independent `±42` square deadzone on `(rx, ry, lx, ly)` before `PlayerControlZelda` (`FUN_00232de8`) computes `sqrtf(lx^2 + ly^2) / 60.0f`. Radial scaling for diagonal keyboard `Walk` (`Alt`, default `keys.walk_speed=45%`) produced bytes `168 (+40)` / `87 (-41)` inside `±42` so both axes zeroed (`Alt+W+D/W+A/S+D/S+A` and `Aim+Alt+W+D` froze at `0.14–0.22 m/s`); partial/shallow analog gamepad left-stick tilts (past `deadzoneLeft=12%`) were similarly zeroed or snapped to cardinal directions.
+- **Fix**: `src/game/vcs_input.cpp` extracts `stickTarget` (reusing `rawFor`) to map diagonal `Walk` (`VCS_DIAG_WALK`, default on; `VCS_DIAG_WALK=0` restores prior behavior while preserving cardinal `Walk` byte `70`) and non-key gamepad left-stick axes (`!walk`) past PS2's `±42` per-axis square deadzone.
+- **Verified**: `python tools/controls_check.py` (`96 checks, 0 failed`, including `walk key ly 70`, `diagonal walk moves Vic 1.59 m, lx 181 ly 75`, and `gamepad partial diagonal moves Vic 1.28 m, lx 193 ly 63`); A/B probes across `30 / 60 / 144 / 240 FPS` (`Alt+W+D/W+A/S+D/S+A`, `Aim+Alt+W+D`, `Pad(0.32,-0.32)`, `Pad(0.38,-0.38)`, `Pad(0.95,-0.30)`).

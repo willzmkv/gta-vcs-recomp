@@ -212,6 +212,7 @@ namespace vcs::input
         std::mutex g_mapMutex;
         Map g_map;
         bool g_enabled = true; // VCS_INPUT_MAP
+        bool g_diagWalk = true; // VCS_DIAG_WALK
         std::atomic<bool> g_backgroundPause{false}; // game.background = Pause and the window is behind others
         std::atomic<uint64_t> g_lastReport{0};       // buttons | rx << 16 | ry << 24 | lx << 32 | ly << 40 ("padstate")
         std::atomic<uint32_t> g_reads{0};            // pad reads so far ("padstate")
@@ -378,6 +379,8 @@ namespace vcs::input
             return g < 0 ? -a : a;
         }
         float stickFloat(int raw) { return raw == 0 ? 0.0f : (raw + 0.5f) / (raw > 0 ? 127.0f : 128.0f); }
+        // Target deflection `t` (-1..1) mapped through the inverse of PS2 FUN_002842e8 so the game reads round(t * 127).
+        float stickTarget(float t) { return stickFloat(rawFor(static_cast<int>(std::lround(std::clamp(t, -1.0f, 1.0f) * 127.0f)))); }
 
         bool readPad(uint8_t *data)
         {
@@ -477,17 +480,50 @@ namespace vcs::input
                 else
                     walk = true;
             }
+            const bool keyLeftX = neg[0] != pos[0], keyLeftY = neg[1] != pos[1];
             float *axes[4] = {&lx, &ly, &rx, &ry};
             for (int a = 0; a < 4; ++a)
                 if (neg[a] != pos[a])
                     *axes[a] = neg[a] ? -1.0f : 1.0f;
-            if (walk)
+            const bool diagWalk = g_diagWalk && walk && lx != 0.0f && ly != 0.0f;
+            if (walk && !diagWalk)
             {
                 const float mag = std::sqrt(lx * lx + ly * ly);
                 if (mag > m.walk)
                 {
                     lx *= m.walk / mag;
                     ly *= m.walk / mag;
+                }
+            }
+            if (g_diagWalk)
+            {
+                if (diagWalk)
+                {
+                    // PS2 FUN_002842e8 zeroes |v| <= 42 per axis: a radial diagonal Walk split (default 0.45 -> +-40/41)
+                    // zeroes both axes. Match cardinal post-curve magnitude radially via stickTarget(), keeping cardinal
+                    // Walk bytes untouched for raw pad checks.
+                    const float mag = std::sqrt(lx * lx + ly * ly);
+                    const float lim = std::max(0.0f, (m.walk * 128.0f - 42.0f) * (127.0f / 85.0f)) / 127.0f;
+                    const float r = std::min(mag, lim);
+                    if (r > 0.0f)
+                    {
+                        lx = stickTarget(lx / mag * r);
+                        ly = stickTarget(ly / mag * r);
+                    }
+                    else
+                    {
+                        lx = 0.0f;
+                        ly = 0.0f;
+                    }
+                }
+                else if (!walk)
+                {
+                    // Compensate PS2's per-axis +-42 square deadzone on analog gamepad left stick so diagonal walks
+                    // and shallow angles past m.deadzoneLeft aren't eaten or snapped to cardinals.
+                    if (!keyLeftX && lx != 0.0f)
+                        lx = stickTarget(lx);
+                    if (!keyLeftY && ly != 0.0f)
+                        ly = stickTarget(ly);
                 }
             }
             // the pause menu: Enter / Escape as Cross / Triangle, the mouse's steps and clicks (game/vcs_frontend.h);
@@ -659,9 +695,8 @@ namespace vcs::input
                     if (on && dt > 0.0f && dt < 0.25f)
                     {
                         // the mouse's speed as the game's stick value, past its dead third
-                        auto tilt = [](float t) { return stickFloat(rawFor(static_cast<int>(std::lround(std::clamp(t, -1.0f, 1.0f) * 127.0f)))); };
-                        g_mouse.x = tilt(dx / dt * m.mouseScale);
-                        g_mouse.y = tilt(up / dt * m.mouseScale);
+                        g_mouse.x = stickTarget(dx / dt * m.mouseScale);
+                        g_mouse.y = stickTarget(up / dt * m.mouseScale);
                     }
                 }
 
@@ -1387,6 +1422,10 @@ namespace vcs::input
         g_rdram = runtime.memory().getRDRAM();
         const char *env = std::getenv("VCS_INPUT_MAP");
         g_enabled = !(env && env[0] == '0');
+        const char *diagEnv = std::getenv("VCS_DIAG_WALK");
+        g_diagWalk = !(diagEnv && diagEnv[0] == '0');
+        if (!g_diagWalk)
+            std::fprintf(stderr, "[input] diagonal left-stick compensation off (VCS_DIAG_WALK=0)\n");
         rebuild();
         if (g_enabled)
             PSPadBackend::setReader(&readPad);

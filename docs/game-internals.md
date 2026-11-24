@@ -3474,6 +3474,12 @@ timing at 60 fps; independent timing at 60 / 144 fps got through, by luck (below
   FUN_002852a8(n)) +2 / +4 left x / y, +6 / +8 right x / y (s16); **+0x96 = DisablePlayerControls** (the right-stick
   getters FUN_00286af0 / FUN_00286b20 return 0 while it is set; FUN_00286b20 negates y when the game's own invert flag
   `0x487A58` is set). Found when mouse pitch below about half a tilt came out a third short.
+- **Left-stick square deadzone on diagonal Walk & analog pad** (`willzmkv/gta-vcs-recomp#93`, `VCS_DIAG_WALK=0` disables):
+  `FUN_002842e8` zeroes each axis independently when `|byte - 128| <= 42`, so radially scaling diagonal `Walk`
+  (default `0.45`) or partial/shallow analog gamepad tilts sent bytes inside `±42` and froze or snapped
+  `PlayerControlZelda` (`FUN_00232de8`). `vcs_input.cpp` (`stickTarget`) now maps diagonal `Walk` (`lx != 0 && ly != 0`)
+  and non-key gamepad left-stick axes (`!walk`) through `rawFor`, preserving cardinal `Walk` bytes while moving
+  cleanly across all diagonals.
 - **scePadRead runs three times per game frame** (366 reads in 122 frames, counted with the `reads=` of `padstate`).
   vcs_input.cpp works the mouse out once per `m_FrameCounter` 0x4CD124 and repeats that report for the frame's other
   reads, so whichever read the game keeps carries it (not measured which one that is).
