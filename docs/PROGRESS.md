@@ -520,10 +520,10 @@ dropped on uploads (lazy render-target patching).
       faster at 144 fps). The mission adds fixed amounts per frame (heat floor +0.015, heat +-1); a survey of all of
       MAIN.SCM (disassembled: every bar's variables, every per-frame float rate, every int counter) found the same in 11
       more: LOU_B1 girls, UMB_B2 havoc, DIA_C2 time, REN_C3 Phil, UMB_B3 stress rates, FIREHEL water / heli damage,
-      MEN_C6 pressure, the driving range / GON_C2 aim, DIA_C4 searchlights, LOU_B2 escape distances. 30 instructions
+      MEN_C6 pressure, the driving range / GON_C2 aim, DIA_C4 searchlights, LOU_B2 escape distances; plus (`2026-11-24`, `gothamor#208`) TAXI's passenger tip bar (`$G1532` at `+0x15B7`, `+0x1646`, `+0x16EE`, which drained `57.70 / s` at 144 fps vs `12.00 / s` at 30 fps). 33 instructions
       scaled by step / (50/30) in the script VM's arithmetic handlers (`src/game/vcs_script_timing.cpp`), only when
       the frame isn't the PS2's. PHI_A2 at 1/144: heat floor 2.162 -> 0.4496 a second (0.450 at 1/30), heat at +1:
-      144 -> 29.5 (29.1 at 1/30). `framerate_audit.py` scenario `heat`, `--sites` (all 30 found). game-internals.md 11f.
+      144 -> 29.5 (29.1 at 1/30); TAXI at 60/144/240: `12.00`/`11.98`/`12.40` / s (`57.50` with `VCS_SCRIPT_TIMESTEP=0`). `framerate_audit.py` scenario `heat`, `--sites`. game-internals.md 11f.
 - [x] Vehicle physics on the time step (2026-10-28, user report: at high frame rates a car running over someone jumped
       far more than it should, and a stolen bike sometimes flipped forward). Two per-frame amounts without the step:
       FUN_003F34F0 pushes a wheel up once a frame while a dead or knocked-down ped is under it (the bump of a body;
@@ -655,6 +655,10 @@ dropped on uploads (lazy render-target patching).
       samples with almost none, first 15 s then the next 15): 30 fps 10.0 / 7.9 / 28%, 11.0 / 3.7 / 0%; 144 fps before
       11.6 / 14.0 / 52%, 11.2 / 13.1 / 48%; 144 fps now 9.8 / 6.7 / 21%, 10.6 / 4.7 / 3%. The short pulse when rain
       starts and the camera-facing sheets are the PS2's own.
+- [x] **High-FPS cutscene pacing, HUD / radio logo timers & aim retry windows (`gothamor#180`, 2026-11-24)**:
+      - `vcs_framerate.cpp`: `timerEnsure` previously floored `ms_fTimeStep` below `50/240` (`0.208333f`), making cutscenes run `+3.4%` fast at `240` fps and `2.0x` fast at `480` fps; lowered the floor to `0.001f` (`VCS_EXACT_STEP=0` restores `50/240`). Measured cutscene clock ratio (`dcs/dms`, `VCS_TIMESTEP=240` / `480`): `1.0344` (`+0.276 s`) / `2.0022` (`+3.012 s`) before -> **`1.0005` (`+0.004 s`)** / **`1.0013` (`+0.004 s`)** now.
+      - `vcs_effects_timing.cpp` 13: held radio station HUD logo counters (`FUN_0018BBE0` -> `0x486160..62`, `obj+0x5F0`) and `CHud` flash counters (`FUN_0031E3F8` -> `0x488640`, `FUN_0031FFF0` -> `0x488654`) on 30 Hz PS2 ticks, plus fractional ms carry on `CutsceneMgr::Update` (`FUN_00428470`) fade-out (`mgr+0x98`). Clean radio station logo (`Q` / L1, `0x486160` 60->0): `1500 ms` from `41` (`scaled60 2195 ms`) at `30` fps; `431 ms` (`62` frames) at `144` fps before -> **`2000 ms` (`288` frames)** now. (Flash counters read in code.)
+      - `vcs_aim.cpp` (`VCS_AIM_TIMING=0` off): scaled retry/blend/hand-back counters (`kRetryFrames`, `kAssistFrames`, `g_wait`, `g_quickBlend`, `g_handBack`, `20.0f` entering window) by 30 Hz PS2 frame steps. Sprint+RMB free-aim hold-release spans: `567/300/733/333 ms` at `30` fps; `139/56/139/90 ms` at `144` fps before -> **`660/264/673/285 ms`** at `144` fps now.
 - [ ] Fixes for what changes at the shorter step (physics, animations, script waits, particles, camera), each behind
       the switch; frame pacing. Left from the script survey (game-internals.md 11f): per-frame object / camera /
       text animations in missions (looks only). Effects survey (2026-11-14, game-internals.md 4 "Effects that run per
@@ -1020,6 +1024,12 @@ dropped on uploads (lazy render-target patching).
   "Tunnel vision", `src/game/vcs_hud.cpp`, `VCS_HAZE_FILL=0` = before). Checked: screenshots at 16:9 with HUD Keep 4:3
   and Screen edges, 21:9, 4:3 (unchanged); `tools/haze_check.py` (every piece anchored "stretch" in 376 frames, the
   HUD's right cluster at the right edge in all of them).
+- **Mission title 16:9 anchor during transitions** (2026-11-24, `willzmkv/gta-vcs-recomp#99`): on fade-out and cutscene-entry
+  frames, `FUN_0021f900` calls `CHud::DrawAfterFade` (`0x0031ca80`) without `CHud::Draw` (`0x0031c628`) having run first, so
+  `vcs_hud.cpp` left `g_inHud = false` and `gs_hw.cpp` fell back to `GSHwAnchorCentre`, snapping the bottom-right mission title
+  inward (~160 px at 720p) to the 4:3 edge. `0x0031ca80` is now hooked to set `g_inHud = true` and `g_inRadar = false` outside
+  menus and loading (`VCS_HUD_AFTER_FADE=0` = before). Checked A/B on `JER_A1` at 30 / 60 / 144 fps in hidden 1280x720 runs:
+  `VCS_HUD_AFTER_FADE=0` shifts to `708..1077`, default holds `866..1238` through every fade and transition frame.
 
 - **Trainer** (2026-10-26, docs/TRAINER.md): an RDR2 Native Trainer style menu (F5 / Back + RB) - god mode, never
   wanted, wanted level, money, every weapon and loadouts, unlimited ammo, no reload, spawning all 110 vehicles,
@@ -1261,7 +1271,9 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_PHYSICS_TIMESTEP=0` | the push of a body under a wheel, the rolling resistance, a bike's brake wobble, rotor blades against walls and the water cannon's reach stay per frame (game-internals.md 4; the reference) |
 | `VCS_MUSIC_TIMESTEP=0` | radio stations off the air advance a frame's worth per frame, as on the PS2 (game-internals.md 9; the reference) |
 | `VCS_PARTICLE_TIMING=0` | particles fade, grow and spawn once a frame (before 2026-11-14: smoke 1/4.8 as long at 144 fps, fires thin) |
-| `VCS_EFFECTS_TIMING=0` | lightning, sun glare, clouds, camera shake, the video overlay, the photo flash, the HUD bar flash, peds fading, streaks, rubbish, steam after rain, rain streaks starting, explosions (bursts, length, flicker) and the banknote spray step once a frame (before 2026-11-14) |
+| `VCS_EFFECTS_TIMING=0` | lightning, sun glare, clouds, camera shake, the video overlay, the photo flash, the HUD bar / breath / value-change flash, the radio station logo, peds fading, streaks, rubbish, steam after rain, rain streaks starting, explosions (bursts, length, flicker), the banknote spray, and the cutscene fade-out carry stay per frame (before 2026-11-14 / 2026-11-24) |
+| `VCS_EXACT_STEP=0` | keep the old `50/240` step floor in `timerEnsure` instead of `0.001f` (the reference above 240 fps; `VCS_MIN_STEP` overrides either) |
+| `VCS_AIM_TIMING=0` | keep free-aim / shotgun ADS retry, blend and hand-back counters ticking 1 per host frame instead of scaled 30 Hz steps (the reference above 30 fps) |
 | `VCS_SIREN_TIMING=0` | `CPad 0`'s 8-frame horn history (`pad0+0x9A..0xA2`) advances per frame instead of real time (~49 ms tap window at 144 fps; `gothamor#209`, as before 2026-11-24) |
 | `VCS_SIREN_LOG=1` | log horn press, hold threshold (>~230 ms) and release tap/horn decisions (`src/game/vcs_siren_timing.cpp`) |
 | `VCS_EFFECTS_LOG=1` | every 30 s of real time: frames and PS2 frames a second, lightning bursts (count, length), cloud turn / spin a second, and each effect's steps / rolls that took effect a second (with `VCS_EFFECTS_TIMING=0`: the per-frame counts) |
@@ -1355,6 +1367,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_WIDESCREEN=1` / `=game` | the game's own (PS2, anamorphic Vert-) widescreen preference forced on / left to the game and its saves (normally kept off); both show its pause-menu row again |
 | `VCS_SCOPE_FILL=0` | widescreen: the scope / camera mask's side bars squeezed into the middle 4:3 as before 2026-11-06 (the world shows beside the scope) |
 | `VCS_HAZE_FILL=0` | widescreen: the tunnel vision's quarters grouped with the HUD and kept at 4:3 in the middle as before 2026-11-10 (Purple Haze's haze leaves the sides clear) |
+| `VCS_HUD_AFTER_FADE=0` | `CHud::DrawAfterFade` (`0x0031ca80`) does not open the HUD context when `CHud::Draw` was skipped (mission titles / subtitles on fades snap back to 4:3, as before 2026-11-24) |
 | `VCS_HIDE_WIDESCREEN=0` | the pause menu's Display page keeps the game's Widescreen row (the preference still kept off) |
 | `VCS_TRACE_VISIBLE=1` | CCamera::IsSphereVisible: visible ratio every 5 s, samples with the camera-space point and the planes |
 | `VCS_HUD_NATIVE=0` | the HUD drawn into the PS2 frame buffer instead of the native layer at the window's size |
@@ -1524,6 +1537,25 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `python tools/minidbg.py <exe> <iso>` | catch fail-fast crashes with a stack |
 | `VCS_HD_SAME_ID_DUPES=1` | HD world: fallback to old `sameSphere()` behavior that also drops second-bucket records of the same detailed sector `id` at `r >= 20` (reproduces #36 missing Downtown construction glass) |
 | `VCS_HD_SHOW_HIDDEN_EXTRA=1` | HD world: fallback restoring the prior extra-cell `hide = 0` override on `0x8000` hidden records (reproduces #90 Fort Baxter `5889`/`5890` coarse ground overlap during `07:00`/live reloads) |
+| `VCS_CAR_AIM_PITCH=0` | car drive-by free aim: fallback restoring the PS2 `-5` degree downward pitch limit instead of `-35` degrees (`#177` Jive Drive) |
+| `VCS_HD_SWEEP_BOUNDS=0` | HD world: fallback restoring unbounded `kMaxGid` table walks and unguarded `freePacket()` calls (reproduces #207 60 FPS `DIA_C3` geometry-table overrun / `'splash'` heap corruption) |
+| `VCS_CAR_VALID=0` | Gameplay: fallback restoring PS2's 40-slot bounds in `CVehicle::IsVehiclePointerValid_NotInWorld` and `DOES_VEHICLE_EXIST` `0x034B` (reproduces #207 DomestoBot stuck when spawned at slot >= 40) |
+| `VCS_REMOTE_DRIVE=0` | Controls: fallback disabling keyboard/driving scheme routing while piloting an RC vehicle (`Players[0].m_pRemoteVehicle`) |
+| `VCS_BMX_CAM=0` | Camera: disable the #166 BMX follow-camera fix in `vcs_carcam.cpp` (leaves `CBmx` `+0x354 == 8` unmapped in `FUN_0029FAF0` for A/B comparison) |
+
+## 2026-11-24 - v1.0.1 Block A (#166 BMX camera)
+
+- **#166 (`vcs_carcam.cpp`):** mapped `CBmx` (`veh + 0x354 == 8`) to `CBike` (`6`) and floored `CColModel +0x28` `max.z` (`0.538 m` / `0.685 m`) to `0.71f` across `FUN_0029FAF0` (`FollowVehicle`), then restored both immediately after the call (`VCS_BMX_CAM=0` restores original). Fixes Rockstar's omission of `type == 8` next to `type == 6` / Quad (`230`), moving BMX from car `row[0]` (`0x487BE8`, `tgtZ +0.300 / srcZ +0.801 m`) to motorcycle `row[2]` + bike speed FOV + `+0x668` wheel checks at motorcycle rider framing (`tgtZ +0.681 / srcZ +1.30..+1.33 m`, aligned with `Sanchez` `+0.681 / +1.388 m`; verified A/B `4:3` & `16:9` widescreen, `30/60/144/240 FPS`, and `tools/controls_check.py` `94/94 PASS`).
+
+## 2026-11-24 - Planejamento v1.0.1 (#177, #198, #207)
+
+- **#207 (`vcs_distance.cpp`, `vcs_input.cpp`, `vcs_world_hd.cpp`):**
+  - Hooked `CVehicle::IsVehiclePointerValid_NotInWorld` (`FUN_003EA008`) and SCM `DOES_VEHICLE_EXIST` (`FUN_003D64C8`, `0x034B`) against `*(pool + 8)` (`VCS_CAR_VALID=0` fallback) so mission vehicles spawned in expanded pool slots (`>= 40`, e.g. DomestoBot in `DIA_C3`) unfreeze properly (`ec = 0x2` vs `0x40000006`).
+  - Routed active `Players[0].m_pRemoteVehicle` through `game.driving` in `vcs_input.cpp` (`VCS_REMOTE_DRIVE=0` fallback) so keyboard `W`/`S` drive RC vehicles cleanly without triggering car radio wheel tuning.
+  - Bounded `vcs_world_hd.cpp` table walks by `*(g_info + 0x12Cu)` (`tableCount()`), reset `g_maxGid = 0` on level changes, and guarded `sweepPackets` / `sweepDependents` with `inPacketHeap()` (`VCS_HD_SWEEP_BOUNDS=0` fallback), eliminating the 60 FPS `DIA_C3` cutscene heap corruption (`0x00521c61` -> `0x02000001` `'splash'` TXD overwrite).
+  - Verified in ThinLTO: `verify_207.py` passed across `30 / 60 / 144 / 240 FPS` + `VCS_CAR_VALID=0` / `VCS_REMOTE_DRIVE=0` A/B; `controls_check.py` `94/94 PASS`.
+- **#198 (`Lost and Found`, `LAN_C9`):** investigated `MAIN.SCM` & combat helpers; verified Lance aims, fires, reloads (`30->0->29`), and clears all enemy boats across `30 / 60 / 144 / 240 FPS` (not reproducible on `hd-world-merge`).
+- **#177 (`src/game/vcs_aim.cpp`):** widened `kCarPitchDown` in `scripted()` car drive-by mode from `-5°` (`-0.0872665f`) to `-35°` (`-0.6108652f`, `VCS_CAR_AIM_PITCH=0` fallback), allowing players in *Jive Drive* (`LAN_B1`) and car drive-bys to aim down onto road level, adjacent cars, and wheels. Validated A/B (`repro_177.py`: `-3.16°` vs `-35.62°` dummy / `-37.29°` camera, adjacent low ped killed `100 -> 0`, active `LAN_B1` chase `-35.23°`) and ThinLTO `controls_check.py`.
 
 ## 2026-11-23 - Hotfix v1.0.06 (#90, input, prompts, menu tabs, HD world Fort Baxter LOD)
 
@@ -1557,3 +1589,9 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
   1.19 / 1.20 s, a car's first second 11.2 -> 10.4 / 9.95 m/s, run-over throw 1.37 -> 0.99 / 0.72 m/s, bike lean per g
   0.56 -> 0.60 / 0.63, bike braking lean 5.9 -> 8.8 / 7.4 deg; bikewater depth 2.68 -> 2.86 / 2.93 m. The `brake`
   scenario's 30 fps column did not run (the car never moved): no comparison there. These are after 1.0.0.
+
+## 2026-11-24 - Diagonal Walk & Analog Left-Stick Square Deadzone (`willzmkv/gta-vcs-recomp#93`)
+
+- **Cause**: `FUN_002843d8` calls `FUN_002842e8` per stick axis (`|byte - 128| <= 42 -> 0`, `43..127 -> (|v|-42)*127/85`), applying an independent `±42` square deadzone on `(rx, ry, lx, ly)` before `PlayerControlZelda` (`FUN_00232de8`) computes `sqrtf(lx^2 + ly^2) / 60.0f`. Radial scaling for diagonal keyboard `Walk` (`Alt`, default `keys.walk_speed=45%`) produced bytes `168 (+40)` / `87 (-41)` inside `±42` so both axes zeroed (`Alt+W+D/W+A/S+D/S+A` and `Aim+Alt+W+D` froze at `0.14–0.22 m/s`); partial/shallow analog gamepad left-stick tilts (past `deadzoneLeft=12%`) were similarly zeroed or snapped to cardinal directions.
+- **Fix**: `src/game/vcs_input.cpp` extracts `stickTarget` (reusing `rawFor`) to map diagonal `Walk` (`VCS_DIAG_WALK`, default on; `VCS_DIAG_WALK=0` restores prior behavior while preserving cardinal `Walk` byte `70`) and non-key gamepad left-stick axes (`!walk`) past PS2's `±42` per-axis square deadzone.
+- **Verified**: `python tools/controls_check.py` (`96 checks, 0 failed`, including `walk key ly 70`, `diagonal walk moves Vic 1.59 m, lx 181 ly 75`, and `gamepad partial diagonal moves Vic 1.28 m, lx 193 ly 63`); A/B probes across `30 / 60 / 144 / 240 FPS` (`Alt+W+D/W+A/S+D/S+A`, `Aim+Alt+W+D`, `Pad(0.32,-0.32)`, `Pad(0.38,-0.38)`, `Pad(0.95,-0.30)`).

@@ -221,10 +221,17 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
         {
             return g_rdram[addr & PS2_RAM_MASK];
         }
+        uint64_t rd64(uint32_t addr)
+        {
+            uint64_t v;
+            std::memcpy(&v, g_rdram + (addr & PS2_RAM_MASK), 8);
+            return v;
+        }
         void wrf(uint32_t addr, float f) { std::memcpy(g_rdram + (addr & PS2_RAM_MASK), &f, 4); }
         void wr32(uint32_t addr, int32_t v) { std::memcpy(g_rdram + (addr & PS2_RAM_MASK), &v, 4); }
         void wr16(uint32_t addr, uint16_t v) { std::memcpy(g_rdram + (addr & PS2_RAM_MASK), &v, 2); }
         void wr8(uint32_t addr, uint8_t v) { g_rdram[addr & PS2_RAM_MASK] = v; }
+        void wr64(uint32_t addr, uint64_t v) { std::memcpy(g_rdram + (addr & PS2_RAM_MASK), &v, 8); }
 
         uint32_t poolSize(uint32_t global)
         {
@@ -1455,6 +1462,115 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             ctx->pc = GPR_U32(ctx, 31);
         }
 
+        // CVehicle::IsVehiclePointerValid_NotInWorld (FUN_003EA008) and the SCM command FUN_003D64C8 (opcode 0x034B,
+        // DOES_VEHICLE_EXIST) hardcode the PS2's 40-slot vehicle pool (`sltiu 0x29` in FUN_003EA008; `((slot - 1) < 0x27)`
+        // in FUN_003D64C8). With `kLargeCars` (140), any vehicle spawned from slot 40 up - such as DomestoBot in DIA_C3
+        // when sub_1e8d runs OP 0x034B($G1517) after Armando's cutscene (issue 207) - fails 0x034B, skips 0x0325(car, 0)
+        // to clear its frozen flags, and stays stuck in place. Both check the pool's dynamic size instead. VCS_CAR_VALID=0:
+        // keep the original PS2 bounds (A / B).
+        constexpr uint32_t kCarValidNotInWorld = 0x003EA008u;
+        constexpr uint32_t kCarScriptValid = 0x003D64C8u, kCarScriptValidResume = 0x003D64F0u;
+        constexpr uint32_t kCollectScriptParams = 0x00254B90u, kScriptParam0 = 0x0050DEF8u;
+        std::atomic<uint64_t> g_carValidCalls{0}, g_carValidHigh{0};
+        std::atomic<uint64_t> g_carScriptCalls{0}, g_carScriptHigh{0};
+        bool carSlotValid(uint32_t veh)
+        {
+            const uint32_t pool = static_cast<uint32_t>(rd32(kCarPool));
+            if (!pool)
+                return false;
+            const uint32_t diff = veh - static_cast<uint32_t>(rd32(pool));
+            const uint32_t size = static_cast<uint32_t>(rd32(pool + 8u));
+            const bool valid = diff < size * 0x8C0u && (diff % 0x8C0u) == 0u;
+            g_carValidCalls.fetch_add(1, std::memory_order_relaxed);
+            if (valid && diff >= 40u * 0x8C0u)
+                g_carValidHigh.fetch_add(1, std::memory_order_relaxed);
+            return valid;
+        }
+        PS2_GUEST_CC void carValidNotInWorld(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
+        {
+            g_rdram = rdram;
+            const uint32_t veh = GPR_U32(ctx, 4);
+            SET_GPR_U32(ctx, 2, veh != 0u && carSlotValid(veh) ? 1u : 0u);
+            ctx->pc = GPR_U32(ctx, 31);
+        }
+        bool carHandleScriptValid(int32_t handle)
+        {
+            const int32_t slot = handle >> 8;
+            const uint32_t pool = static_cast<uint32_t>(rd32(kCarPool));
+            if (!pool || slot <= 0)
+                return false;
+            const uint32_t size = static_cast<uint32_t>(rd32(pool + 8u));
+            if (size <= 1u || static_cast<uint32_t>(slot) >= size)
+                return false;
+            const uint32_t entries = static_cast<uint32_t>(rd32(pool));
+            const uint32_t flags = static_cast<uint32_t>(rd32(pool + 4u));
+            return entries != 0u && rd8(flags + static_cast<uint32_t>(slot)) == (static_cast<uint32_t>(handle) & 0xFFu);
+        }
+        PS2_GUEST_CC void carScriptValid(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            g_rdram = rdram;
+            if (ctx->pc != kCarScriptValidResume)
+            {
+                const uint32_t sp = ADD32(GPR_U32(ctx, 29), static_cast<uint32_t>(-0x20));
+                SET_GPR_S32(ctx, 29, static_cast<int32_t>(sp));
+                wr64(sp, GPR_U64(ctx, 16));
+                wr64(ADD32(sp, 8u), GPR_U64(ctx, 17));
+                wr64(ADD32(sp, 16u), GPR_U64(ctx, 31));
+                const uint32_t script = GPR_U32(ctx, 4);
+                SET_GPR_U64(ctx, 16, GPR_U64(ctx, 4));
+                SET_GPR_S32(ctx, 17, 0x00510000);
+                SET_GPR_S32(ctx, 5, static_cast<int32_t>(ADD32(script, 0x10u)));
+                SET_GPR_S32(ctx, 6, 1);
+                SET_GPR_S32(ctx, 7, static_cast<int32_t>(kScriptParam0));
+                SET_GPR_U32(ctx, 31, kCarScriptValidResume);
+                if (!runtime->dispatchGuestBranch(rdram, ctx, kCollectScriptParams, 0x003D64E8u, kCarScriptValidResume,
+                                                  PS2Runtime::GuestBranchKind::DirectCall, "JAL"))
+                {
+                    return;
+                }
+                g_rdram = rdram;
+            }
+            const uint32_t script = GPR_U32(ctx, 16);
+            const int32_t handle = rd32(kScriptParam0);
+            bool cond = carHandleScriptValid(handle);
+            g_carScriptCalls.fetch_add(1, std::memory_order_relaxed);
+            if (cond && (handle >> 8) >= 40)
+                g_carScriptHigh.fetch_add(1, std::memory_order_relaxed);
+            if (rd8(script + 0x20Cu) != 0u)
+                cond = !cond;
+            const uint16_t andor = rd16(script + 0x206u);
+            if (andor == 0u)
+            {
+                wr8(script + 0x209u, cond ? 1u : 0u);
+            }
+            else
+            {
+                const uint16_t nextAndOr = static_cast<uint16_t>(andor - 1u);
+                wr16(script + 0x206u, nextAndOr);
+                if (andor < 9u)
+                {
+                    if (rd8(script + 0x209u) != 0u)
+                        wr8(script + 0x209u, cond ? 1u : 0u);
+                }
+                else
+                {
+                    if (rd8(script + 0x209u) != 0u)
+                        cond = true;
+                    wr8(script + 0x209u, cond ? 1u : 0u);
+                    if (nextAndOr < 21u)
+                        wr16(script + 0x206u, 0u);
+                }
+            }
+            const uint32_t sp = GPR_U32(ctx, 29);
+            SET_GPR_U64(ctx, 16, rd64(sp));
+            SET_GPR_U64(ctx, 2, 0u);
+            SET_GPR_U64(ctx, 17, rd64(ADD32(sp, 8u)));
+            const uint64_t ra = rd64(ADD32(sp, 16u));
+            SET_GPR_U64(ctx, 31, ra);
+            SET_GPR_S32(ctx, 29, static_cast<int32_t>(ADD32(sp, 0x20u)));
+            ctx->pc = static_cast<uint32_t>(ra);
+        }
+
         // the pools' constructors, from CPools::Initialise only: larger pools when the main heap has the room.
         // VCS_POOLS=peds,vehicles sets the sizes for a test (0 or missing: the game's).
         bool largePools() { return true; }
@@ -2237,6 +2353,21 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             std::snprintf(text, sizeof(text), "ok calls=%llu high=%llu",
                           static_cast<unsigned long long>(g_pedValidCalls.load(std::memory_order_relaxed)),
                           static_cast<unsigned long long>(g_pedValidHigh.load(std::memory_order_relaxed)));
+            reply(text);
+        });
+        if (!(std::getenv("VCS_CAR_VALID") && std::getenv("VCS_CAR_VALID")[0] == '0'))
+        {
+            runtime.replaceFunction(kCarValidNotInWorld, &carValidNotInWorld);
+            runtime.replaceFunction(kCarScriptValid, &carScriptValid);
+            runtime.replaceFunction(kCarScriptValidResume, &carScriptValid);
+        }
+        ps2control::addCommand("carvalid", [](const std::string &, ps2control::Reply reply) {
+            char text[128];
+            std::snprintf(text, sizeof(text), "ok calls=%llu high=%llu script=%llu script_high=%llu",
+                          static_cast<unsigned long long>(g_carValidCalls.load(std::memory_order_relaxed)),
+                          static_cast<unsigned long long>(g_carValidHigh.load(std::memory_order_relaxed)),
+                          static_cast<unsigned long long>(g_carScriptCalls.load(std::memory_order_relaxed)),
+                          static_cast<unsigned long long>(g_carScriptHigh.load(std::memory_order_relaxed)));
             reply(text);
         });
         if ((g_spotFinder = runtime.lookupFunction(kSpotFinder)))

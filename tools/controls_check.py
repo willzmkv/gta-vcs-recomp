@@ -1050,10 +1050,14 @@ class Check:
         g.cmd("mouse 0 -400")
         g.wait_frames(10)
         up = elevation()
-        g.cmd("mouse 0 %d" % round(math.radians(20.0) * 400))  # level again
+        g.cmd("mouse 0 1000")
+        g.wait_frames(10)
+        down = elevation()
+        g.cmd("mouse 0 %d" % round(math.radians(-35.0) * 400))  # level again
         g.wait_frames(10)
         # (seen from Vic: the game pulls the dummy along the camera's line onto what it hits, a degree or so either way)
-        self.ok("in a car: the aim's height in the game's limits", 18.0 < up < 22.0, "%.1f deg up" % up)
+        self.ok("in a car: the aim's height in the game's limits", 18.0 < up < 22.0 and -37.5 < down < -25.0,
+                "%.1f deg up, %.1f deg down" % (up, down))
 
         hit, missed, shots = self.shot_under_circle(ped, "car_free_aim")
         self.ok("in a car: the shot goes through the circle", hit < 100 and missed == 100 and shots >= 1,
@@ -1350,11 +1354,34 @@ class Check:
             self.ok("Cross rebound", p_g["buttons"] == CROSS and p_shift["buttons"] == 0, "G %s, Shift %s" % (p_g, p_shift))
             self.setting("keys.cross", KEY_SHIFT)
 
-            # walk: the stick at the walking speed while held
+            # walk: the stick at the walking speed while held (both cardinal and diagonal, plus subtle gamepad diagonal)
             self.setting("keys.walk", KEY_G)
             p = self.held("w", "g")
             want = round(128 - 0.45 * 128)
             self.ok("walk key", abs(p["ly"] - want) <= 1, "ly %d (want %d)" % (p["ly"], want))
+            p_dw = self.held("w", "d", "g")
+            before_dw = g.player()[1]
+            for k in ("w", "d", "g"):
+                g.cmd("key %s down" % k)
+            time.sleep(1.0)
+            for k in ("w", "d", "g"):
+                g.cmd("key %s up" % k)
+            time.sleep(0.3)
+            after_dw = g.player()[1]
+            dist_dw = math.hypot(after_dw[0] - before_dw[0], after_dw[1] - before_dw[1])
+            self.ok("diagonal walk moves Vic", dist_dw > 0.8 and p_dw["lx"] > 170 and p_dw["ly"] < 86,
+                    "%.2f m, lx %d ly %d" % (dist_dw, p_dw["lx"], p_dw["ly"]))
+            g.cmd("gamepad on")
+            g.cmd("gamepad lx 0.32")
+            g.cmd("gamepad ly -0.32")
+            p_gd = self.pad()
+            before_gd = g.player()[1]
+            time.sleep(1.0)
+            after_gd = g.player()[1]
+            g.cmd("gamepad off")
+            dist_gd = math.hypot(after_gd[0] - before_gd[0], after_gd[1] - before_gd[1])
+            self.ok("gamepad partial diagonal moves Vic", dist_gd > 0.8 and p_gd["lx"] > 170 and p_gd["ly"] < 86,
+                    "%.2f m, lx %d ly %d" % (dist_gd, p_gd["lx"], p_gd["ly"]))
             walk = self.setting("keys.walk", 0)
             self.ok("walk unbound", walk == "0", walk)
 
