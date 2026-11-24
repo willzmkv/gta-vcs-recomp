@@ -3517,7 +3517,7 @@ timing at 60 fps; independent timing at 60 / 144 fps got through, by luck (below
   and a diff of the vehicle's bytes around a station change): **L1 is the only station button** - the game's own help
   says so ("You can change the radio station you're tuned in to with L1") - and it only steps forwards; the D-pad does
   nothing in a car. The station is the vehicle's **+0x2BA** (u8): 0..8 the nine stations (music streams 0..8), 9 off
-  (stream 9, the one that plays on foot), then 0 again. Each L1 clicks and is counted; **30 frames after the last
+  (stream 9, the one that plays on foot), then 0 again. Each L1 clicks and is counted (`0x48613C` in `FUN_00189AD0`, gated by vehicle check `FUN_0018BA10` / `FUN_0018BAB8`, setting countdown timer `0x4E4810 = 0x19` = 25 frames; applied by `FUN_0018B8D8`); **30 frames after the last
   press** the count is added to the vehicle's station and the radio retunes (the name, then the stream within 2 s; the
   byte still read the old station right after the press and the new one 0.7 s later). Writing the byte alone changes
   nothing that is heard (8 kept playing with 7 written) until the next retune, which starts from the written value:
