@@ -1516,6 +1516,11 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `python tools/minidbg.py <exe> <iso>` | catch fail-fast crashes with a stack |
 | `VCS_HD_SAME_ID_DUPES=1` | HD world: fallback to old `sameSphere()` behavior that also drops second-bucket records of the same detailed sector `id` at `r >= 20` (reproduces #36 missing Downtown construction glass) |
 | `VCS_HD_SHOW_HIDDEN_EXTRA=1` | HD world: fallback restoring the prior extra-cell `hide = 0` override on `0x8000` hidden records (reproduces #90 Fort Baxter `5889`/`5890` coarse ground overlap during `07:00`/live reloads) |
+| `VCS_CAR_AIM_PITCH=0` | car drive-by free aim: fallback restoring the PS2 `-5` degree downward pitch limit instead of `-35` degrees (`#177` Jive Drive) |
+
+## 2026-11-23 - Hotfix v1.0.1 / Block A: Jive Drive downward car aim (#177)
+
+- **#177 (`src/game/vcs_aim.cpp`):** widened `kCarPitchDown` in `scripted()` car drive-by mode from `-5°` (`-0.0872665f`) to `-35°` (`-0.6108652f`, `VCS_CAR_AIM_PITCH=0` fallback), allowing players in *Jive Drive* (`LAN_B1`) and car drive-bys to aim down onto road level, adjacent cars, and wheels. Validated A/B (`repro_177.py`: `-3.16°` vs `-35.62°` dummy / `-37.29°` camera, adjacent low ped killed `100 -> 0`, active `LAN_B1` chase `-35.23°`) and ThinLTO `controls_check.py`.
 
 ## 2026-11-23 - Hotfix v1.0.06 (#90, input, prompts, menu tabs, HD world Fort Baxter LOD)
 

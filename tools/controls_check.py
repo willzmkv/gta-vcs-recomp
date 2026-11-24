@@ -1050,10 +1050,14 @@ class Check:
         g.cmd("mouse 0 -400")
         g.wait_frames(10)
         up = elevation()
-        g.cmd("mouse 0 %d" % round(math.radians(20.0) * 400))  # level again
+        g.cmd("mouse 0 1000")
+        g.wait_frames(10)
+        down = elevation()
+        g.cmd("mouse 0 %d" % round(math.radians(-35.0) * 400))  # level again
         g.wait_frames(10)
         # (seen from Vic: the game pulls the dummy along the camera's line onto what it hits, a degree or so either way)
-        self.ok("in a car: the aim's height in the game's limits", 18.0 < up < 22.0, "%.1f deg up" % up)
+        self.ok("in a car: the aim's height in the game's limits", 18.0 < up < 22.0 and -37.5 < down < -25.0,
+                "%.1f deg up, %.1f deg down" % (up, down))
 
         hit, missed, shots = self.shot_under_circle(ped, "car_free_aim")
         self.ok("in a car: the shot goes through the circle", hit < 100 and missed == 100 and shots >= 1,

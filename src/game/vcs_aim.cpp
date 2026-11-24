@@ -75,9 +75,10 @@ namespace vcs::aim
         constexpr float kStartPitchLimit = 0.35f; // aiming starts about level, not where a steep camera looked
         constexpr uint32_t kCamModeFollowPed = 4;
         constexpr float kStickRate = 2.0f;      // radians a second at full tilt (gamepad)
-        // in a car (the game's drive-by free aim, FUN_002343E0): the dummy at the gun's range from Vic, between 5 deg
-        // below and 20 deg above level (the game's limits for the stick there: 70..95 deg from Vic's up)
-        constexpr float kCarPitchDown = -0.0872665f, kCarPitchUp = 0.3490659f;
+        // in a car (the game's drive-by free aim, FUN_002343E0): PS2 clamped to -5 deg below level, which leaves adjacent
+        // cars' wheels and close ground targets unreachable in Jive Drive (#177); widen downward pitch to -35 deg with
+        // VCS_CAR_AIM_PITCH=0 to restore the PS2 -5 deg limit.
+        constexpr float kCarPitchDownOrig = -0.0872665f, kCarPitchDown = -0.6108652f, kCarPitchUp = 0.3490659f;
         // on foot (the forced free aim): 50..110 deg from Vic's up (20 deg below level, 40 above), and 110 deg either side
         // of his heading
         constexpr float kFootPitchDown = -0.3490659f, kFootPitchUp = 0.6981317f, kFootYawLimit = 1.9198622f;
@@ -513,7 +514,12 @@ namespace vcs::aim
                 const float to = std::clamp(std::remainder(g_yaw + turn - heading, 6.2831855f), -kFootYawLimit, kFootYawLimit);
                 turn = std::remainder(heading + to - g_yaw, 6.2831855f);
             }
-            const float pitch = std::clamp(g_pitch + in.tilt + in.tiltRate * kStickRate * dt, car ? kCarPitchDown : kFootPitchDown,
+            static const bool s_lowerCarPitch = []() {
+                const char *e = std::getenv("VCS_CAR_AIM_PITCH");
+                return !e || e[0] != '0';
+            }();
+            const float minPitch = car ? (s_lowerCarPitch ? kCarPitchDown : kCarPitchDownOrig) : kFootPitchDown;
+            const float pitch = std::clamp(g_pitch + in.tilt + in.tiltRate * kStickRate * dt, minPitch,
                                            car ? kCarPitchUp : kFootPitchUp);
             const float tilt = pitch - g_pitch;
             g_yaw = std::remainder(g_yaw + turn, 6.2831855f);
