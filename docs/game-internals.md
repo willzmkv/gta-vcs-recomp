@@ -1085,6 +1085,15 @@ Im2D calls whose sprite routine was called from FUN_00323FE8 (the saved return a
 (`Part::Screen`): never grouped, anchor Stretch. `VCS_HAZE_FILL=0` = before. Found with `VCS_TRACE_HUDANCHOR`,
 `VCS_TRACE_IM2D` + `VCS_TRACE_IM2D_STACK`, then `tools/eedecomp.py 0x324100`. Check: `tools/haze_check.py`.
 
+**Mission titles / subtitles during transitions** (2026-11-24, GitHub issue 99: a mission's bottom-right title snapped from
+16:9 to 4:3 on fade-out and the first cutscene frames while 3D stayed 16:9): `FUN_0021f900` (called by `FUN_0021e950` at
+0x21ecd0 and `FUN_0021d9e0` at 0x21dab4) calls `CHud::DrawAfterFade` (`FUN_0031ca80` at 0x21f930, `a0 = *(0x48F374)`) to draw
+subtitles and buffered HUD / mission-title text after the screen fade quad (`FUN_0021d068`). On fade-out and cutscene-entry
+frames, `FUN_0021e950` skips `FUN_0021f348` and `FUN_0021d9e0` omits `CHud::Draw` (`0x31c628`) completely, so `vcs_hud.cpp`
+never saw `g_inHud = true` on those frames; `recordPrimitive` in `gs_hw.cpp` fell back to `GSHwAnchorCentre` (`pivot = 320`),
+shifting `[362..616]` inward to `[708..1077]` instead of `[867..1237]` at 1280x720. Hooking `0x0031ca80` in `src/game/vcs_hud.cpp`
+sets `g_inHud = true` and `g_inRadar = false` when `!g_inMenu && !g_inLoading` (`VCS_HUD_AFTER_FADE=0` = before).
+
 ### 6g. How a frame is put together (draw-list dumps, 2026-10-23)
 
 From `PS2X_HW_DUMP` / F12 with `PS2X_HW_DUMP_BATCHES=4` at the hospital (-884, -470), noon and 20:00; the draw

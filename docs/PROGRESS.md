@@ -1014,6 +1014,12 @@ dropped on uploads (lazy render-target patching).
   "Tunnel vision", `src/game/vcs_hud.cpp`, `VCS_HAZE_FILL=0` = before). Checked: screenshots at 16:9 with HUD Keep 4:3
   and Screen edges, 21:9, 4:3 (unchanged); `tools/haze_check.py` (every piece anchored "stretch" in 376 frames, the
   HUD's right cluster at the right edge in all of them).
+- **Mission title 16:9 anchor during transitions** (2026-11-24, `willzmkv/gta-vcs-recomp#99`): on fade-out and cutscene-entry
+  frames, `FUN_0021f900` calls `CHud::DrawAfterFade` (`0x0031ca80`) without `CHud::Draw` (`0x0031c628`) having run first, so
+  `vcs_hud.cpp` left `g_inHud = false` and `gs_hw.cpp` fell back to `GSHwAnchorCentre`, snapping the bottom-right mission title
+  inward (~160 px at 720p) to the 4:3 edge. `0x0031ca80` is now hooked to set `g_inHud = true` and `g_inRadar = false` outside
+  menus and loading (`VCS_HUD_AFTER_FADE=0` = before). Checked A/B on `JER_A1` at 30 / 60 / 144 fps in hidden 1280x720 runs:
+  `VCS_HUD_AFTER_FADE=0` shifts to `708..1077`, default holds `866..1238` through every fade and transition frame.
 
 - **Trainer** (2026-10-26, docs/TRAINER.md): an RDR2 Native Trainer style menu (F5 / Back + RB) - god mode, never
   wanted, wanted level, money, every weapon and loadouts, unlimited ammo, no reload, spawning all 110 vehicles,
@@ -1347,6 +1353,7 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_WIDESCREEN=1` / `=game` | the game's own (PS2, anamorphic Vert-) widescreen preference forced on / left to the game and its saves (normally kept off); both show its pause-menu row again |
 | `VCS_SCOPE_FILL=0` | widescreen: the scope / camera mask's side bars squeezed into the middle 4:3 as before 2026-11-06 (the world shows beside the scope) |
 | `VCS_HAZE_FILL=0` | widescreen: the tunnel vision's quarters grouped with the HUD and kept at 4:3 in the middle as before 2026-11-10 (Purple Haze's haze leaves the sides clear) |
+| `VCS_HUD_AFTER_FADE=0` | `CHud::DrawAfterFade` (`0x0031ca80`) does not open the HUD context when `CHud::Draw` was skipped (mission titles / subtitles on fades snap back to 4:3, as before 2026-11-24) |
 | `VCS_HIDE_WIDESCREEN=0` | the pause menu's Display page keeps the game's Widescreen row (the preference still kept off) |
 | `VCS_TRACE_VISIBLE=1` | CCamera::IsSphereVisible: visible ratio every 5 s, samples with the camera-space point and the planes |
 | `VCS_HUD_NATIVE=0` | the HUD drawn into the PS2 frame buffer instead of the native layer at the window's size |
