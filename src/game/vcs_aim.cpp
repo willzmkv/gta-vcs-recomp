@@ -104,16 +104,41 @@ namespace vcs::aim
         };
         // game thread
         State g_state = State::Idle;
-        int g_wait = 0;               // Entering: frames waited; Released: frames left with R1 up
-        constexpr int kRetryFrames = 8;
-        constexpr int kAssistFrames = 6;    // Assist: reports to wait for the game's lock-on before free aim
-        constexpr float kAssistStick = 0.1f; // Assist: the right stick (rate, squared curve: ~0.3 of the throw) leaves it
-        bool g_assistDone = false;           // this hold of the button went on from the lock-on to free aim
+        float g_wait = 0.0f;            // Entering: PS2-equiv frames waited; Released: PS2-equiv frames left with R1 up
+        constexpr float kRetryFrames = 8.0f;
+        constexpr float kAssistFrames = 6.0f; // Assist: reports to wait for the game's lock-on before free aim
+        constexpr float kAssistStick = 0.1f;  // Assist: the right stick (rate, squared curve: ~0.3 of the throw) leaves it
+        bool g_assistDone = false;            // this hold of the button went on from the lock-on to free aim
         uint32_t g_dummy = 0;
         float g_yaw = 0, g_pitch = 0; // the aim from Vic's shoulders: yaw from +x toward +y, pitch up
-        int g_quickBlend = 0;         // frames left to shorten the camera's blend into / out of free aim
+        float g_quickBlend = 0.0f;      // PS2-equiv frames left to shorten the camera's blend into / out of free aim
         uint32_t g_blendMs = kBlendInMs; // to this
-        int g_handBack = 0;           // frames left to give the follow camera the aim's heading when it is back
+        float g_handBack = 0.0f;        // PS2-equiv frames left to give the follow camera the aim's heading when it is back
+
+        bool aimTimingEnabled()
+        {
+            static const bool on = [] {
+                const char *v = std::getenv("VCS_AIM_TIMING");
+                return !(v && v[0] == '0');
+            }();
+            return on;
+        }
+
+        // Convert the frame step at 0x4CD300 into PS2-equivalent (30 fps) frames so free-aim transitions keep
+        // their real-time duration above 30 fps while matching frame-for-frame at <= 30 fps.
+        float ps2FrameStep()
+        {
+            if (!aimTimingEnabled() || !g_rdram)
+                return 1.0f;
+            constexpr uint32_t kTimeStepNc = 0x004CD300u;
+            constexpr uint32_t kRamMaskLocal = 0x1FFFFFFu;
+            float step = 0.0f;
+            std::memcpy(&step, g_rdram + (kTimeStepNc & kRamMaskLocal), 4);
+            constexpr float kPs2Step = 50.0f / 30.0f;
+            if (step <= 0.0f || step >= kPs2Step * 0.9f)
+                return 1.0f;
+            return std::clamp(step / kPs2Step, 0.05f, 1.0f);
+        }
         float g_handBeta = 0;
         std::atomic<bool> g_active{false};
         std::atomic<uint32_t> g_shots{0}; // shots sent down the camera ray ("aimstate")
@@ -330,9 +355,9 @@ namespace vcs::aim
             if (g_state == State::Active)
                 if (const uint32_t ped = rd32(kPlayerPed); ped && rd32(ped + kPedTarget) == g_dummy)
                     setFreeAimBit(ped, true);
-            if (g_quickBlend > 0)
+            if (g_quickBlend > 0.0f)
             {
-                --g_quickBlend;
+                g_quickBlend = std::max(0.0f, g_quickBlend - ps2FrameStep());
                 if (rdram[kTransition])
                     for (uint32_t at : kTransitionDurations)
                         wr32(at, std::min(rd32(at), g_blendMs));
@@ -565,8 +590,9 @@ namespace vcs::aim
     {
         Output out;
         const uint32_t ped = g_rdram && g_origGame ? rd32(kPlayerPed) : 0;
-        if (g_handBack > 0)
-            --g_handBack; // the camera hasn't come back to the follow camera in time: leave it
+        const float ps2Step = ps2FrameStep();
+        if (g_handBack > 0.0f)
+            g_handBack = std::max(0.0f, g_handBack - ps2Step); // the camera hasn't come back to the follow camera in time: leave it
         if (in.on && scriptFreeAim(ped))
             return scripted(ped, in);
         if (in.on && mountedGun(ped))
@@ -608,14 +634,15 @@ namespace vcs::aim
         switch (g_state)
         {
         case State::Released:
-            if (--g_wait <= 0)
+            g_wait -= ps2Step;
+            if (g_wait <= 0.0f)
                 g_state = State::Idle; // R1 up until now; the next report enters again
             return out;
         case State::Assist:
         {
             const uint32_t target = rd32(ped + kPedTarget);
             const bool stick = std::fabs(in.turnRate) > kAssistStick || std::fabs(in.tiltRate) > kAssistStick;
-            if (in.assist && !stick && (target ? !isObject(target) : ++g_wait < kAssistFrames))
+            if (in.assist && !stick && (target ? !isObject(target) : (g_wait += ps2Step) < kAssistFrames))
             {
                 out.r1 = true; // locked on (or still looking for someone): the game's
                 return out;
@@ -626,7 +653,7 @@ namespace vcs::aim
             if (target)
             {
                 g_state = State::Released;
-                g_wait = 2;
+                g_wait = 2.0f;
                 return out;
             }
             [[fallthrough]];
@@ -636,10 +663,10 @@ namespace vcs::aim
         {
             aimAlongCamera(cam);
             g_state = State::Entering;
-            g_wait = 0;
-            g_quickBlend = 30; // until a few frames after the free-aim lock is there
+            g_wait = 0.0f;
+            g_quickBlend = 30.0f; // until a few frames after the free-aim lock is there
             g_blendMs = kBlendInMs;
-            g_handBack = 0;
+            g_handBack = 0.0f;
             // The camera is the game's until its free aim is there: the mouse keeps turning it meanwhile. Sprinting the
             // game never enters free aim, and taking the camera from the first R1 froze it for each try (20 frames,
             // then 8 turning: the user's "incredibly choppy" turn with the right button held while running).
@@ -652,10 +679,18 @@ namespace vcs::aim
             if (!(isObject(target) && freeAimBit(ped)))
             {
                 // not yet (Vic may still be busy: firing, reloading, changing weapon; sprinting he never gets there).
-                // The game took R1 without L3 and locked on to a ped, or ~20 frames went by: let go a few frames, then
-                // try again. The camera turns as without the button meanwhile; the aim starts where it then looks.
+                // The game took R1 without L3 and locked on to a ped, or ~20 PS2 frames went by: let go a few PS2 frames,
+                // then try again. The camera turns as without the button meanwhile; the aim starts where it then looks.
                 aimAlongCamera(cam);
-                out.r1 = !target && ++g_wait < 20;
+                if (!target)
+                {
+                    g_wait += ps2Step;
+                    out.r1 = g_wait < 20.0f;
+                }
+                else
+                {
+                    out.r1 = false;
+                }
                 if (!out.r1)
                 {
                     g_state = State::Released;
@@ -666,7 +701,8 @@ namespace vcs::aim
             g_dummy = target;
             g_state = State::Active;
             g_active = true;
-            std::fprintf(stderr, "[aim] free aim on (dummy 0x%x, %d frame(s) after R1 + L3)\n", target, g_wait + 1);
+            std::fprintf(stderr, "[aim] free aim on (dummy 0x%x, %d frame(s) after R1 + L3)\n", target,
+                         static_cast<int>(std::ceil(g_wait)) + 1);
             break;
         }
         case State::Active:
