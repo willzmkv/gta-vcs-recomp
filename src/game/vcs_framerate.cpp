@@ -67,11 +67,23 @@ namespace vcs
         // lowers the floor further for experiments (then an unlimited cap is unlimited).
         constexpr double kMaxFps = 240.0;
         constexpr float kDefaultMinStep = static_cast<float>(50.0 / kMaxFps);
+        constexpr float kExactMinStep = 0.001f;
         float minStep()
         {
             static const float step = [] {
                 const char *v = std::getenv("VCS_MIN_STEP");
                 return v && *v ? static_cast<float>(std::atof(v)) : kDefaultMinStep;
+            }();
+            return step;
+        }
+        float timerMinStep()
+        {
+            static const float step = [] {
+                const char *v = std::getenv("VCS_MIN_STEP");
+                if (v && *v)
+                    return minStep();
+                const char *exact = std::getenv("VCS_EXACT_STEP");
+                return (exact && exact[0] == '0') ? kDefaultMinStep : kExactMinStep;
             }();
             return step;
         }
@@ -187,7 +199,7 @@ namespace vcs
                 const float step = t * readF(rdram, kTimeScale) * k;
                 if (step < 0.5f)
                 {
-                    const float lifted = std::max(step, minStep());
+                    const float lifted = std::max(step, timerMinStep());
                     writeF(rdram, kTimeStep, lifted);
                     writeF(rdram, kTimeStepNonClipped, lifted);
                 }

@@ -602,6 +602,161 @@ namespace vcs
             g_origMoneyNext(rdram, ctx, runtime);
         }
 
+        // ---- 13. cutscene fadeout & HUD frame timers -------------------------------------------------------------------
+        // CutsceneMgr::Update (FUN_00428470) ends cutscenes by subtracting (int)(ms_fTimeStep * 20.0f) from mgr+0x98
+        // (1000 ms fade-out when mgr+0x9C != 0). Above ~30 fps truncation drops fractional ms (~13.6% slower at 144 fps,
+        // stuck at 0 above 1000 fps). Carry the fractional part here so the fade finishes in real game time.
+        //
+        // Three HUD elements also tick 1-per-frame counters inside CHud::Draw / 2D pass:
+        //   - FUN_0018BBE0 (followed unconditionally by FUN_00104AF8 at 0x21F74C): radio station logo
+        //     0x486162 (settle 10->0), 0x4E47D0 (delay 1->0), 0x486161 (fade 5->0), 0x486160 (show 60->0)
+        //   - FUN_0031E3F8 (followed unconditionally by FUN_0031FDF0 at 0x31C7A4): breath/armour flash 0x488640 (50->0)
+        //   - FUN_0031FFF0 (followed unconditionally by FUN_00320710 at 0x31C7C8): HUD change flash 0x488654 (100->0)
+        constexpr uint32_t kCutsceneUpdate = 0x00428470u;
+        constexpr uint32_t kRadioHud = 0x0018BBE0u, kRadioHudNext = 0x00104AF8u;
+        constexpr uint32_t kBreathFlash = 0x0031E3F8u, kBreathFlashNext = 0x0031FDF0u;
+        constexpr uint32_t kHudChangeFlash = 0x0031FFF0u, kHudChangeFlashNext = 0x00320710u;
+
+        float g_cutFadeAcc = 0.0f;
+        struct RadioHold
+        {
+            bool active = false;
+            uint32_t obj = 0;
+            uint8_t settle = 0, fade = 0, show = 0;
+            uint32_t delay = 0;
+        } g_radioHold;
+        bool g_breathHold = false, g_changeHold = false;
+        int32_t g_breathOld = 0, g_changeOld = 0;
+
+        PS2Runtime::RecompiledFunction g_origCutsceneUpdate = nullptr, g_origRadioHud = nullptr,
+                                       g_origRadioHudNext = nullptr, g_origBreathFlash = nullptr,
+                                       g_origBreathFlashNext = nullptr, g_origHudChangeFlash = nullptr,
+                                       g_origHudChangeFlashNext = nullptr;
+
+        PS2_GUEST_CC void cutsceneUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t mgr = GPR_U32(ctx, 4);
+            if (enabled() && mgr != 0u && clock(rdram).share < 1.0f &&
+                rd<uint32_t>(rdram, mgr + 0x34u) == 2u && rd<uint32_t>(rdram, mgr + 0x9Cu) != 0u)
+            {
+                const float stepMs = rd<float>(rdram, kTimeStep) * 20.0f;
+                const int32_t whole = static_cast<int32_t>(stepMs);
+                g_cutFadeAcc += std::max(0.0f, stepMs - static_cast<float>(whole));
+                const int32_t extra = static_cast<int32_t>(std::floor(g_cutFadeAcc));
+                if (extra > 0)
+                {
+                    g_cutFadeAcc -= static_cast<float>(extra);
+                    const int32_t cur = rd<int32_t>(rdram, mgr + 0x98u);
+                    if (whole > 0)
+                    {
+                        if (cur > whole)
+                            wr<int32_t>(rdram, mgr + 0x98u, cur - std::min(extra, cur - whole));
+                    }
+                    else
+                    {
+                        wr<int32_t>(rdram, mgr + 0x98u, cur >= extra ? cur - extra : -1);
+                    }
+                }
+            }
+            else
+            {
+                g_cutFadeAcc = 0.0f;
+            }
+            g_origCutsceneUpdate(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void radioHudUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const Clock &c = clock(rdram);
+            if (enabled() && c.share < 1.0f && !c.tick)
+            {
+                const uint32_t obj = GPR_U32(ctx, 4);
+                g_radioHold = {true, obj, rd<uint8_t>(rdram, 0x00486162u), rd<uint8_t>(rdram, 0x00486161u),
+                               rd<uint8_t>(rdram, 0x00486160u), rd<uint32_t>(rdram, obj + 0x5F0u)};
+            }
+            else
+            {
+                g_radioHold.active = false;
+            }
+            g_origRadioHud(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void radioHudNext(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (g_radioHold.active)
+            {
+                const RadioHold h = g_radioHold;
+                g_radioHold.active = false;
+                const uint32_t uiObj = rd<uint32_t>(rdram, 0x0048F374u);
+                if (!uiObj || rd<uint32_t>(rdram, uiObj + 0x2A78u) == 0u) // not cleared by paused/cutscene mode
+                {
+                    if (rd<uint8_t>(rdram, 0x00486162u) + 1u == h.settle)
+                        wr<uint8_t>(rdram, 0x00486162u, h.settle);
+                    if (rd<uint8_t>(rdram, 0x00486161u) + 1u == h.fade)
+                        wr<uint8_t>(rdram, 0x00486161u, h.fade);
+                    if (rd<uint8_t>(rdram, 0x00486160u) + 1u == h.show)
+                        wr<uint8_t>(rdram, 0x00486160u, h.show);
+                    if (rd<uint32_t>(rdram, h.obj + 0x5F0u) + 1u == h.delay)
+                        wr<uint32_t>(rdram, h.obj + 0x5F0u, h.delay);
+                }
+            }
+            g_origRadioHudNext(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void breathFlashUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const Clock &c = clock(rdram);
+            if (enabled() && c.share < 1.0f && !c.tick)
+            {
+                g_breathOld = rd<int32_t>(rdram, 0x00488640u);
+                g_breathHold = true;
+            }
+            else
+            {
+                g_breathHold = false;
+            }
+            g_origBreathFlash(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void breathFlashNext(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (g_breathHold)
+            {
+                g_breathHold = false;
+                const int32_t cur = rd<int32_t>(rdram, 0x00488640u);
+                if (cur + 1 == g_breathOld || (g_breathOld == 0 && cur == 50))
+                    wr<int32_t>(rdram, 0x00488640u, g_breathOld);
+            }
+            g_origBreathFlashNext(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void hudChangeFlashUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const Clock &c = clock(rdram);
+            if (enabled() && c.share < 1.0f && !c.tick)
+            {
+                g_changeOld = rd<int32_t>(rdram, 0x00488654u);
+                g_changeHold = true;
+            }
+            else
+            {
+                g_changeHold = false;
+            }
+            g_origHudChangeFlash(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void hudChangeFlashNext(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (g_changeHold)
+            {
+                g_changeHold = false;
+                const int32_t cur = rd<int32_t>(rdram, 0x00488654u);
+                if (cur + 1 == g_changeOld)
+                    wr<int32_t>(rdram, 0x00488654u, g_changeOld);
+            }
+            g_origHudChangeFlashNext(rdram, ctx, runtime);
+        }
+
         void logEffects(uint8_t *rdram)
         {
             if (!logOn())
@@ -664,6 +819,13 @@ namespace vcs
             {kAddParticle, &g_origAddParticle, &addParticleBurst}, // chains onto vcs_particle_timing's (installed before)
             {kMoneySpray, &g_origMoney, &moneySpray},
             {kMoneySprayNext, &g_origMoneyNext, &moneySprayNext},
+            {kCutsceneUpdate, &g_origCutsceneUpdate, &cutsceneUpdate},
+            {kRadioHud, &g_origRadioHud, &radioHudUpdate},
+            {kRadioHudNext, &g_origRadioHudNext, &radioHudNext},
+            {kBreathFlash, &g_origBreathFlash, &breathFlashUpdate},
+            {kBreathFlashNext, &g_origBreathFlashNext, &breathFlashNext},
+            {kHudChangeFlash, &g_origHudChangeFlash, &hudChangeFlashUpdate},
+            {kHudChangeFlashNext, &g_origHudChangeFlashNext, &hudChangeFlashNext},
         };
         if (!enabled())
         {
