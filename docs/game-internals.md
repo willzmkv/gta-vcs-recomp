@@ -3588,7 +3588,13 @@ timing at 60 fps; independent timing at 60 / 144 fps got through, by luck (below
   button (`0x6F4D4C`), CCam +0x74 != 3, a frame without this camera and the right stick (gamepad or camera keys) end it
   at once. The stick could not turn it while held or returning: its term goes through +0x140, zeroed there every
   update and smoothed from 0 (about a fifth of its speed), and steps below `0x487E94` are snapped back (the user's
-  report: the gamepad did nothing until the camera was back behind the car).
+  report: the gamepad did nothing until the camera was back behind the car). **BMX follow camera** (`#166`, 2026-11-24,
+  `src/game/vcs_carcam.cpp`): `CBmx::CBmx` (`0x24ebc8`) calls `CBike::CBike` (`veh + 0x354 == 6`) and overwrites
+  `+0x354 = 8`, which `FUN_0029FAF0` omitted alongside `type == 6` / Quad (`230`), dropping `BMX` into car `row[0]`
+  (`1.3*colMaxZ - 0.40` instead of bike `row[2]` `1.1*colMaxZ - 0.10`), skipping bike speed FOV (`0x29ff78`), and
+  reading `+0x7FC` instead of `+0x668` wheel contacts (`0x2a0840`, `0x2a1268`). `followCar` swaps `+0x354` `8 -> 6` and
+  floors `CColModel +0x28` (`0.538 m` / `0.685 m`) to `0.71f` across the call (restored right after), raising `BMX`
+  from `+0.300 / +0.801 m` to motorcycle-level `+0.681 / +1.30..+1.33 m` (`VCS_BMX_CAM=0` disables for A/B).
 - **On foot: the stick, the camera on its string, walls** (2026-11-11; found for a mouse camera of its own on
   foot, which was built and taken out again the same day - the last point, and DECISIONS.md. By reading the decompile
   of FUN_0029dab0 again - `build/analysis/decomp/followped.c` - and the disassembly listing for the callers of the

@@ -1533,6 +1533,11 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_HD_SWEEP_BOUNDS=0` | HD world: fallback restoring unbounded `kMaxGid` table walks and unguarded `freePacket()` calls (reproduces #207 60 FPS `DIA_C3` geometry-table overrun / `'splash'` heap corruption) |
 | `VCS_CAR_VALID=0` | Gameplay: fallback restoring PS2's 40-slot bounds in `CVehicle::IsVehiclePointerValid_NotInWorld` and `DOES_VEHICLE_EXIST` `0x034B` (reproduces #207 DomestoBot stuck when spawned at slot >= 40) |
 | `VCS_REMOTE_DRIVE=0` | Controls: fallback disabling keyboard/driving scheme routing while piloting an RC vehicle (`Players[0].m_pRemoteVehicle`) |
+| `VCS_BMX_CAM=0` | Camera: disable the #166 BMX follow-camera fix in `vcs_carcam.cpp` (leaves `CBmx` `+0x354 == 8` unmapped in `FUN_0029FAF0` for A/B comparison) |
+
+## 2026-11-24 - v1.0.1 Block A (#166 BMX camera)
+
+- **#166 (`vcs_carcam.cpp`):** mapped `CBmx` (`veh + 0x354 == 8`) to `CBike` (`6`) and floored `CColModel +0x28` `max.z` (`0.538 m` / `0.685 m`) to `0.71f` across `FUN_0029FAF0` (`FollowVehicle`), then restored both immediately after the call (`VCS_BMX_CAM=0` restores original). Fixes Rockstar's omission of `type == 8` next to `type == 6` / Quad (`230`), moving BMX from car `row[0]` (`0x487BE8`, `tgtZ +0.300 / srcZ +0.801 m`) to motorcycle `row[2]` + bike speed FOV + `+0x668` wheel checks at motorcycle rider framing (`tgtZ +0.681 / srcZ +1.30..+1.33 m`, aligned with `Sanchez` `+0.681 / +1.388 m`; verified A/B `4:3` & `16:9` widescreen, `30/60/144/240 FPS`, and `tools/controls_check.py` `94/94 PASS`).
 
 ## 2026-11-24 - Planejamento v1.0.1 (#177, #198, #207)
 
