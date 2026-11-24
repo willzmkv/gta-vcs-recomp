@@ -3248,8 +3248,9 @@ which REN_C7, SRANGE, MAR_A5, LAN_C5 and DIA_C3 use for their meters. Some missi
     towards 300 / 150 / 600 (+0x1353..).
 - **Checked and fine**: TOUR's "Fun" (scored every 2.5 s of TIMERB), REN_C6 / LAN_C7 bars (TIMERA, GET_GAME_TIMER),
   REN_C7 cable damage (timed opcodes) and rig stress (+25 a hit), LAN_B4 cash, DIA_C3 signal, the counters of kills /
-  pickups, health-derived bars (LAN_B6 / C3 / C8 Lance, damage bars), TAXI fares, E_RO cruise speed (set from the car's
+  pickups, health-derived bars (LAN_B6 / C3 / C8 Lance, damage bars), TAXI's fare timers (the tip bar `$G1532` IS per-frame: see below), E_RO cruise speed (set from the car's
   speed), position offsets (set, then +-c), the golf power bar.
+- **19 TAXI** (2026-11-24, `gothamor#208`): while the fare countdowns (`$G14F6` / `TIMERA`, `$G14F7` onscreen timer) use the game clock, the passenger tip bar float `$G1532` (shown as `0..100` integer `$G14FD`, `TAXI_T2`) drains per frame inside the mission's per-frame `GOSUB`s `0x156D` (called at `+0x402F`, `+0x4245`, `+0x4799`) and `0x16A4` (`+0x4C50`, "follow that car"): `0x000A` `SUB_VAL_FROM_FLOAT_VAR` `$G1532, 0.4f` at `+0x15B7` (`$G1500 == 1`) and `+0x1646` (`$G1500 == 0`), and `2.0f` at `+0x16EE` (`$G1518 == 1` when closer than 25 m). `TAXI` sets `0x4CD3E7 = 1` (`kMissionStart = 0x3CAE3`), draining `$G1532` at `12.00 / s` at 30 fps vs `57.70 / s` at 144 fps; all 3 sites added to `vcs_script_timing.cpp` `kSites[]`.
 - **Per frame but looks only** (not changed): text grow / scroll animations (CRASH, SRANGE), object slides and spins
   (GON_C4, MEN_C3's barrier, camera smoothing in LAN_B6), particle bursts, the shared camera-shake helper (0.63 / 0.7 /
   0.67 in many missions), debug tools in the main script (near clip, animation viewer). Minor: LAN_C3 counts frames
