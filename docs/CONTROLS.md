@@ -80,8 +80,7 @@ game-internals.md 12c):
   mission starts itself): with free aim on for either device, the mouse and the right stick turn the circle instead of
   the left stick (the game's help text still says the left stick), no button to hold; the left button fires through
   the circle. On the gamepad **R1 fires** there (as Circle, which still fires too): the right thumb is on the stick.
-  Only in this car aim and Phil's shooting range (below) - R1 is the target button everywhere else. The circle keeps its direction while the car turns, up to 20 degrees above level and 5 below, as the game
-  allows there. With free aim off it is the PS2's left stick.
+  Only in this car aim and Phil's shooting range (below) - R1 is the target button everywhere else. The circle keeps its direction while the car turns, up to 20 degrees above level and 35 degrees below (`VCS_CAR_AIM_PITCH=0` restores the PS2's 5 degrees below). With free aim off it is the PS2's left stick.
 - **Phil's shooting range** (the game's free aim forced on foot, `SET_PLAYER_FORCE_FREE_AIMING`): the same - the mouse
   and the right stick turn the circle, no button to hold, the left button fires; the right button does nothing there
   (as R1 on the PS2), and on the gamepad **R1 fires** (as Circle), as in Jive Drive's car. Up to 110 degrees either
@@ -107,7 +106,8 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
   F2, Trainer F5, Free camera F6, Screenshot F8, same page) never take a control's key, and a control can't take theirs - the menu says which setting
   has it.
 - **Walk (hold)**: the left stick at the **Walking speed** (45% by default) while held - GTA walks below about half
-  a tilt, which keys can't do otherwise.
+  a tilt, which keys can't do otherwise. Diagonal hold maps each axis past PS2's `±42` square stick deadzone so
+  diagonal walking matches cardinal speed (`VCS_DIAG_WALK=0` restores the old byte scaling).
 - **A driving key** may share its key with an on-foot control (W is Move forward on foot and Accelerate in a car); within
   the Driving section a key does one thing, and the menu keys stay out of both.
 - **Mouse camera** (on by default): the mouse turns the camera, and the mouse is held in the window while playing (free
@@ -142,7 +142,8 @@ as with L1). It does nothing of this while a control is bound to the wheel or wh
 - **Buttons**: the gamepad input for each PS2 button (any button, LT / RT, stick clicks, D-pad, or none); several PS2
   buttons may share one.
 - **Sticks and triggers**: deadzone per stick (12%; the range past it is stretched, so a small tilt beyond it still
-  counts), **Camera speed** (the right stick's tilt scaled), **Trigger press point** (LT / RT are L2 / R2 buttons),
+  counts; analog left-stick axes past the deadzone also compensate PS2's `±42` per-axis square deadzone so
+  partial and shallow diagonals aren't zeroed or snapped to cardinals), **Camera speed** (the right stick's tilt scaled), **Trigger press point** (LT / RT are L2 / R2 buttons),
   **Swap sticks**, **Invert camera** left / right and up / down, **Drive with the triggers** / **Shoot with the
   triggers** (below), **Free aim** (above).
 - **Drive with the triggers** (off by default): while you drive, **R2 accelerates and L2 brakes / reverses** (instead

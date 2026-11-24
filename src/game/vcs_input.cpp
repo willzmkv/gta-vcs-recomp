@@ -105,6 +105,7 @@ namespace vcs::input
         // ---- The game (game-internals.md 12, 12b) --------------------------------------------------------------------
         constexpr uint32_t kRamMask = PS2_RAM_MASK;
         constexpr uint32_t kPlayerPed = 0x004E4910u;   // CWorld::Players[0].m_pPed
+        constexpr uint32_t kPlayerRemote = kPlayerPed + 4u; // CWorld::Players[0].m_pRemoteVehicle (FUN_002d5188 / FUN_0024a458)
         constexpr uint32_t kPedVehicle = 0x480u;       // the vehicle it is in (0 on foot)
         constexpr uint32_t kPedState = 0x8C4u;         // 0x37 driving
         constexpr uint32_t kEntityModel = 0x56u;       // an entity's model id (u16)
@@ -153,9 +154,19 @@ namespace vcs::input
         constexpr uint32_t kGameClock = 0x004CD104u; // CTimer::m_snTimeInMilliseconds
         constexpr uint32_t kWallTailMs = 300;        // ... kept so this long after the mouse's last turn
 
+        bool remoteDriveEnabled()
+        {
+            static const bool enabled = [] {
+                const char *v = std::getenv("VCS_REMOTE_DRIVE");
+                return !(v && v[0] == '0');
+            }();
+            return enabled;
+        }
+
         struct GameState
         {
             bool driving = false;
+            bool remote = false;     // piloting an RC vehicle (Players[0].m_pRemoteVehicle != 0)
             bool onFoot = false;     // no vehicle at all (getting in or out - states 0x3F / 0x3D - has one already)
             bool footCamera = false; // the on-foot follow camera, turned by the player (no script camera, controls on)
             bool paused = false;     // the pause menu or the game's own pause
@@ -169,12 +180,16 @@ namespace vcs::input
                 return s;
             const uint32_t ped = rd32(kPlayerPed);
             const uint32_t vehicle = ped ? rd32(ped + kPedVehicle) : 0u;
-            s.driving = vehicle && rd32(ped + kPedState) == 0x37;
-            s.onFoot = ped && !vehicle;
+            const uint32_t remote = ped ? rd32(kPlayerRemote) : 0u;
+            const bool drivingSeat = vehicle && rd32(ped + kPedState) == 0x37;
+            s.remote = remote != 0u && !drivingSeat && remoteDriveEnabled();
+            s.driving = drivingSeat || s.remote;
+            s.onFoot = ped && !vehicle && !s.remote;
             if (s.driving)
             {
+                const uint32_t activeVehicle = drivingSeat ? vehicle : remote;
                 uint16_t model;
-                std::memcpy(&model, g_rdram + ((vehicle + kEntityModel) & kRamMask), 2);
+                std::memcpy(&model, g_rdram + ((activeVehicle + kEntityModel) & kRamMask), 2);
                 s.forks = model == kForkliftModel;
             }
             int16_t disabled;
@@ -212,6 +227,7 @@ namespace vcs::input
         std::mutex g_mapMutex;
         Map g_map;
         bool g_enabled = true; // VCS_INPUT_MAP
+        bool g_diagWalk = true; // VCS_DIAG_WALK
         std::atomic<bool> g_backgroundPause{false}; // game.background = Pause and the window is behind others
         std::atomic<uint64_t> g_lastReport{0};       // buttons | rx << 16 | ry << 24 | lx << 32 | ly << 40 ("padstate")
         std::atomic<uint32_t> g_reads{0};            // pad reads so far ("padstate")
@@ -378,6 +394,8 @@ namespace vcs::input
             return g < 0 ? -a : a;
         }
         float stickFloat(int raw) { return raw == 0 ? 0.0f : (raw + 0.5f) / (raw > 0 ? 127.0f : 128.0f); }
+        // Target deflection `t` (-1..1) mapped through the inverse of PS2 FUN_002842e8 so the game reads round(t * 127).
+        float stickTarget(float t) { return stickFloat(rawFor(static_cast<int>(std::lround(std::clamp(t, -1.0f, 1.0f) * 127.0f)))); }
 
         bool readPad(uint8_t *data)
         {
@@ -477,17 +495,50 @@ namespace vcs::input
                 else
                     walk = true;
             }
+            const bool keyLeftX = neg[0] != pos[0], keyLeftY = neg[1] != pos[1];
             float *axes[4] = {&lx, &ly, &rx, &ry};
             for (int a = 0; a < 4; ++a)
                 if (neg[a] != pos[a])
                     *axes[a] = neg[a] ? -1.0f : 1.0f;
-            if (walk)
+            const bool diagWalk = g_diagWalk && walk && lx != 0.0f && ly != 0.0f;
+            if (walk && !diagWalk)
             {
                 const float mag = std::sqrt(lx * lx + ly * ly);
                 if (mag > m.walk)
                 {
                     lx *= m.walk / mag;
                     ly *= m.walk / mag;
+                }
+            }
+            if (g_diagWalk)
+            {
+                if (diagWalk)
+                {
+                    // PS2 FUN_002842e8 zeroes |v| <= 42 per axis: a radial diagonal Walk split (default 0.45 -> +-40/41)
+                    // zeroes both axes. Match cardinal post-curve magnitude radially via stickTarget(), keeping cardinal
+                    // Walk bytes untouched for raw pad checks.
+                    const float mag = std::sqrt(lx * lx + ly * ly);
+                    const float lim = std::max(0.0f, (m.walk * 128.0f - 42.0f) * (127.0f / 85.0f)) / 127.0f;
+                    const float r = std::min(mag, lim);
+                    if (r > 0.0f)
+                    {
+                        lx = stickTarget(lx / mag * r);
+                        ly = stickTarget(ly / mag * r);
+                    }
+                    else
+                    {
+                        lx = 0.0f;
+                        ly = 0.0f;
+                    }
+                }
+                else if (!walk)
+                {
+                    // Compensate PS2's per-axis +-42 square deadzone on analog gamepad left stick so diagonal walks
+                    // and shallow angles past m.deadzoneLeft aren't eaten or snapped to cardinals.
+                    if (!keyLeftX && lx != 0.0f)
+                        lx = stickTarget(lx);
+                    if (!keyLeftY && ly != 0.0f)
+                        ly = stickTarget(ly);
                 }
             }
             // the pause menu: Enter / Escape as Cross / Triangle, the mouse's steps and clicks (game/vcs_frontend.h);
@@ -659,9 +710,8 @@ namespace vcs::input
                     if (on && dt > 0.0f && dt < 0.25f)
                     {
                         // the mouse's speed as the game's stick value, past its dead third
-                        auto tilt = [](float t) { return stickFloat(rawFor(static_cast<int>(std::lround(std::clamp(t, -1.0f, 1.0f) * 127.0f)))); };
-                        g_mouse.x = tilt(dx / dt * m.mouseScale);
-                        g_mouse.y = tilt(up / dt * m.mouseScale);
+                        g_mouse.x = stickTarget(dx / dt * m.mouseScale);
+                        g_mouse.y = stickTarget(up / dt * m.mouseScale);
                     }
                 }
 
@@ -684,7 +734,7 @@ namespace vcs::input
                         wheelBound = wheelBound || k == KEY_WHEEL_UP || k == KEY_WHEEL_DOWN;
                 // GTA V's buttons (pad.v_layout): while driving the D-pad's left / right is the previous / next station,
                 // a press each - the wheel's notch up / down below (the wheel's own notches only when the wheel is on)
-                const bool padRadioOn = m.vLayout && game.driving;
+                const bool padRadioOn = m.vLayout && game.driving && !game.remote;
                 if (padRadioOn && (!m.mouseWheel || wheelBound))
                     notch[0] = notch[1] = false;
                 for (int w = 0; w < 2; ++w)
@@ -712,7 +762,7 @@ namespace vcs::input
                 }
                 if (((!m.mouseWheel || wheelBound) && !padRadioOn) || g_mouse.aim.camera || aim::aiming())
                     g_mouse.wheelSteps = 0;
-                else if (game.driving)
+                else if (game.driving && !game.remote)
                 {
                     // the radio (GitHub issue 90): a notch down is the next station - the game's own L1 - and a notch up
                     // the one before. The game only steps forwards: each L1 clicks and counts, and 30 frames after the
@@ -723,19 +773,26 @@ namespace vcs::input
                     if (g_mouse.wheelSteps && !pressedLast)
                     {
                         const uint32_t vehicle = rd32(rd32(kPlayerPed) + kPedVehicle);
-                        const uint32_t at = (vehicle + kVehicleRadio) & kRamMask;
-                        // (a vehicle whose station is none of these has no radio to step back: the plain L1)
-                        if (g_mouse.wheelSteps < 0 && g_rdram[at] < kRadioPositions)
+                        if (!vehicle)
                         {
-                            if (g_mouse.radioVehicle != vehicle || g_rdram[at] != g_mouse.radioSet)
-                                g_mouse.radioWas = g_rdram[at]; // the first step back since the game last retuned
-                            g_mouse.radioVehicle = vehicle;
-                            g_mouse.radioSet = static_cast<uint8_t>((g_rdram[at] + kRadioPositions - 2u) % kRadioPositions);
-                            g_rdram[at] = g_mouse.radioSet;
+                            g_mouse.wheelSteps = 0;
                         }
-                        g_mouse.radioFrames = 0; // any press starts the game's 30 frames again
-                        g_mouse.wheelButton = kL1;
-                        g_mouse.wheelSteps += g_mouse.wheelSteps > 0 ? -1 : 1;
+                        else
+                        {
+                            const uint32_t at = (vehicle + kVehicleRadio) & kRamMask;
+                            // (a vehicle whose station is none of these has no radio to step back: the plain L1)
+                            if (g_mouse.wheelSteps < 0 && g_rdram[at] < kRadioPositions)
+                            {
+                                if (g_mouse.radioVehicle != vehicle || g_rdram[at] != g_mouse.radioSet)
+                                    g_mouse.radioWas = g_rdram[at]; // the first step back since the game last retuned
+                                g_mouse.radioVehicle = vehicle;
+                                g_mouse.radioSet = static_cast<uint8_t>((g_rdram[at] + kRadioPositions - 2u) % kRadioPositions);
+                                g_rdram[at] = g_mouse.radioSet;
+                            }
+                            g_mouse.radioFrames = 0; // any press starts the game's 30 frames again
+                            g_mouse.wheelButton = kL1;
+                            g_mouse.wheelSteps += g_mouse.wheelSteps > 0 ? -1 : 1;
+                        }
                     }
                 }
                 else if (zoomMode(mode))
@@ -1387,6 +1444,10 @@ namespace vcs::input
         g_rdram = runtime.memory().getRDRAM();
         const char *env = std::getenv("VCS_INPUT_MAP");
         g_enabled = !(env && env[0] == '0');
+        const char *diagEnv = std::getenv("VCS_DIAG_WALK");
+        g_diagWalk = !(diagEnv && diagEnv[0] == '0');
+        if (!g_diagWalk)
+            std::fprintf(stderr, "[input] diagonal left-stick compensation off (VCS_DIAG_WALK=0)\n");
         rebuild();
         if (g_enabled)
             PSPadBackend::setReader(&readPad);
