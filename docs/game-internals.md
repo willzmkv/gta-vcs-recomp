@@ -2694,6 +2694,8 @@ on the disc (`build/analysis/hd_world`). Corrects 9f: the four 0xA0 "slots" are 
   between `+0x5B0` and `+0x5B4` (the indices two frames back) go to `FUN_002BC9F8(0x6F3DB8, block)`, then
   `+0x5B0 = +0x5B4`, `+0x5B4 = +0x5B8`, `+0x5B8 = +0x5BC`; nothing while `level + 0x264` is set. The level load
   (`FUN_0023BAF0`, return `0x23BBFC`) frees every entry's packet directly before it clears the table.
+  5. **Geometry table bounds across level swaps & non-heap packet guard (`#207` 60 FPS `DIA_C3` freeze)**:
+     `FUN_0023baf0` and `FUN_0023b8e8` iterate the geometry table (`table = *(g_info + 0x0)`) using its exact entry count at **`*(g_info + 0x12C)`**. Previously `vcs_world_hd.cpp` bounded lookups only by `kMaxGid` (`0x8000`) and `g_maxGid`, and did not reset `g_maxGid` when switching levels/loading saves (`Beach` -> `Mainland`). On Mainland (`tableCount < 5370`), `sweepPackets()` could scan past the end of `table` (`gid = 5370` -> adjacent `u16` data containing `0x00521c61`, an unaligned address inside the frame DMA buffer), mistake bytes there for references into `g_freed`, zero `e + 4`, and call `freePacket(0x00521c61, 3)`. Two frames later `FUN_0023C5B0` passed `0x00521c61` to `FUN_002BC9F8(0x006F3DB8, ...)`, freeing `0xaa000001 & 0x07FFFFFF = 0x02000001` into packet heap `0x006F3DB8` so the next `FUN_00240ED8` allocated over `'splash'` TXD (`0x02000038`/`0x02000040`). Fixed in `vcs_world_hd.cpp` via `tableCount()` (`*(g_info + 0x12Cu)`), resetting `g_maxGid = 0` on level change, and `inPacketHeap()` (requiring 16-byte alignment and membership in `0x006F3DB8`'s live heap range `[*(heap + 0xC), *(heap + 0xC) + *(heap + 0))` / `kPacketHeapBase..+kPacketHeapSize`), with fallback `VCS_HD_SWEEP_BOUNDS=0`.
 - **Fades** (2026-11-11, the player's wish: no popping on the horizon). The game's own cross-fade (`FUN_0023E748`,
   `level + 0x264` the alpha) puts the incoming list's records on the translucent list (`FUN_0023E548(level, record,
   bucket, alpha, list)`: entry `+8` high nibble the bucket, `+9` the alpha, `+0xA` which list's matrices) and draws them
@@ -4092,7 +4094,14 @@ measured with `tools/melee_check.py`.
   16-frame scan is the PS2's own (and twice as frequent at 60 fps), and bit 9 is set on the street's peds (every target
   measured had it). That attempt hooked ScanForEntities and FireMelee, wrote CTimer::m_FrameCounter around the call,
   set bit 9 on any ped near the player and moved the strike onto the nearest ped - and edited `generated/` by hand
-  (never do: the reverts of its commits left those files changed until restored).
+  and edited `generated/` by hand (never do: the reverts of its commits left those files changed until restored).
+
+## 12b. Expanded vehicle pool validation & RC driving input (#207)
+
+- **`CVehicle::IsVehiclePointerValid_NotInWorld` (`FUN_003EA008`) & SCM `DOES_VEHICLE_EXIST` (`FUN_003D64C8`, `0x034B`)**:
+  Both functions hardcode the original PS2 40-slot vehicle pool (`sltiu 0x29` in `FUN_003EA008`; `(slot - 1) < 0x27` in `FUN_003D64C8`). With `kLargeCars` (`140`), mission vehicles spawned at slot `>= 40` — such as DomestoBot (`$G1517`) in `DIA_C3` when `sub_1e8d` runs `0x034B` after Armando's cutscene — fail `0x034B`, skip unfreeze (`0x0325`), and remain frozen (`ec = 0x40000006`). Hooked in `src/game/vcs_distance.cpp` (`carSlotValid`, `carValidNotInWorld`, `carScriptValid`) to validate against `*(pool + 8)` (`VCS_CAR_VALID=0` fallback; `carvalid` control command).
+- **Remote-controlled vehicle keyboard input (`Players[0].m_pRemoteVehicle`)**:
+  `src/game/vcs_input.cpp` (`remoteDriveEnabled()`, `VCS_REMOTE_DRIVE=0` fallback) includes active `m_pRemoteVehicle` alongside `pedState == 0x37` so `W`/`S` driving keys operate while controlling DomestoBot / RC vehicles rather than stalling in on-foot mode.
 
 ## 13. Open questions / next research targets
 

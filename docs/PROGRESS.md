@@ -1516,6 +1516,19 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `python tools/minidbg.py <exe> <iso>` | catch fail-fast crashes with a stack |
 | `VCS_HD_SAME_ID_DUPES=1` | HD world: fallback to old `sameSphere()` behavior that also drops second-bucket records of the same detailed sector `id` at `r >= 20` (reproduces #36 missing Downtown construction glass) |
 | `VCS_HD_SHOW_HIDDEN_EXTRA=1` | HD world: fallback restoring the prior extra-cell `hide = 0` override on `0x8000` hidden records (reproduces #90 Fort Baxter `5889`/`5890` coarse ground overlap during `07:00`/live reloads) |
+| `VCS_HD_SWEEP_BOUNDS=0` | HD world: fallback restoring unbounded `kMaxGid` table walks and unguarded `freePacket()` calls (reproduces #207 60 FPS `DIA_C3` geometry-table overrun / `'splash'` heap corruption) |
+| `VCS_CAR_VALID=0` | Gameplay: fallback restoring PS2's 40-slot bounds in `CVehicle::IsVehiclePointerValid_NotInWorld` and `DOES_VEHICLE_EXIST` `0x034B` (reproduces #207 DomestoBot stuck when spawned at slot >= 40) |
+| `VCS_REMOTE_DRIVE=0` | Controls: fallback disabling keyboard/driving scheme routing while piloting an RC vehicle (`Players[0].m_pRemoteVehicle`) |
+
+## 2026-11-24 - Planejamento v1.0.1 (#177, #198, #207)
+
+- **#207 (`vcs_distance.cpp`, `vcs_input.cpp`, `vcs_world_hd.cpp`):**
+  - Hooked `CVehicle::IsVehiclePointerValid_NotInWorld` (`FUN_003EA008`) and SCM `DOES_VEHICLE_EXIST` (`FUN_003D64C8`, `0x034B`) against `*(pool + 8)` (`VCS_CAR_VALID=0` fallback) so mission vehicles spawned in expanded pool slots (`>= 40`, e.g. DomestoBot in `DIA_C3`) unfreeze properly (`ec = 0x2` vs `0x40000006`).
+  - Routed active `Players[0].m_pRemoteVehicle` through `game.driving` in `vcs_input.cpp` (`VCS_REMOTE_DRIVE=0` fallback) so keyboard `W`/`S` drive RC vehicles cleanly without triggering car radio wheel tuning.
+  - Bounded `vcs_world_hd.cpp` table walks by `*(g_info + 0x12Cu)` (`tableCount()`), reset `g_maxGid = 0` on level changes, and guarded `sweepPackets` / `sweepDependents` with `inPacketHeap()` (`VCS_HD_SWEEP_BOUNDS=0` fallback), eliminating the 60 FPS `DIA_C3` cutscene heap corruption (`0x00521c61` -> `0x02000001` `'splash'` TXD overwrite).
+  - Verified in ThinLTO: `verify_207.py` passed across `30 / 60 / 144 / 240 FPS` + `VCS_CAR_VALID=0` / `VCS_REMOTE_DRIVE=0` A/B; `controls_check.py` `94/94 PASS`.
+- **#198 (`Lost and Found`, `LAN_C9`):** investigated `MAIN.SCM` & combat helpers; verified Lance aims, fires, reloads (`30->0->29`), and clears all enemy boats across `30 / 60 / 144 / 240 FPS` (not reproducible on `hd-world-merge`).
+- **#177 (`Jive Drive`, `vcs_aim.cpp`):** widened `kCarPitchDown` to `-35°` (`VCS_CAR_AIM_PITCH=0` fallback), verified `94/94` in `controls_check.py` + `LAN_B1` target damage check.
 
 ## 2026-11-23 - Hotfix v1.0.06 (#90, input, prompts, menu tabs, HD world Fort Baxter LOD)
 

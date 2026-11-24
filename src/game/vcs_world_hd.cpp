@@ -449,13 +449,42 @@ namespace vcs::world_hd
         }
 
         // ---- the geometry table ----
+        constexpr uint32_t kRingPush = 0x0023B830u, kHeapFree = 0x002BC9F8u, kPacketHeapObject = 0x006F3DB8u;
+        // Rule 1 toggle: VCS_HD_SWEEP_BOUNDS=0 restores unbounded kMaxGid scans across table & unguarded freePacket calls.
+        bool sweepBoundsGuard()
+        {
+            static const bool enabled = !(std::getenv("VCS_HD_SWEEP_BOUNDS") && *std::getenv("VCS_HD_SWEEP_BOUNDS") == '0');
+            return enabled;
+        }
+        uint32_t tableCount()
+        {
+            if (!sweepBoundsGuard())
+                return kMaxGid;
+            if (!g_ram || !valid(g_info, 0x130u))
+                return 0u;
+            const uint32_t count = rd32(g_info + 0x12Cu);
+            return count <= kMaxGid ? count : kMaxGid;
+        }
+        bool inPacketHeap(uint32_t packet)
+        {
+            if (!sweepBoundsGuard())
+                return g_ram && valid(packet, 16u);
+            if (!g_ram || !packet || (packet & 0xFu) != 0u || !valid(packet, 16u))
+                return false;
+            const uint32_t hBase = rd32(kPacketHeapObject + 0xCu);
+            const uint32_t hSize = rd32(kPacketHeapObject);
+            if (hBase >= 0x00100000u && hSize >= 0x1000u && packet >= hBase &&
+                uint64_t(packet) < uint64_t(hBase) + uint64_t(hSize))
+                return true;
+            return packet >= vcs::memory::kPacketHeapBase &&
+                   packet < vcs::memory::kPacketHeapBase + vcs::memory::kPacketHeapSize;
+        }
         uint32_t tableEntry(uint32_t gid) { return rd32(g_info) + gid * 0xCu; }
 
         // VCS_HD_PKTDEBUG=1: every cached packet put on the free ring (by the game: its caller; by us: 0xF000000n, the
         // site) and every free from the packet heap, checked: a packet put on twice before it is freed, a packet freed
         // while a table entry still holds it ([hdworld-pkt] lines)
         const bool g_pktDebug = std::getenv("VCS_HD_PKTDEBUG") != nullptr;
-        constexpr uint32_t kRingPush = 0x0023B830u, kHeapFree = 0x002BC9F8u, kPacketHeapObject = 0x006F3DB8u;
         PS2Runtime::RecompiledFunction g_ringPush = nullptr, g_heapFree = nullptr;
         struct Pending
         {
@@ -477,8 +506,9 @@ namespace vcs::world_hd
             if (!g_pktDebug || !packet)
                 return;
             uint32_t holder = 0;
+            const uint32_t count = tableCount();
             if (g_ram && valid(g_info, 4u))
-                for (uint32_t gid = 1, table = rd32(g_info); gid < kMaxGid && !holder; ++gid)
+                for (uint32_t gid = 1, table = rd32(g_info); gid < count && !holder; ++gid)
                     if (valid(table + gid * 0xCu, 0xCu) && rd32(table + gid * 0xCu + 4u) == packet)
                         holder = gid;
             std::lock_guard<std::mutex> lock(g_pendingMutex);
@@ -548,8 +578,9 @@ namespace vcs::world_hd
                     for (uint32_t j = 0; j < count; ++j)
                     {
                         const uint32_t gid = rd32(pairs + j * 8u);
-                        if (gid < kMaxGid)
-                            g_maxGid = std::max(g_maxGid, gid);
+                        if (gid == 0 || gid >= tableCount())
+                            continue;
+                        g_maxGid = std::max(g_maxGid, gid);
                         g_game.try_emplace(gid, rd32(pairs + j * 8u + 4u));
                         g_gameCopies.insert(uint64_t(gid) << 32 | rd32(pairs + j * 8u + 4u));
                     }
@@ -594,8 +625,11 @@ namespace vcs::world_hd
         // our geometry into the entry when it is empty or stale (the game's current entries are never touched)
         void enter(const Piece &piece, uint32_t owner, Cell &cell)
         {
+            const uint32_t count = tableCount();
             for (const auto &[gid, geometry] : piece.pairs)
             {
+                if (gid == 0 || gid >= count)
+                    continue;
                 g_maxGid = std::max(g_maxGid, gid);
                 cell.geometry[gid] = geometry;
                 const uint32_t e = tableEntry(gid), now = rd32(e);
@@ -685,7 +719,8 @@ namespace vcs::world_hd
             if (g_freed.empty() || !valid(g_info, 4u))
                 return;
             const uint32_t table = rd32(g_info);
-            for (uint32_t gid = 1; gid <= g_maxGid && gid < kMaxGid; ++gid)
+            const uint32_t count = tableCount();
+            for (uint32_t gid = 1; gid <= g_maxGid && gid < count; ++gid)
             {
                 const uint32_t e = table + gid * 0xCu, packet = rd32(e + 4u), geometry = rd32(e);
                 for (const auto &[from, to] : g_freed)
@@ -695,7 +730,7 @@ namespace vcs::world_hd
                         wr32(e, game != g_game.end() ? game->second : 0u);
                         break;
                     }
-                if (packet && packetPointsInto(packet))
+                if (packet && inPacketHeap(packet) && packetPointsInto(packet))
                 {
                     freePacket(packet, 3u);
                     wr32(e + 4u, 0);
@@ -734,14 +769,14 @@ namespace vcs::world_hd
             g_pushed.clear();
             if (!valid(g_info, 4u))
                 return;
-            const uint32_t table = rd32(g_info);
+            const uint32_t table = rd32(g_info), count = tableCount();
             for (bool more = true; more;)
             {
                 more = false;
-                for (uint32_t gid = 1; gid <= g_maxGid && gid < kMaxGid; ++gid)
+                for (uint32_t gid = 1; gid <= g_maxGid && gid < count; ++gid)
                 {
                     const uint32_t e = table + gid * 0xCu, packet = rd32(e + 4u);
-                    if (!packet || gone.count(packet) || !callsInto(packet, gone))
+                    if (!packet || !inPacketHeap(packet) || gone.count(packet) || !callsInto(packet, gone))
                         continue;
                     freePacket(packet, 4u);
                     wr32(e + 4u, 0);
@@ -1826,6 +1861,8 @@ namespace vcs::world_hd
             {
                 if (g_level)
                     dropAll(false); // another level's data: the table is not what we entered into
+                if (sweepBoundsGuard())
+                    g_maxGid = 0;
                 g_level = level;
                 g_info = info;
                 g_levelLoaded = loaded;
@@ -1833,7 +1870,8 @@ namespace vcs::world_hd
             }
             if (loaded != rd32(kLevelId))
                 return false; // the other island's data is about to be read
-            if (!valid(info, 0x300u) || !valid(rd32(info), 0xC000u))
+            const uint32_t count = sweepBoundsGuard() && valid(info, 0x130u) ? rd32(info + 0x12Cu) : 0x1000u;
+            if (!valid(info, 0x300u) || count == 0u || count > kMaxGid || !valid(rd32(info), count * 0xCu))
                 return false;
             const uint32_t handle = rd32(level + 0x278u);
             if (handle >= 64u)
@@ -2406,8 +2444,8 @@ namespace vcs::world_hd
                 // (FUN_0023BAF0's own loop frees every entry's packet before it clears the table: not a finding)
                 if (g_ram && valid(g_info, 4u) && g_pktLogged < 300 && getRegU32(ctx, 31) != 0x0023BBFCu)
                 {
-                    const uint32_t table = rd32(g_info);
-                    for (uint32_t gid = 1; gid <= g_maxGid && gid < kMaxGid; ++gid)
+                    const uint32_t table = rd32(g_info), count = tableCount();
+                    for (uint32_t gid = 1; gid <= g_maxGid && gid < count; ++gid)
                     {
                         const uint32_t e = table + gid * 0xCu;
                         if (!valid(e, 0xCu) || rd32(e + 4u) != packet)
