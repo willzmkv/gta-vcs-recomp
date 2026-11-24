@@ -659,6 +659,12 @@ dropped on uploads (lazy render-target patching).
       the switch; frame pacing. Left from the script survey (game-internals.md 11f): per-frame object / camera /
       text animations in missions (looks only). Effects survey (2026-11-14, game-internals.md 4 "Effects that run per
       frame"): all found fixed (above). Open: the rocket trail (AddParticlesAlongLine, one a frame at least).
+- [x] **Emergency vehicle lights / horn-tap history above 30 fps** (2026-11-24, `gothamor#209`): `CPad::m_bHornHistory[8]`
+      (`pad0+0x9A..0xA2`, updated per frame in `CPad::Update` `0x002843D8`) shrinks the < 7-frame siren-toggle tap window
+      from ~233 ms at 30 fps to ~49 ms at 144 fps, preventing emergency lights from toggling during Paramedic, Firefighter,
+      or Vigilante runs. `src/game/vcs_siren_timing.cpp` (`VCS_SIREN_TIMING=0` = before) keeps the tap/hold threshold on
+      `CTimer`'s unscaled ms clock (`0x00488280`) while emitting instant release toggles. Checked A/B on `AMBULAN`, `FIRETRK`,
+      and `POLICEM` (60/120/180 ms taps, L3 tap, 600+ ms horn hold, and sub-missions) at 30 / 60 / 144 / 240 fps.
 ## Milestone 5 - movies (2026-10-24) - done
 - [x] STINGS.PSS (the Rockstar logos) and INTRO.PSS play natively at boot (`src/game/vcs_movie.cpp`): own PSS
       demuxer, MPEG-2 video through FFmpeg, shown by the presenter at 4:3 (pillarboxed in widescreen), 48 kHz PCM
@@ -1256,6 +1262,8 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_MUSIC_TIMESTEP=0` | radio stations off the air advance a frame's worth per frame, as on the PS2 (game-internals.md 9; the reference) |
 | `VCS_PARTICLE_TIMING=0` | particles fade, grow and spawn once a frame (before 2026-11-14: smoke 1/4.8 as long at 144 fps, fires thin) |
 | `VCS_EFFECTS_TIMING=0` | lightning, sun glare, clouds, camera shake, the video overlay, the photo flash, the HUD bar flash, peds fading, streaks, rubbish, steam after rain, rain streaks starting, explosions (bursts, length, flicker) and the banknote spray step once a frame (before 2026-11-14) |
+| `VCS_SIREN_TIMING=0` | `CPad 0`'s 8-frame horn history (`pad0+0x9A..0xA2`) advances per frame instead of real time (~49 ms tap window at 144 fps; `gothamor#209`, as before 2026-11-24) |
+| `VCS_SIREN_LOG=1` | log horn press, hold threshold (>~230 ms) and release tap/horn decisions (`src/game/vcs_siren_timing.cpp`) |
 | `VCS_EFFECTS_LOG=1` | every 30 s of real time: frames and PS2 frames a second, lightning bursts (count, length), cloud turn / spin a second, and each effect's steps / rolls that took effect a second (with `VCS_EFFECTS_TIMING=0`: the per-frame counts) |
 | `VCS_PARTICLE_LOG=1` | every 10 s of game clock: AddParticle calls / passed per second by return address (`*` = throttled), and particles died per second and their mean lifetime by type |
 | `VCS_TURN_LOG=<model>` | every ApplyTurnForce on vehicles of that model (212 = PCJ-600): caller, its change to the yaw / pitch rate (sum by caller to find a per-frame push) |
