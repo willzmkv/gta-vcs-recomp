@@ -56,8 +56,14 @@
 //    frame, integrated lift drops linearly with frame rate (4x weaker per second at 120 fps), keeping the Skimmer's
 //    hull deep in the water where quadratic drag pins it around 5 m/s instead of taking off. Dividing ApplyMoveForce at
 //    0x1A1360 by frameScale cancels the duplicate dt factor without touching <= 30 fps.
+// 8. Angular air damping in CPhysical::ApplyAirResistance (0x348628): on the airRes <= 0.1f branch (0x348740),
+//    m_vecTurnSpeed (+0x70..+0x78) is multiplied by literal 0.99f once per frame while linear velocity uses powf.
+// 9. Burnout steering torque (FUN_00152E18 at 0x152FF8 when veh+0x714 != 0) and CBike upright / roll-damping torque
+//    (CBike::ProcessControl 0x337208 at 0x33CDA0 / 0x33CE34): ApplyTurnForce impulses applied without ms_fTimeStep.
+// 10. Airborne free-wheel spin decay / accel (CAutomobile FUN_00152E18 +0x6FC..+0x708: *0.95 / +-0.1 / +0.05;
+//     CBike 0x337208 +0x598 / +0x59C: *0.95 / +0.1 / -0.2 and unscaled wheel-angle integration into +0x590 / +0x594).
 //
-// VCS_PHYSICS_TIMESTEP=0 keeps all seven at the game's unscaled amounts.
+// VCS_PHYSICS_TIMESTEP=0 keeps all ten at the game's unscaled amounts.
 #include "game/vcs_physics_timing.h"
 
 #include "game/vcs_framerate.h"
@@ -65,6 +71,7 @@
 #include "ps2_runtime_macros.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -82,6 +89,15 @@ namespace vcs
         constexpr uint32_t kCollisionPushMove1 = 0x0034D5E0u;    // CPhysical::ApplyCollision's obj1 push (6.)
         constexpr uint32_t kCollisionPushTurn1 = 0x0034D604u;
         constexpr uint32_t kBoatPlaningLiftReturn = 0x001A1360u; // CBoat::ProcessControl's planing lift (7.)
+        constexpr uint32_t kBurnoutPivotReturn = 0x00152FF8u;    // FUN_00152E18 burnout steer pivot (veh+0x714 != 0) (9.)
+        constexpr uint32_t kBikeUprightReturn1 = 0x0033CDA0u;    // CBike::ProcessControl uprighting torque (-0.1) (9.)
+        constexpr uint32_t kBikeUprightReturn2 = 0x0033CE34u;    // CBike::ProcessControl dismounted roll torque (-0.15) (9.)
+        constexpr uint32_t kApplyAirResistance = 0x00348628u;    // CPhysical::ApplyAirResistance(a0) (8.)
+        constexpr uint32_t kCarAxleWheels = 0x00152E18u;         // CAutomobile axle wheel loop (10.)
+        constexpr uint32_t kBikeProcessControl = 0x00337208u;    // CBike::ProcessControl(a0) (10.)
+        constexpr uint32_t kPhysicalGravity = 0x00348128u;       // CPhysical::ApplyGravity / buoyancy
+        constexpr uint32_t kSuspSpring = 0x0034E1D8u;            // CPhysical::ApplySpring (wheel spring impulse)
+        constexpr uint32_t kSuspDamper = 0x0034E348u;            // CVehicle::ApplySuspensionDamper (reads post-spring velocity)
         constexpr uint32_t kBladeCollision = 0x003EE308u;        // CVehicle's rotor blade test (4.): f13 the damage multiplier
         constexpr uint32_t kProcessWheelCar = 0x003E6C18u;       // CVehicle::ProcessWheel
         constexpr uint32_t kProcessWheelBike = 0x003E7618u;
@@ -96,7 +112,15 @@ namespace vcs
 
         PS2Runtime::RecompiledFunction g_origMoveForce = nullptr, g_origTurnForce = nullptr,
                                        g_origWheelCar = nullptr, g_origWheelBike = nullptr,
-                                       g_origBlade = nullptr, g_origCannon = nullptr;
+                                       g_origBlade = nullptr, g_origCannon = nullptr,
+                                       g_origAirRes = nullptr, g_origCarAxleWheels = nullptr,
+                                       g_origBikeProcessControl = nullptr,
+                                       g_origPhysGrav = nullptr, g_origSuspSpring = nullptr, g_origSuspDamper = nullptr;
+        uint32_t g_trackBike = 0;
+        uint8_t g_bikeWheelHitMask = 0;
+        float g_bikeSpringDv[3] = {};
+        float g_bikeSpringDw[3] = {};
+        bool g_bikeHasSpring = false;
 
         bool enabled()
         {
@@ -193,7 +217,8 @@ namespace vcs
             const uint32_t ra = GPR_U32(ctx, 31);
             if (ra == kBodyPushReturn)
                 ctx->f[14] *= frameScale(rdram);
-            else if (ra == kBrakeWobbleReturn || ra == kCollisionPushTurn2 || ra == kCollisionPushTurn1)
+            else if (ra == kBrakeWobbleReturn || ra == kCollisionPushTurn2 || ra == kCollisionPushTurn1 ||
+                     ra == kBurnoutPivotReturn || ra == kBikeUprightReturn1 || ra == kBikeUprightReturn2)
                 scaleForce3(ctx, frameScale(rdram));
             logTurnForce(rdram, ctx);
             g_origTurnForce(rdram, ctx, runtime);
@@ -258,6 +283,212 @@ namespace vcs
         CannonClock g_cannons[kCannonCount];
 
         void wrU(uint8_t *rdram, uint32_t addr, uint32_t v) { std::memcpy(rdram + (addr & 0x1FFFFFFu), &v, 4); }
+        void wrF(uint8_t *rdram, uint32_t addr, float v) { std::memcpy(rdram + (addr & 0x1FFFFFFu), &v, 4); }
+
+        // 8.: fix unscaled 0.99f per-frame m_vecTurnSpeed decay on the airRes <= 0.1f path.
+        PS2_GUEST_CC void applyAirResistance(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ent = GPR_U32(ctx, 4);
+            const float airRes = ent ? rdF(rdram, ent + 0xDCu) : 1.0f;
+            g_origAirRes(rdram, ctx, runtime);
+            if (!active() || !ent || airRes > 0.1f)
+                return;
+            const float step = rdF(rdram, kTimeStep);
+            if (step >= 0.0f && step < kPs2Step)
+            {
+                const float s = std::pow(0.99f, step / kPs2Step) / 0.99f;
+                for (uint32_t off = 0x70u; off <= 0x78u; off += 4u)
+                    wrF(rdram, ent + off, rdF(rdram, ent + off) * s);
+            }
+        }
+
+        // 10. (cars): scale airborne free-wheel spin decay (*0.95) and gas/brake step (-0.1/+0.05) on veh+0x6FC..+0x708.
+        PS2_GUEST_CC void carAxleWheels(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t veh = GPR_U32(ctx, 4), w0 = GPR_U32(ctx, 5), w1 = GPR_U32(ctx, 6);
+            float oldSpin[2] = {};
+            if (veh && w0 < 4u && w1 < 4u)
+            {
+                oldSpin[0] = rdF(rdram, veh + 0x6FCu + 4u * w0);
+                oldSpin[1] = rdF(rdram, veh + 0x6FCu + 4u * w1);
+            }
+            g_origCarAxleWheels(rdram, ctx, runtime);
+            if (!veh || w0 >= 4u || w1 >= 4u)
+                return;
+            const float scale = frameScale(rdram);
+            if (scale >= 1.0f)
+                return;
+            const uint32_t modelInfo = rdU(rdram, veh + 0x160u);
+            if (!modelInfo || (rdU(rdram, modelInfo + 0xD0u) & 0x2000000u))
+                return;
+            const float step = rdF(rdram, kTimeStep);
+            for (int k = 0; k < 2; ++k)
+            {
+                const uint32_t w = k == 0 ? w0 : w1;
+                if (rdF(rdram, veh + 0x690u + 4u * w) > 0.0f)
+                    continue;
+                const uint32_t spinAddr = veh + 0x6FCu + 4u * w;
+                const uint32_t angAddr = veh + 0x6DCu + 4u * w;
+                const float rawSpin = rdF(rdram, spinAddr), old = oldSpin[k];
+                const bool isDecay = std::fabs(rawSpin - old * 0.95f) <= 1e-5f * (1.0f + std::fabs(old));
+                const float corrSpin = isDecay ? old * std::pow(0.95f, scale) : old + (rawSpin - old) * scale;
+                wrF(rdram, spinAddr, corrSpin);
+                wrF(rdram, angAddr, rdF(rdram, angAddr) + (corrSpin - rawSpin) * step);
+            }
+        }
+
+        PS2_GUEST_CC void physGravity(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ent = GPR_U32(ctx, 4);
+            if (!g_trackBike || ent != g_trackBike || !active())
+            {
+                g_origPhysGrav(rdram, ctx, runtime);
+                return;
+            }
+            float preV[3], preW[3];
+            for (int i = 0; i < 3; ++i)
+            {
+                preV[i] = rdF(rdram, ent + 0x140u + 4u * i);
+                preW[i] = rdF(rdram, ent + 0x70u + 4u * i);
+            }
+            g_origPhysGrav(rdram, ctx, runtime);
+            for (int i = 0; i < 3; ++i)
+            {
+                g_bikeSpringDv[i] += rdF(rdram, ent + 0x140u + 4u * i) - preV[i];
+                g_bikeSpringDw[i] += rdF(rdram, ent + 0x70u + 4u * i) - preW[i];
+            }
+            g_bikeHasSpring = true;
+        }
+
+        PS2_GUEST_CC void suspSpring(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ent = GPR_U32(ctx, 4);
+            if (!g_trackBike || ent != g_trackBike || !active())
+            {
+                g_origSuspSpring(rdram, ctx, runtime);
+                return;
+            }
+            float preV[3], preW[3];
+            for (int i = 0; i < 3; ++i)
+            {
+                preV[i] = rdF(rdram, ent + 0x140u + 4u * i);
+                preW[i] = rdF(rdram, ent + 0x70u + 4u * i);
+            }
+            g_origSuspSpring(rdram, ctx, runtime);
+            for (int i = 0; i < 3; ++i)
+            {
+                g_bikeSpringDv[i] += rdF(rdram, ent + 0x140u + 4u * i) - preV[i];
+                g_bikeSpringDw[i] += rdF(rdram, ent + 0x70u + 4u * i) - preW[i];
+            }
+            g_bikeHasSpring = true;
+        }
+
+        // Preserve the PS2's symplectic spring->damper cross-term (c * F_spring * dt_ps2) on bikes so high frame rates
+        // keep the same suspension compliance and nose-dive under braking instead of stalling the rear wheel into a skid.
+        PS2_GUEST_CC void suspDamper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ent = GPR_U32(ctx, 4);
+            const float scale = frameScale(rdram);
+            if (!g_trackBike || ent != g_trackBike || !g_bikeHasSpring || !active() || scale >= 1.0f || scale <= 1e-4f)
+            {
+                g_origSuspDamper(rdram, ctx, runtime);
+                return;
+            }
+            const float extra = 1.0f / scale - 1.0f;
+            float offV[3], offW[3];
+            for (int i = 0; i < 3; ++i)
+            {
+                offV[i] = g_bikeSpringDv[i] * extra;
+                offW[i] = g_bikeSpringDw[i] * extra;
+                wrF(rdram, ent + 0x140u + 4u * i, rdF(rdram, ent + 0x140u + 4u * i) + offV[i]);
+                wrF(rdram, ent + 0x70u + 4u * i, rdF(rdram, ent + 0x70u + 4u * i) + offW[i]);
+            }
+            const uint32_t rPtr = GPR_U32(ctx, 6);
+            const uint32_t vRelPtr = GPR_U32(ctx, 7);
+            const bool hasRel = vRelPtr >= 0x100000u && (vRelPtr & 0x1FFFFFFu) <= 0x1FFFFF0u &&
+                                rPtr >= 0x100000u && (rPtr & 0x1FFFFFFu) <= 0x1FFFFF0u;
+            float offRel[3] = {};
+            if (hasRel)
+            {
+                const float rx = rdF(rdram, rPtr), ry = rdF(rdram, rPtr + 4u), rz = rdF(rdram, rPtr + 8u);
+                offRel[0] = offV[0] + offW[1] * rz - offW[2] * ry;
+                offRel[1] = offV[1] + offW[2] * rx - offW[0] * rz;
+                offRel[2] = offV[2] + offW[0] * ry - offW[1] * rx;
+                for (int i = 0; i < 3; ++i)
+                    wrF(rdram, vRelPtr + 4u * i, rdF(rdram, vRelPtr + 4u * i) + offRel[i]);
+            }
+            g_origSuspDamper(rdram, ctx, runtime);
+            if (hasRel)
+            {
+                for (int i = 0; i < 3; ++i)
+                    wrF(rdram, vRelPtr + 4u * i, rdF(rdram, vRelPtr + 4u * i) - offRel[i]);
+            }
+            for (int i = 0; i < 3; ++i)
+            {
+                wrF(rdram, ent + 0x140u + 4u * i, rdF(rdram, ent + 0x140u + 4u * i) - offV[i]);
+                wrF(rdram, ent + 0x70u + 4u * i, rdF(rdram, ent + 0x70u + 4u * i) - offW[i]);
+            }
+        }
+
+        // 10. (bikes): scale airborne front wheel coast-down (*0.95) and rear wheel spin step (+0.1/-0.2) + unscaled integration.
+        PS2_GUEST_CC void bikeProcessControl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t bike = GPR_U32(ctx, 4);
+            const float old590 = bike ? rdF(rdram, bike + 0x590u) : 0.0f;
+            const float old594 = bike ? rdF(rdram, bike + 0x594u) : 0.0f;
+            const float old598 = bike ? rdF(rdram, bike + 0x598u) : 0.0f;
+            const float old59C = bike ? rdF(rdram, bike + 0x59Cu) : 0.0f;
+            const uint32_t prevBike = g_trackBike;
+            const uint8_t prevMask = g_bikeWheelHitMask;
+            float prevDv[3], prevDw[3];
+            std::memcpy(prevDv, g_bikeSpringDv, sizeof(prevDv));
+            std::memcpy(prevDw, g_bikeSpringDw, sizeof(prevDw));
+            const bool prevHasSpring = g_bikeHasSpring;
+            g_trackBike = bike;
+            g_bikeWheelHitMask = 0;
+            std::memset(g_bikeSpringDv, 0, sizeof(g_bikeSpringDv));
+            std::memset(g_bikeSpringDw, 0, sizeof(g_bikeSpringDw));
+            g_bikeHasSpring = false;
+            g_origBikeProcessControl(rdram, ctx, runtime);
+            const uint8_t hitMask = g_bikeWheelHitMask;
+            g_trackBike = prevBike;
+            g_bikeWheelHitMask = prevMask;
+            std::memcpy(g_bikeSpringDv, prevDv, sizeof(prevDv));
+            std::memcpy(g_bikeSpringDw, prevDw, sizeof(prevDw));
+            g_bikeHasSpring = prevHasSpring;
+            if (!bike)
+                return;
+            const float scale = frameScale(rdram);
+            if (scale >= 1.0f)
+                return;
+            if (((rdU(rdram, bike + 0x48u) >> 4u) & 0x1Fu) == 2u) // STATUS_SIMPLE handles wheel rotation via 0x3E6B68
+                return;
+            if (!(hitMask & 1u) && std::fabs(old598) > 1e-6f)
+            {
+                const float raw598 = rdF(rdram, bike + 0x598u);
+                const float new590 = rdF(rdram, bike + 0x590u);
+                if (std::fabs(raw598 - old598 * 0.95f) <= 1e-5f * (1.0f + std::fabs(old598)) &&
+                    std::fabs((new590 - old590) - raw598) <= 1e-5f * (1.0f + std::fabs(old598)))
+                {
+                    const float corr598 = old598 * std::pow(0.95f, scale);
+                    wrF(rdram, bike + 0x598u, corr598);
+                    wrF(rdram, bike + 0x590u, old590 + corr598 * scale);
+                }
+            }
+            if (!(hitMask & 2u) && !(rdU(rdram, bike + 0x264u) & 0x2000u))
+            {
+                const float raw59C = rdF(rdram, bike + 0x59Cu);
+                const float new594 = rdF(rdram, bike + 0x594u);
+                if ((old59C != 0.0f || raw59C != 0.0f) &&
+                    std::fabs(raw59C - old59C) <= 0.25f &&
+                    std::fabs((new594 - old594) - raw59C) <= 1e-5f * (1.0f + std::fabs(raw59C)))
+                {
+                    const float corr59C = old59C + (raw59C - old59C) * scale;
+                    wrF(rdram, bike + 0x59Cu, corr59C);
+                    wrF(rdram, bike + 0x594u, old594 + corr59C * scale);
+                }
+            }
+        }
 
         PS2_GUEST_CC void cannonUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
@@ -316,16 +547,78 @@ namespace vcs
             // contact point's speed along the wheel (forward / sideways), wheels on the ground, and the wheel's state from
             // the last frame (0 rolling, 1 spinning, 2 skidding, 3 locked; through the pointer at the caller's sp)
             static const bool log = std::getenv("VCS_WHEEL_LOG") != nullptr;
+            const uint32_t fwd = GPR_U32(ctx, 5), right = GPR_U32(ctx, 6), speed = GPR_U32(ctx, 7);
             if (log && Original == &g_origWheelBike)
             {
-                const uint32_t fwd = GPR_U32(ctx, 5), right = GPR_U32(ctx, 6), speed = GPR_U32(ctx, 7);
                 std::fprintf(stderr, "[wheel] f %u veh %x step %.4f thrust %.5f brake %.5f adh %.5f p4 %.3f fwd %.5f side %.5f n %u state %u\n",
                              rdU(rdram, kFrameCounter), GPR_U32(ctx, 4), rdF(rdram, kTimeStep), ctx->f[12], ctx->f[13],
                              ctx->f[14] * rdF(rdram, kTimeStep), ctx->f[15], dot3(rdram, speed, fwd),
                              dot3(rdram, speed, right), GPR_U32(ctx, 9), rdU(rdram, rdU(rdram, GPR_U32(ctx, 29))));
             }
+            if (Original == &g_origWheelBike && g_trackBike)
+            {
+                const uint32_t outSpinPtr = GPR_U32(ctx, 11); // $t3 = param_12
+                if (outSpinPtr == g_trackBike + 0x598u)
+                    g_bikeWheelHitMask |= 1u;
+                else if (outSpinPtr == g_trackBike + 0x59Cu)
+                    g_bikeWheelHitMask |= 2u;
+            }
             writeBrakeConstants(rdram);
+            // ProcessWheel computes desired lateral impulse as -dot(v_contact, right) / n without multiplying by
+            // timeStep, while adh and brake ARE scaled by timeStep when brake <= adh. Above 30 fps that makes even
+            // small lateral slip overflow the shrunk per-frame friction circle, triggering state=2 (0.7x skid penalty
+            // + braking loss). When brake > adh (e.g. handbrake = 20000 -> state=3 locked wheel), ProcessWheel leaves
+            // longitudinal -v_fwd / n unscaled as well and normalizes both together onto adh, so scaling only v_side
+            // there would collapse rear lateral grip and cause high-FPS handbrake overspin.
+            const float scale = frameScale(rdram);
+            const auto validAddr = [](uint32_t p, uint32_t bytes) {
+                return p >= 0x100000u && (p & 0x1FFFFFFu) + bytes <= 0x2000000u;
+            };
+            float savedSpeed[3] = {};
+            bool scaledLat = false;
+            if (Original == &g_origWheelBike && active() && scale < 1.0f &&
+                validAddr(speed, 12u) && validAddr(fwd, 12u) && validAddr(right, 12u))
+            {
+                float adh = ctx->f[14] * rdF(rdram, kTimeStep);
+                const uint32_t veh = GPR_U32(ctx, 4);
+                const uint32_t sp = GPR_U32(ctx, 29);
+                const uint32_t statePtr = validAddr(sp, 4u) ? rdU(rdram, sp) : 0u;
+                if (validAddr(statePtr, 4u) && rdU(rdram, statePtr) != 0u && validAddr(veh + 0x160u, 4u))
+                {
+                    const uint32_t col = rdU(rdram, veh + 0x160u);
+                    if (validAddr(col, 0x70u))
+                        adh *= rdF(rdram, col + 0x6Cu);
+                }
+                if (ctx->f[13] <= adh)
+                {
+                    float fvec[3], rvec[3];
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        savedSpeed[i] = rdF(rdram, speed + 4u * i);
+                        fvec[i] = rdF(rdram, fwd + 4u * i);
+                        rvec[i] = rdF(rdram, right + 4u * i);
+                    }
+                    const float f2 = fvec[0] * fvec[0] + fvec[1] * fvec[1] + fvec[2] * fvec[2];
+                    const float r2 = rvec[0] * rvec[0] + rvec[1] * rvec[1] + rvec[2] * rvec[2];
+                    const float rf = fvec[0] * rvec[0] + fvec[1] * rvec[1] + fvec[2] * rvec[2];
+                    const float vSide = savedSpeed[0] * rvec[0] + savedSpeed[1] * rvec[1] + savedSpeed[2] * rvec[2];
+                    const float o2 = f2 > 1e-6f ? (r2 - rf * rf / f2) : 0.0f;
+                    if (o2 > 1e-6f)
+                    {
+                        const float proj = rf / f2;
+                        const float alpha = (scale - 1.0f) * vSide / o2;
+                        for (int i = 0; i < 3; ++i)
+                            wrF(rdram, speed + 4u * i, savedSpeed[i] + alpha * (rvec[i] - proj * fvec[i]));
+                        scaledLat = true;
+                    }
+                }
+            }
             (*Original)(rdram, ctx, runtime);
+            if (scaledLat)
+            {
+                for (int i = 0; i < 3; ++i)
+                    wrF(rdram, speed + 4u * i, savedSpeed[i]);
+            }
         }
     }
 
@@ -355,6 +648,33 @@ namespace vcs
             runtime.replaceFunction(kCannonUpdate, &cannonUpdate);
         else
             std::fprintf(stderr, "[physics-timing] the water cannon's update 0x%x not found: its reach stays on the frame rate\n", kCannonUpdate);
+        g_origAirRes = runtime.lookupFunction(kApplyAirResistance);
+        if (g_origAirRes)
+            runtime.replaceFunction(kApplyAirResistance, &applyAirResistance);
+        else
+            std::fprintf(stderr, "[physics-timing] ApplyAirResistance 0x%x not found: angular air damping stays on the frame rate\n",
+                         kApplyAirResistance);
+        g_origCarAxleWheels = runtime.lookupFunction(kCarAxleWheels);
+        if (g_origCarAxleWheels)
+            runtime.replaceFunction(kCarAxleWheels, &carAxleWheels);
+        else
+            std::fprintf(stderr, "[physics-timing] CAutomobile axle wheels 0x%x not found: airborne wheel spin stays on the frame rate\n",
+                         kCarAxleWheels);
+        g_origPhysGrav = runtime.lookupFunction(kPhysicalGravity);
+        g_origSuspSpring = runtime.lookupFunction(kSuspSpring);
+        g_origSuspDamper = runtime.lookupFunction(kSuspDamper);
+        if (g_origPhysGrav && g_origSuspSpring && g_origSuspDamper)
+        {
+            runtime.replaceFunction(kPhysicalGravity, &physGravity);
+            runtime.replaceFunction(kSuspSpring, &suspSpring);
+            runtime.replaceFunction(kSuspDamper, &suspDamper);
+        }
+        g_origBikeProcessControl = runtime.lookupFunction(kBikeProcessControl);
+        if (g_origBikeProcessControl)
+            runtime.replaceFunction(kBikeProcessControl, &bikeProcessControl);
+        else
+            std::fprintf(stderr, "[physics-timing] CBike::ProcessControl 0x%x not found: bike airborne wheel spin stays on the frame rate\n",
+                         kBikeProcessControl);
         // The patched ProcessWheels read their constants from kBrakeSlots, so these hooks are not optional.
         if (g_origWheelCar)
             runtime.replaceFunction(kProcessWheelCar, &processWheel<&g_origWheelCar>);

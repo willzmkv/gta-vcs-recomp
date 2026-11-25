@@ -372,6 +372,29 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
     `frameScale` (`> 1e-4f`). After (`30 / 120 / 144 / 240 fps`): level Skimmer reaches `46.6-49.8 m/s` and lifts off
     in `4.8-6.3 s`; stick-back Skimmer lifts off in `4.1-4.3 s` and climbs `+61.2..+66.5 m` (`pitch ~89 deg`); boat `258`
     reaches `40.9-41.7 m/s` at every frame rate (`VCS_PHYSICS_TIMESTEP=0` reproduces the original `6.37 m/s` stall).
+  - **Angular air damping, burnout steer pivot, bike uprighting, airborne free-wheel spin, and bike braking/suspension
+    compliance** (2026-11-25, `FramerateVigilante` SA/VC audit in `src/game/vcs_physics_timing.cpp` 8-10 + follow-up;
+    all behind `VCS_PHYSICS_TIMESTEP=0`):
+    - *Angular air resistance* (`CPhysical::ApplyAirResistance` `0x00348628`): on the `airRes <= 0.1f` branch (`0x348740`),
+      `m_vecTurnSpeed` (`+0x70..+0x78`) was multiplied by literal `0.99f` per frame (`powf(0.99f, step / ps2step)` now).
+    - *Unscaled `ApplyTurnForce` (`0x00347E78`) sites*: `0x00152FF8` (`FUN_00152E18` burnout steer pivot when
+      `*(s16*)(veh+0x714) != 0`), `0x0033CDA0` (`CBike::ProcessControl` fallen bike uprighting `-0.1`), and
+      `0x0033CE34` (`CBike::ProcessControl` dismounted bike roll torque `-0.15`), scaled by `frameScale`.
+    - *Airborne free-wheel spin*: `CAutomobile` (`FUN_00152E18`, `+0x6FC..+0x708`: `*0.95` / `-0.1` / `+0.05` when
+      wheel contact `veh+0x690+4*w <= 0` and not `modelInfo+0xD0 & 0x2000000`) and `CBike` (`FUN_00337208`, `+0x598 *= 0.95`
+      / `+0x59C += +0.1 / -0.2` and unscaled wheel rotation integration `+0x590/+0x594`), using `powf(0.95f, scale)` and
+      `frameScale` (skipped on bikes for `STATUS_SIMPLE` or when `ProcessWheel` `$t3` wrote `+0x598/+0x59C`). Note:
+      `CBike::PreRender` (`FUN_0033F010`, `0x341244..0x3413FC`) overwrites `+0x598/+0x59C` whenever `bike+0x560..+0x56C > 0`.
+    - *Bike suspension symplectic spring->damper cross-term* (`0x00348128` `CPhysical::ApplyGravity`, `0x0034E1D8`
+      `CPhysical::ApplySpring`, `0x0034E348` `CVehicle::ApplySuspensionDamper`): accumulating spring impulse (`+0x140`,
+      `+0x70`) and adding `(1 / frameScale - 1) * dV` on bikes during `suspDamper` preserves the `1/30 s` suspension
+      compliance and nose-dive under braking.
+    - *`CVehicle::ProcessWheel` bike lateral demand* (`FUN_003E7618`, `0x3E77E8`): `$f25 = -dot(v_contact, right) / n` is
+      not scaled by `timeStep` while `adh` (`$f24`) and `brake` (`$f23 <= adh`) scale by `timeStep`, causing high-FPS
+      braking turns to trip `state = 2` (`0.7x` lateral skid + yaw wobble spinout). Scaling the lateral component of
+      `*speed` orthogonal to `fwd` by `frameScale` strictly when `ctx->f[13] <= adh` (leaving `brake > adh`, e.g.
+      handbrake `20000.0` where `$f26 = -v_fwd / n` is also unscaled and normalized jointly onto `adh`, untouched) aligns
+      `S` braking, `S + D` counter-steering, and `Space` handbrake turns across `30 / 60 / 144 fps`.
 - **Moving platforms: `1 / max(step, 1.0)`** (found 2026-10-31 from GitHub issue 10: Vic fell out of the ferris wheel
   at 60 fps, not at 30). Objects that the game places itself each frame get the move speed `(new position - old) * 1 /
   max(ms_fTimeStep, 1.0)`, so that a ped standing on them moves with them. On the PS2 the step is 1.67 and the 1.0 never
@@ -3307,8 +3330,18 @@ which REN_C7, SRANGE, MAR_A5, LAN_C5 and DIA_C3 use for their meters. Some missi
   pickups, health-derived bars (LAN_B6 / C3 / C8 Lance, damage bars), TAXI's fare timers (the tip bar `$G1532` IS per-frame: see below), E_RO cruise speed (set from the car's
   speed), position offsets (set, then +-c), the golf power bar.
 - **19 TAXI** (2026-11-24, `gothamor#208`): while the fare countdowns (`$G14F6` / `TIMERA`, `$G14F7` onscreen timer) use the game clock, the passenger tip bar float `$G1532` (shown as `0..100` integer `$G14FD`, `TAXI_T2`) drains per frame inside the mission's per-frame `GOSUB`s `0x156D` (called at `+0x402F`, `+0x4245`, `+0x4799`) and `0x16A4` (`+0x4C50`, "follow that car"): `0x000A` `SUB_VAL_FROM_FLOAT_VAR` `$G1532, 0.4f` at `+0x15B7` (`$G1500 == 1`) and `+0x1646` (`$G1500 == 0`), and `2.0f` at `+0x16EE` (`$G1518 == 1` when closer than 25 m). `TAXI` sets `0x4CD3E7 = 1` (`kMissionStart = 0x3CAE3`), draining `$G1532` at `12.00 / s` at 30 fps vs `57.70 / s` at 144 fps; all 3 sites added to `vcs_script_timing.cpp` `kSites[]`.
-- **Per frame but looks only** (not changed): text grow / scroll animations (CRASH, SRANGE), object slides and spins
-  (GON_C4, MEN_C3's barrier, camera smoothing in LAN_B6), particle bursts, the shared camera-shake helper (0.63 / 0.7 /
+- **Full MAIN + 101-mission audit (2026-11-25)**: read all 91 MAIN threads and all 101 missions; added 5 remaining
+  gameplay sites to `vcs_script_timing.cpp` (`kSites[]`): `M061` (`LAN_B1` `+0x3F43`, `0x000A L(8), F(0.5f)` with
+  `unscaleTime = true` to divide out `CTimer::ms_fTimeScale` `0x004CD168` under slow-mo), `M081` (`REN_C4` `+0x1968`,
+  `0x000A G(0x1625), F(1.0f)`), `M092` (`LAN_C10` `+0x41A2`, `0x002A G(0x173B), G(0x173C)`), and `M098` (`DIA_C3` `+0x2DB1`
+  / `+0x2E36`, `0x000A`/`0x0008 G(0x1576), F(4.0f)`). Ruled out as safe/non-gameplay: `PAGER`/`WARPSPO` (WAIT debounce),
+  dev tools (`SRANGEH`/`EXPORTB`/`MARKCAM`/`DBG*`/`THREAD_3A3F4`), `AMMUNAT`/`JANDW`/`EMMON`, and loop indices/one-shots
+  (`GAMHELP`/`REWMON`/`FERRIS`/`USJ`/`RAMPAGE`/`AMBTAXI`/`99RED`). Also hooked `CRunningScript::CollectParameters`
+  (`0x00254B90`, chained after `collectParamsNative` in `vcs_overrides.cpp`) so `0x020B ROTATE_OBJECT` (`ra = 0x0030DB54`,
+  `ScriptParams[2]`) and `0x020C SLIDE_OBJECT` (`ra = 0x0030E348`, `ScriptParams[4..6]`) scale speeds by `step / ps2step`
+  when `step < ps2step` (covers `SHOPMON` in MAIN + 14 slide / 3 rotate mission calls).
+- **Per frame but looks only** (not changed): text grow / scroll animations (CRASH, SRANGE),
+  camera smoothing in LAN_B6, particle bursts, the shared camera-shake helper (0.63 / 0.7 /
   0.67 in many missions), debug tools in the main script (near clip, animation viewer). Minor: LAN_C3 counts frames
   while a spawn point is blocked (its fallback comes sooner).
 - **The fix** (vcs_script_timing.cpp): the handlers of 0004/0005/0035/0036 (copy, 0x3B11D8), 0007 (0x3B1248), 0008/002A
@@ -4201,7 +4234,7 @@ measured with `tools/melee_check.py`.
   - `CWeather::Rain` (`0x004CD144`, `float` `0..1`): `0.5` during rain/hurricane, `0.0` in sunny weather.
   - Pause/menu gates: `CTimer::m_UserPause` (`0x004CD2AC`), `CTimer::m_CodePause` (`0x004CD11C`), and frontend pause manager `vcs::frontend::open()` / `*(0x00729480 + 0x40)` (also checked on the render thread via `!f.menu` in `gs_hw.cpp::composeDisplay()`).
   - Cutscene active: `rd32(rd32(0x0048F820) + 0x1C) != 0`.
-  - Interior / rain-suppressed zones: `0x006F4DEC > 0.5f` (camera interior/fade) or `*(rd32(0x00486838) + 0x3378) > 0.01f` (timecycle interior flag).
+  - Interior / rain-suppressed zones: `CGame::currArea` (`0x00489F7Cu != 0`) or `*(rd32(0x00486838) + 0x3378) > 0.01f` (timecycle interior flag). Note: `0x006F4DEC` is actually `CCamera::m_fCameraAverageSpeed` (`m/frame`, > 0.5 above ~15 m/s at 30 fps), not an interior flag; checking `0x006F4DEC` previously wiped droplets via `clearDrops()` at high vehicle speeds. `vcs_droplets.cpp` also caps trail spawning below `kMaxTrailCap = 480` within `kMaxDrops = kMaxSend = 640` and uses quadratic ease-out `(1 - lifeFrac)^2` for smooth fade-out.
   - Roof / overhead shelter: mirrors `FUN_003EA5D0(FindPlayerPed())` using `Players[0].m_pPed` (`0x004E4910`), `(rd32(rd32(ped + 0x160) + 0xD0) & 0x800) && rd8(ped + 0x22C) && rd8(ped + 0x22D)`.
 - **Water splash triggers (`src/game/vcs_particle_timing.cpp`)**: `CParticle::AddParticle` (`0x001E9078` / `0x001E9040`) notifies `vcs::droplets::notifySplash(...)` when water splash particle types (`26` `SPLASH`, `44` `CAR_SPLASH`, `45` `BOAT_SPLASH`, `50` `PED_SPLASH`, `75` `SWIM_SPLASH`) spawn within `8.0` m (`<= 64.0f` sq) of `TheCamera` position (`0x006F4500`, `kCameraMat + 0x30`).
 - **Pre-HUD VBlank note**: VCS at 30 FPS renders 3D only on alternating VBlanks (`Frame::had3d == false` on odd VBlanks, while `composeDisplay()` still blits `shown` onto `*m_display`). `drawDroplets()` must be gated on `!f.menu` (and CPU-cleared droplet state) rather than `f.had3d`, or droplets strobe at 15/30 Hz.

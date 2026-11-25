@@ -37,6 +37,11 @@ namespace vcs
         constexpr uint32_t kMissionRunning = 0x004CD3E7u; // u8
         constexpr uint32_t kTimeStep = 0x004CD110u;      // CTimer::ms_fTimeStep (1.0 = 1/50 s)
         constexpr uint32_t kTimeMs = 0x004CD104u;        // CTimer::m_snTimeInMilliseconds
+        constexpr uint32_t kTimeScale = 0x004CD168u;     // CTimer::ms_fTimeScale
+        constexpr uint32_t kCollectParams = 0x00254B90u; // CRunningScript::CollectParameters
+        constexpr uint32_t kScriptParam0 = 0x0050DEF8u;  // CTheScripts::ScriptParams[0]
+        constexpr uint32_t kRotateObjectCollectRa = 0x0030DB54u; // 0x020B ROTATE_OBJECT (ScriptParams[2] deg/frame)
+        constexpr uint32_t kSlideObjectCollectRa = 0x0030E348u;  // 0x020C SLIDE_OBJECT (ScriptParams[4..6] units/frame)
         constexpr float kPs2Step = 50.0f / 30.0f;          // a 30 fps frame
         constexpr uint32_t kDummyVariable = 0x0050C140u;  // where FUN_00254ff8 points an out-of-range array index
 
@@ -98,6 +103,7 @@ namespace vcs
             uint16_t opcode;
             Operand dst, src;
             const char *what;
+            bool unscaleTime = false; // divide by ms_fTimeScale when mission combines WAIT 0 + GET_GAME_TIMER under SET_TIME_SCALE
         };
 
         // Per-frame meter changes in the missions (game-internals.md 11f: how each was found, what it does)
@@ -109,12 +115,17 @@ namespace vcs
             {59, 0x070F, 0x000A, G(0x1513), F(0.01f), "LOU_B1 Hose the Hoes: girls -0.01"},
             {59, 0x172B, 0x0029, G(0x14F1), TIMERA, "LOU_B1 Hose the Hoes: the parked cars' fuse += TIMERA"},
             {59, 0x165F, 0x0029, G(0x14F4), TIMERB, "LOU_B1 Hose the Hoes: the fire truck help's time += TIMERB"},
+            {61, 0x3F43, 0x000A, L(8), F(0.5f), "LAN_B1: camera/vehicle roll -0.5 under slow-mo", true},
             {64, 0x1AF1, 0x0029, G(0x1524), TIMERB, "LAN_B5 Snitch Hitch: Lance's line in the car += TIMERB"},
             {64, 0x379E, 0x0029, L(3), TIMERB, "LAN_B5 Snitch Hitch: too far from the jet, the fail's time += TIMERB"},
             {80, 0x160E, 0x0029, G(0x152C), TIMERA, "REN_C3 Kill Phil: the line after the limo's blip += TIMERA"},
             {80, 0x33BE, 0x0029, L(16), TIMERB, "REN_C3 Kill Phil: too far from the limo, the fail's time += TIMERB"},
+            {81, 0x1968, 0x000A, G(0x1625), F(1.0f), "REN_C4: burning vehicle health -1"},
             {67, 0x24CF, 0x0008, G(0x14E9), F(0.005f), "UMB_B2 Balls: havoc +0.005 per Cholo"},
+            {92, 0x41A2, 0x002A, G(0x173B), G(0x173C), "LAN_C10: boss aim sweep +rate"},
             {97, 0x1E3F, 0x000A, G(0x154C), F(0.04f), "DIA_C2 The Exchange: time -0.04"},
+            {98, 0x2DB1, 0x000A, G(0x1576), F(4.0f), "DIA_C3: Domestobot arm pitch -4"},
+            {98, 0x2E36, 0x0008, G(0x1576), F(4.0f), "DIA_C3: Domestobot arm pitch +4"},
             {80, 0x27EC, 0x000A, G(0x152E), F(0.25f), "REN_C3 Kill Phil: Phil -0.25 (every other frame)"},
             {68, 0x0E8A, 0x0005, L(0), F(-0.2f), "UMB_B3 Papi Don't Screech: stress rate -0.2 (calm)"},
             {68, 0x0EBA, 0x0005, L(0), F(0.25f), "UMB_B3 Papi Don't Screech: stress rate 0.25 (out of the car)"},
@@ -165,6 +176,7 @@ namespace vcs
             kHandlers
         };
         PS2Runtime::RecompiledFunction g_orig[kHandlers] = {};
+        PS2Runtime::RecompiledFunction g_origCollectParams = nullptr;
 
         uint32_t read32(const uint8_t *rdram, uint32_t address)
         {
@@ -348,7 +360,15 @@ namespace vcs
                 if (site.opcode != opcode || !(site.dst == dst) || !(site.src == src) || !dstAt)
                     continue;
                 const float step = readF(rdram, kTimeStep);
-                const float k = std::clamp(step / kPs2Step, 0.0f, 2.0f);
+                float effectiveStep = step;
+                if (site.unscaleTime)
+                {
+                    // GET_GAME_TIMER and ms_fTimeStep both scale by ms_fTimeScale; unscale so slow-mo WAIT 0 matches 30 fps.
+                    const float timeScale = readF(rdram, kTimeScale);
+                    if (timeScale > 0.01f)
+                        effectiveStep /= timeScale;
+                }
+                const float k = std::clamp(effectiveStep / kPs2Step, 0.0f, 2.0f);
                 const bool isInt = handler == HAddInt || handler == HSubInt;
                 Stats &stats = g_stats[n];
                 ++stats.runs;
@@ -392,6 +412,32 @@ namespace vcs
             if (!scaled(rdram, ctx, H))
                 g_orig[H](rdram, ctx, runtime);
         }
+
+        // 0x020B ROTATE_OBJECT (ScriptParams[2] deg/frame) and 0x020C SLIDE_OBJECT (ScriptParams[4..6] units/frame) step
+        // objects directly by those parameters without ms_fTimeStep. Scale right after CollectParameters returns.
+        PS2_GUEST_CC void collectParamsHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ra = GPR_U32(ctx, 31);
+            g_origCollectParams(rdram, ctx, runtime);
+            if (!active() || (ra != kRotateObjectCollectRa && ra != kSlideObjectCollectRa))
+                return;
+            const float step = readF(rdram, kTimeStep);
+            if (step >= kPs2Step)
+                return;
+            const float k = std::max(0.0f, step / kPs2Step);
+            const uint32_t count = ra == kRotateObjectCollectRa ? 1u : 3u;
+            const uint32_t base = ra == kRotateObjectCollectRa ? kScriptParam0 + 8u : kScriptParam0 + 16u;
+            for (uint32_t i = 0; i < count; ++i)
+                writeF(rdram, base + i * 4u, readF(rdram, base + i * 4u) * k);
+            static bool logged[2] = {};
+            const int which = ra == kRotateObjectCollectRa ? 0 : 1;
+            if (!logged[which])
+            {
+                logged[which] = true;
+                std::fprintf(stderr, "[script-timing] %s (ra 0x%08x): speed on the time step (step %.3f, x%.3f)\n",
+                             which == 0 ? "0x020B ROTATE_OBJECT" : "0x020C SLIDE_OBJECT", ra, step, k);
+            }
+        }
     }
 
     void installScriptTimingHooks(PS2Runtime &runtime)
@@ -425,5 +471,11 @@ namespace vcs
         }
         for (const auto &h : handlers)
             runtime.replaceFunction(h.address, h.hook);
+        g_origCollectParams = runtime.lookupFunction(kCollectParams);
+        if (g_origCollectParams)
+            runtime.replaceFunction(kCollectParams, &collectParamsHook);
+        else
+            std::fprintf(stderr, "[script-timing] CollectParameters 0x%x not found: 0x020B/0x020C stay on the frame rate\n",
+                         kCollectParams);
     }
 }

@@ -1208,7 +1208,6 @@ namespace
         vcs::world::install(runtime);      // density and draw distance (game/vcs_world_detail.h)
         vcs::driveby::install(runtime);    // the NPC drive-by's fire rate (game/vcs_driveby.h)
         vcs::installFrameRateHooks(runtime); // 30 / 60 fps (game/vcs_framerate.h)
-        vcs::installScriptTimingHooks(runtime); // per-frame mission meters on the time step (game/vcs_script_timing.h)
         vcs::installPhysicsTimingHooks(runtime); // per-frame vehicle pushes on the time step (game/vcs_physics_timing.h)
         vcs::installMusicTimingHooks(runtime);   // the radio off the air on the time step (game/vcs_music_timing.h)
         vcs::installParticleTimingHooks(runtime); // particle fades and emitters on the time step (game/vcs_particle_timing.h)
@@ -1226,6 +1225,8 @@ namespace
             if (g_origCollectParams)
                 runtime.replaceFunction(0x00254B90u, &collectParamsNative);
         }
+        // After CollectParameters so 0x020B/0x020C speed scaling chains onto collectParamsNative as well as FUN_00254B90.
+        vcs::installScriptTimingHooks(runtime); // per-frame mission meters + 0x020B/0x020C on the time step (game/vcs_script_timing.h)
         if (!std::getenv("VCS_NATIVE_MODEL_INDEX") || std::getenv("VCS_NATIVE_MODEL_INDEX")[0] != '0')
         {
             g_origModelIndex = runtime.lookupFunction(0x00255188u);
