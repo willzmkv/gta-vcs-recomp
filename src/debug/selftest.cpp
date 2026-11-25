@@ -7,6 +7,7 @@
 #include "ps2_runtime_macros.h"
 #include <ps2_recompiled_functions.h>
 
+#include <bit>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -159,6 +160,83 @@ namespace vcs
             }
             return failures;
         }
+
+        // [gta-recomp] R5900 COP1 compare / min / max (exp 255 as finite, exp 0 as +-0) and CCollision::TestLineSphere
+        // (FUN_00129d70) on zero-length segments where 0/0 saturates to 0x7FFFFFFF (issues/#103).
+        int checkFpu(PS2Runtime &runtime)
+        {
+            auto f = [](uint32_t bits) { return std::bit_cast<float>(bits); };
+            const uint32_t vals[] = {
+                0xFFFFFFFFu, // -PS2_MAX
+                0xFF800001u, // exp 255 negative
+                0xFF800000u, // -2^128
+                0xBF800000u, // -1.0f
+                0x80800000u, // -min_normal
+                0x807FFFFFu, // -denorm (R5900 zero)
+                0x80000000u, // -0.0f
+                0x00000000u, // +0.0f
+                0x00000001u, // +denorm (R5900 zero)
+                0x00800000u, // +min_normal
+                0x3F800000u, // +1.0f
+                0x7F7FFFFFu, // +FLT_MAX
+                0x7F800000u, // +2^128
+                0x7FFFFFFFu, // +PS2_MAX (0/0)
+            };
+            auto rank = [](uint32_t u) -> int {
+                if ((u & 0x7F800000u) == 0u)
+                    return 0;
+                const int mag = static_cast<int>(u & 0x7FFFFFFFu);
+                return (u & 0x80000000u) ? -mag : mag;
+            };
+            int cmpFail = 0;
+            for (uint32_t ua : vals)
+            {
+                for (uint32_t ub : vals)
+                {
+                    const float a = f(ua), b = f(ub);
+                    const int ra = rank(ua), rb = rank(ub);
+                    const bool wantEq = (ra == rb);
+                    const bool wantLt = (ra < rb);
+                    const bool wantLe = (ra <= rb);
+                    const bool gotEq = FPU_C_EQ_S(a, b);
+                    const bool gotLt = FPU_C_OLT_S(a, b);
+                    const bool gotLe = FPU_C_OLE_S(a, b);
+                    const bool gotUn = FPU_C_UN_S(a, b);
+                    if (gotEq != wantEq || gotLt != wantLt || gotLe != wantLe || gotUn)
+                        ++cmpFail;
+                    const float mx = FPU_MAX_S(a, b), mn = FPU_MIN_S(a, b);
+                    const int rmx = rank(std::bit_cast<uint32_t>(mx));
+                    const int rmn = rank(std::bit_cast<uint32_t>(mn));
+                    if (rmx != (ra >= rb ? ra : rb) || rmn != (ra <= rb ? ra : rb))
+                        ++cmpFail;
+                }
+            }
+            std::fprintf(stderr, "[selftest] %s r5900 fcmp/fmax/fmin: %d mismatch(es)\n", cmpFail ? "FAIL" : "ok  ", cmpFail);
+
+            int sphFail = 0;
+            uint8_t *rdram = runtime.memory().getRDRAM();
+            constexpr uint32_t kLine = 0x01F80100u;
+            constexpr uint32_t kSph = 0x01F80140u;
+            auto testSph = [&](float x0, float y0, float z0, float x1, float y1, float z1, float cx, float cy, float cz, float r,
+                               uint32_t want) {
+                const float line[7] = {x0, y0, z0, 0.0f, x1, y1, z1};
+                const float sph[4] = {cx, cy, cz, r};
+                std::memcpy(rdram + kLine, line, sizeof(line));
+                std::memcpy(rdram + kSph, sph, sizeof(sph));
+                const uint32_t got = static_cast<uint32_t>(call2(runtime, FUN_00129d70_0x129d70, 0x00129D70u, kLine, kSph));
+                const bool ok = (got == want);
+                if (!ok)
+                    ++sphFail;
+                std::fprintf(stderr, "[selftest] %s TestLineSphere ([%g,%g,%g]->[%g,%g,%g], sph=[%g,%g,%g r=%g]): %u (want %u)\n",
+                             ok ? "ok  " : "FAIL", x0, y0, z0, x1, y1, z1, cx, cy, cz, r, got, want);
+            };
+            // Exact #103 Hunter spawn geometry: zero-length segment outside and inside sphere -> 0; intersecting segment -> 1
+            testSph(-0.0f, 0.0f, -1.5f, -0.0f, 0.0f, -1.5f, -0.0f, -6.360f, 0.071f, 0.610f, 0u);
+            testSph(0.0f, -6.360f, 0.071f, 0.0f, -6.360f, 0.071f, 0.0f, -6.360f, 0.071f, 0.610f, 0u);
+            testSph(0.0f, -8.0f, 0.0f, 0.0f, -5.0f, 0.0f, 0.0f, -6.360f, 0.071f, 0.610f, 1u);
+            testSph(0.0f, 0.0f, -1.5f, 1.0f, 0.0f, -1.5f, 0.0f, -6.360f, 0.071f, 0.610f, 0u);
+            return (cmpFail ? 1 : 0) + (sphFail ? 1 : 0);
+        }
     }
 
     bool runSelfTest(PS2Runtime &runtime)
@@ -250,6 +328,7 @@ namespace vcs
             }
         }
         failures += checkMmi();
+        failures += checkFpu(runtime);
         std::fprintf(stderr, "[selftest] %d failure(s)\n", failures);
         return failures == 0;
     }
