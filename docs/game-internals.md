@@ -350,6 +350,28 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
     half that. The pitch torques per second by caller (springs, dampers, the front brake) match between 30 and 144, and
     the stopping time moves smoothly with the step: explicit integration of a stiff suspension at the PS2's 1/30 s, like
     the jump heights above - not a per-frame term. Not corrected.
+  - **Pushing vehicles on foot** (`gothamor#205`; `CPhysical::ApplyCollision` `FUN_0034B128`, `0x34CD5C..0x34D60C`): found via
+    `watch` on a pushed car's `+0x140..+0x14C` (sole push writer `ApplyMoveForce` `FUN_00347D20`, `ra=0x34D5E0`) and reading
+    the decompile alongside `FramerateVigilante.VC`. Normal collisions return early at `0x34C504` / `0x34CD54`; when `obj1`
+    lacks flag bit `0x2000` (`ped+0x48` carries `0x2000`, `veh+0x48` has `& 0xE == 4` without `0x2000`), `0x34C8F8` falls
+    through to `0x34CD5C..0x34D60C` (`0.3` / `0.8` * `0x4CD2D1` push impulse) and calls `ApplyMoveForce` / `ApplyTurnForce`
+    (`0x0034D4A8` / `0x0034D4C8` for `obj2`, `0x0034D5E0` / `0x0034D604` for `obj1`) once per frame without `ms_fTimeStep`.
+    At 120 fps Vic shoved a parked Sentinel **17.15 m** in 5 s (`max 3.95 m/s`) against **0.014-0.047 m** at 30 fps. **Fixed**
+    (`vcs_physics_timing.cpp` 6.): hooks on `ApplyMoveForce` (`0x00347D20`) and `ApplyTurnForce` (`0x00347E78`) scale those
+    four return sites by `frameScale` (after: **0.001-0.032 m** across `60..240 fps`; `probe_crash` confirmed real
+    car-vs-car crashes use `0x34E310`/`0x34E70C`, unaffected, `target_peak_m_s` `9.5-10.7 m/s` at `30..240 fps`).
+  - **Skimmer / boat planing lift `dt^2` bug** (`gothamor#205`; `CBoat::ProcessControl` `FUN_0019FDA0`, `0x1A1260..0x1A1358`):
+    found via per-caller `m_vecMoveSpeed` tracing on a Skimmer (model `278` = `0x116`, `vtable 0x48FCD8`, on water at
+    `SEA_SPOT (-675, -75)`): while buoyancy (`0x1A0F38`), thrust (`0x3EB638`), and drag (`0x1A3A8C`) scaled with `dt`, the
+    planing lift call `ApplyMoveForce` at `0x001A1358` (`ra=0x001A1360`) delivered `+0.000174` / frame at 120 fps vs
+    `+0.003586` at 30 fps (20.6x weaker/frame, 5.15x/s). Decompilation showed `FUN_0036A090` (`0x1A06DC`) writes buoyancy
+    already multiplied by `CTimer::ms_fTimeStep` into `0x28($sp)`, and `0x1A127C..0x1A12AC` reads `0x28($sp)` and
+    multiplies by `ms_fTimeStep` (`0x4CD110`) a second time. Without early lift the Skimmer remained deep (`+0x48C ~ 0.08`)
+    under quadratic drag at `5.4-6.4 m/s` (`takeoff_s = null`); normal boats (`model 258`) also lost ~6.5 m/s top speed
+    (`35.0` vs `41.7 m/s`). **Fixed** (`vcs_physics_timing.cpp` 7.): `applyMoveForce` divides calls from `0x001A1360` by
+    `frameScale` (`> 1e-4f`). After (`30 / 120 / 144 / 240 fps`): level Skimmer reaches `46.6-49.8 m/s` and lifts off
+    in `4.8-6.3 s`; stick-back Skimmer lifts off in `4.1-4.3 s` and climbs `+61.2..+66.5 m` (`pitch ~89 deg`); boat `258`
+    reaches `40.9-41.7 m/s` at every frame rate (`VCS_PHYSICS_TIMESTEP=0` reproduces the original `6.37 m/s` stall).
 - **Moving platforms: `1 / max(step, 1.0)`** (found 2026-10-31 from GitHub issue 10: Vic fell out of the ferris wheel
   at 60 fps, not at 30). Objects that the game places itself each frame get the move speed `(new position - old) * 1 /
   max(ms_fTimeStep, 1.0)`, so that a ped standing on them moves with them. On the PS2 the step is 1.67 and the 1.0 never
