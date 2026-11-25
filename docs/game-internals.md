@@ -567,10 +567,23 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
       rescales as the camera nears or leaves it, and turning the camera away leaves the slots in use behind it until
       they expire - all the PS2's own. A sheet is at the camera's height for ~1.5 s of its 4 s (8 m up, -12 m/s),
       then under the ground.
-    - **Pulsing above 30 fps (fixed 2026-11-14)**: the start roll is per frame. At 30 fps the slots' 1-in-16 waits
-      (~0.5 s each) spread the streaks out within ~20 s of rain starting (until then the PS2's rain pulses too: all 35
-      start together); at 144 fps the waits are ~0.1 s, so they stay together for minutes - ~1.5 s of rain, ~3 s of
-      none. `vcs_effects_timing.cpp` 13: the roll fails between PS2 frame ticks (PROGRESS.md has the numbers).
+    - **Pulsing / disappearing rain streaks (`willzmkv#100`, fixed 2026-11-25)**: confirmed against the reporter's
+      1080p60 clip (`~61-69 fps`, Fort Baxter, v1.0.06) and Ghidra decompilation (`FUN_003E52C8`, `FUN_003E4BD0`,
+      `FUN_001EAD88`, `FUN_003E47B8`):
+      - **No UV scroll instruction:** raster `*0x4FE7B8` is used only in `FUN_003E52C8` -> `FUN_003E4BD0` (static
+        billboard quad UVs `[0..scaleX, 0..scaleY]`; `0x711710/14/18` only ever written `0.0`), and `*0x4FE7BC`
+        (`RAINDROP_2D`) only in `CParticle::Render` (`FUN_001EAD88`, static screen sprites).
+      - **Root cause:** `FUN_003E52C8` sets additive blending `(8, 2), (9, 2)` and steps 35 slots for `4096 ms`
+        (`vz = -12`, ~1.5 s near camera then ~2.6 s underground). Even with `kRainSpawn` (`0x3E577C`) gated to 30 Hz PS2
+        ticks, `p = 1/16` per tick (`~0.5 s` mean delay) fills nearly all 35 empty slots in a tight ~1 s wave whenever
+        rain starts or resumes after a >4 s pause/interior/cutscene. All ~34 streaks plunge past the camera together
+        as a bright additive white sheet, vanish underground (`near = 0..2`) for ~2.5 s, and repeat with a ~4.5 s period
+        for >30 s even at 30 Hz (`STEP 30`: `0..34`, `sd=10.2`; `STEP 100`: `0..34`, `sd=10.6`, `le2=13/66`).
+      - **Fix:** `vcs_effects_timing.cpp` 13 hooks `kRenderRainStreaks` (`0x003E52C8u`, `renderRainStreaks`, disabled via
+        `VCS_RAIN_STAGGER=0` or `VCS_EFFECTS_TIMING=0`) to balance newly spawned and synchronized excess slots across
+        eight `512 ms` phase bins over the `4096 ms` cycle (`startMs != 0`). Measured across `30 / 100 / 144` steps/s,
+        dry->rain recovery, and Hurricane (Vulkan): `mean ~12` near-camera streaks, `sd 1.3-1.9`, `min 7-10`,
+        `max 15-17`, `le2 = 0`, `ge25 = 0`.
     - **HUD flash & radio logo counters** (`gothamor#180`, fixed 2026-11-24, `vcs_effects_timing.cpp` 13):
       - `FUN_0018BBE0` (called from `0x21F730`, followed unconditionally by `FUN_00104AF8` at `0x21F74C`) ticks 1-per-frame byte/word counters: `0x486162` (settle `10->0`), `obj+0x5F0` (delay `1->0`), `0x486161` (fade `5->0`), and `0x486160` (show `60->0`), resetting to `(0, 5, 10)` whenever `FUN_0031C310(*(0x48F374))` (`uiObj+0x2A78 != 0`, e.g. a help box) is active. Held off 30 Hz PS2 ticks (`!c.tick`), skipping restore if `uiObj+0x2A78 != 0`.
       - `FUN_0031E3F8` (followed unconditionally by `FUN_0031FDF0` at `0x31C7A4`) decrements `0x488640` (`50->0`, breath/armour flash) and `FUN_0031FFF0` (followed unconditionally by `FUN_00320710` at `0x31C7C8`) decrements `0x488654` (`100->0`, HUD value-change flash). Both held off 30 Hz PS2 ticks (`!c.tick`).

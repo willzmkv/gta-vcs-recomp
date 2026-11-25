@@ -35,12 +35,15 @@
 // 13. Rain streaks (CWeather::RenderRainStreaks FUN_003E52C8): each of the 35 free slots starts a streak on
 //    `(rand & 0xF00) == 0` (0x3E577C), rolled every frame; a streak then lives 4 s on the ms clock. At 144 fps the slots
 //    refill within ~0.1 s of each other, so all 35 fall past the camera together, then none for ~3 s: the rain pulsed
-//    and vanished (on the PS2 the 1-in-16 roll per 1/30 s spreads them out within ~20 s). The roll fails between ticks.
+//    and vanished. Even at 30 Hz (1-in-16 per tick -> ~0.5 s spawn spread), all 35 still spawn in one tight cluster on
+//    rain start / interior / pause resume and stay out of camera range for ~2.5 s of every 4.1 s cycle for 30-60 s.
+//    The roll fails between ticks AND `renderRainStreaks` staggers any synchronized burst across the 4096 ms lifetime
+//    (VCS_RAIN_STAGGER=0 disables the stagger while keeping the 30 Hz roll).
 //
 // rand (FUN_00408058, Park-Miller: seed 0x48A5B8 x 16807 mod 2^31 - 1) is replaced by the same computation, which
 // does what is said above for the listed return addresses only.
-// VCS_EFFECTS_TIMING=0 leaves all of it per frame; VCS_EFFECTS_LOG=1 prints lightning bursts and cloud rotation every
-// 30 s of real time.
+// VCS_EFFECTS_TIMING=0 leaves all of it per frame; VCS_RAIN_STAGGER=0 disables streak phase staggering;
+// VCS_EFFECTS_LOG=1 prints lightning bursts and cloud rotation every 30 s of real time.
 #include "game/vcs_effects_timing.h"
 
 #include "game/vcs_framerate.h"
@@ -67,6 +70,7 @@ namespace vcs
         constexpr uint32_t kWeatherUpdate = 0x003E3720u, kCloudsUpdate = 0x0018CD88u, kRender2DFx = 0x001676C8u;
         constexpr uint32_t kHudFade = 0x002AF6E0u, kGetAlpha = 0x0036ED68u, kStreakUpdate = 0x00169F88u;
         constexpr uint32_t kRubbishUpdate = 0x0036AFD0u, kRainSteam = 0x003E4270u;
+        constexpr uint32_t kRenderRainStreaks = 0x003E52C8u;
 
         // rand's callers handled here (return addresses)
         constexpr uint32_t kLightningEnd = 0x003E3924u, kLightningStart = 0x003E39DCu, kSunGlare = 0x003E3F40u;
@@ -76,7 +80,7 @@ namespace vcs
 
         PS2Runtime::RecompiledFunction g_origWeather = nullptr, g_origClouds = nullptr, g_orig2DFx = nullptr,
                                        g_origHudFade = nullptr, g_origStreak = nullptr, g_origRubbish = nullptr,
-                                       g_origSteam = nullptr;
+                                       g_origSteam = nullptr, g_origRainStreaks = nullptr;
 
         bool enabled()
         {
@@ -85,6 +89,14 @@ namespace vcs
                 return !(v && v[0] == '0');
             }();
             return on;
+        }
+        bool rainStaggerEnabled()
+        {
+            static const bool on = [] {
+                const char *v = std::getenv("VCS_RAIN_STAGGER");
+                return !(v && v[0] == '0');
+            }();
+            return enabled() && on;
         }
         bool logOn()
         {
@@ -434,6 +446,120 @@ namespace vcs
             else
                 ++g_counts[SteamSteps];
             g_origSteam(rdram, ctx, runtime);
+        }
+
+        // ---- 13. rain streaks (phase desynchronisation) --------------------------------------------------------------
+        // CWeather::RenderRainStreaks (0x003E52C8) keeps 35 streak slots at 0x00711740 (stride 28, uint32 startMs at
+        // +0x18). Each lives 4096 ms falling at vz = -12 m/s, visible near camera for ~1.5 s and below view for ~2.6 s.
+        // Because empty slots respawn with p=1/16 per 30 Hz tick (~0.5 s spread), starting rain or resuming from pause /
+        // interior launches ~30-35 streaks together, flashing white over the screen and vanishing every ~4.5 s.
+        constexpr uint32_t kRainStreaks = 0x00711740u, kRainStreakStride = 0x1Cu, kRainStreakCount = 35u;
+        constexpr uint32_t kRainStreakLifetimeMs = 4096u, kRainBinCount = 8u;
+        constexpr uint32_t kRainBinMs = kRainStreakLifetimeMs / kRainBinCount;
+
+        void assignRainBin(uint8_t *rdram, uint32_t slot, uint32_t nowMs, uint32_t bin, uint32_t bins[kRainBinCount],
+                           int32_t fromBin)
+        {
+            if (fromBin >= 0 && bins[fromBin] > 0u)
+                --bins[fromBin];
+            ++bins[bin];
+            const uint32_t targetAge = bin * kRainBinMs + ((slot * 137u) % (kRainBinMs - 64u)) + 32u;
+            if (nowMs <= targetAge + 1u)
+                return;
+            wr<uint32_t>(rdram, kRainStreaks + slot * kRainStreakStride + 0x18u, std::max<uint32_t>(1u, nowMs - targetAge));
+        }
+
+        uint32_t pickEmptiestRainBin(const uint32_t bins[kRainBinCount], uint32_t slot, uint32_t minAllowed)
+        {
+            uint32_t best = minAllowed;
+            for (uint32_t step = 0u; step < kRainBinCount; ++step)
+            {
+                const uint32_t b = (slot * 5u + step) % kRainBinCount;
+                if (b >= minAllowed && bins[b] < bins[best])
+                    best = b;
+            }
+            return best;
+        }
+
+        PS2_GUEST_CC void renderRainStreaks(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (!rainStaggerEnabled())
+            {
+                g_origRainStreaks(rdram, ctx, runtime);
+                return;
+            }
+            uint32_t beforeStart[kRainStreakCount];
+            for (uint32_t i = 0u; i < kRainStreakCount; ++i)
+                beforeStart[i] = rd<uint32_t>(rdram, kRainStreaks + i * kRainStreakStride + 0x18u);
+
+            g_origRainStreaks(rdram, ctx, runtime);
+
+            // RenderRainStreaks skips its loop when paused, dry, or indoors; avoid disturbing idle slots then.
+            if (rd<uint32_t>(rdram, 0x004CD11Cu) != 0u || rd<float>(rdram, 0x004CD144u) <= 0.0f ||
+                rd<float>(rdram, 0x006F4DECu) > 1.75f)
+                return;
+
+            const uint32_t nowMs = rd<uint32_t>(rdram, kGameClock);
+            uint32_t bins[kRainBinCount] = {};
+            int32_t slotBin[kRainStreakCount];
+            bool spawnedNow[kRainStreakCount] = {};
+            bool anySpawn = false;
+            for (uint32_t i = 0u; i < kRainStreakCount; ++i)
+            {
+                const uint32_t s = rd<uint32_t>(rdram, kRainStreaks + i * kRainStreakStride + 0x18u);
+                spawnedNow[i] = (beforeStart[i] == 0u && s != 0u);
+                anySpawn |= spawnedNow[i];
+                if (s != 0u && nowMs - s <= kRainStreakLifetimeMs)
+                {
+                    const uint32_t b = std::min((nowMs - s) / kRainBinMs, kRainBinCount - 1u);
+                    slotBin[i] = static_cast<int32_t>(b);
+                    ++bins[b];
+                }
+                else
+                {
+                    slotBin[i] = -1;
+                }
+            }
+
+            if (anySpawn)
+            {
+                for (uint32_t i = 0u; i < kRainStreakCount; ++i)
+                {
+                    if (!spawnedNow[i] || slotBin[i] != 0)
+                        continue;
+                    const uint32_t best = pickEmptiestRainBin(bins, i, 0u);
+                    if (bins[0] > bins[best] + 1u)
+                    {
+                        assignRainBin(rdram, i, nowMs, best, bins, 0);
+                        slotBin[i] = static_cast<int32_t>(best);
+                    }
+                }
+            }
+
+            // Break pre-existing synchronized clusters by shifting excess streaks below camera FOV (>= bin 3) to
+            // starved bins so nothing pops mid-air and respawns naturally staggered afterward.
+            uint32_t minStarved = kRainStreakCount, maxC = 0u;
+            for (uint32_t b = 0u; b < kRainBinCount; ++b)
+            {
+                maxC = std::max(maxC, bins[b]);
+                if (b >= 3u)
+                    minStarved = std::min(minStarved, bins[b]);
+            }
+            if (maxC >= 9u && minStarved <= 1u)
+            {
+                for (uint32_t i = 0u; i < kRainStreakCount; ++i)
+                {
+                    const int32_t b = slotBin[i];
+                    if (b < 0 || bins[b] <= 5u)
+                        continue;
+                    const uint32_t best = pickEmptiestRainBin(bins, i, 3u);
+                    if (bins[b] > bins[best] + 2u)
+                    {
+                        assignRainBin(rdram, i, nowMs, best, bins, b);
+                        slotBin[i] = static_cast<int32_t>(best);
+                    }
+                }
+            }
         }
 
         // ---- 11. explosions --------------------------------------------------------------------------------------------
@@ -813,6 +939,7 @@ namespace vcs
             {kStreakUpdate, &g_origStreak, &streakUpdate},
             {kRubbishUpdate, &g_origRubbish, &rubbishUpdate},
             {kRainSteam, &g_origSteam, &rainSteam},
+            {kRenderRainStreaks, &g_origRainStreaks, &renderRainStreaks},
             {kExplosionUpdate, &g_origExplosions, &explosionUpdate},
             {kProjectileUpdate, &g_origProjectiles, &projectileUpdate},
             {kTriggerExplosion, &g_origTrigger, &triggerExplosion},
@@ -832,6 +959,10 @@ namespace vcs
             std::fprintf(stderr, "[effects-timing] off (VCS_EFFECTS_TIMING=0): lightning, clouds, shake ... once a frame\n");
             if (!logOn()) // with VCS_EFFECTS_LOG the hooks go in anyway, every frame a tick: the per-frame counts (before)
                 return;
+        }
+        else if (!rainStaggerEnabled())
+        {
+            std::fprintf(stderr, "[effects-timing] rain stagger off (VCS_RAIN_STAGGER=0): synchronized rain streak bursts kept\n");
         }
         for (const Hook &h : hooks)
         {
