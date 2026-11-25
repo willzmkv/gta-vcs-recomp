@@ -100,8 +100,21 @@ namespace vcs
         // of the picture clear and pulled the clock and the weapon in from the screen edge (GitHub issue 93). They are a
         // screen effect: drawn unsqueezed and never grouped. VCS_HAZE_FILL=0: as before.
         constexpr uint32_t kSpriteUvReturn = 0x003DFFC0u;
+        constexpr uint32_t kSpriteReturn = 0x003A07A8u;
+        constexpr uint32_t kScopeDraw = 0x00323018u; // [kScopeDraw, kTunnelVision): scope / viewfinder (CHud::Draw)
         constexpr uint32_t kTunnelVision = 0x00323FE8u, kTunnelVisionEnd = 0x0032437Cu;
         bool g_hazeFill = true;
+        bool g_scopeFill = true; // VCS_SCOPE_FILL=0 keeps scope mask side bars at 4:3
+        bool g_scopeHud = true;  // VCS_SCOPE_HUD=0 keeps old Union-Find grouping on scope quads
+        bool g_scopeRect = false; // the next Im2D call is a rectFill from FUN_00323018 (game thread)
+        uint32_t guestCaller(const uint8_t *rdram, R5900Context *ctx, uint32_t spOff)
+        {
+            const uint32_t sp = GPR_U32(ctx, 29) & 0x01FFFFFFu;
+            uint32_t caller = 0;
+            if (sp + spOff + 4u <= 0x02000000u)
+                std::memcpy(&caller, rdram + sp + spOff, 4);
+            return caller;
+        }
 
         // one window for all trace lines: from 30 s after the hooks went in, VCS_TRACE_IM2D lines in total
         auto g_traceStart = ps2x::hostNow();
@@ -181,6 +194,7 @@ namespace vcs
             CentredText, // a line centred across the screen (subtitles, mission text, stunt results): always the middle
             MaskBar,     // a scope mask's side bar, widened to the screen edge: unsqueezed (Stretch)
             Screen,      // a piece of a screen effect (the tunnel vision's quarters): unsqueezed (Stretch)
+            Scope,       // sniper / camera / binoculars scope (FUN_00323018): centred, never grouped with HUD
         };
         struct Prim
         {
@@ -243,7 +257,9 @@ namespace vcs
         void capture(uint8_t *rdram, R5900Context *ctx)
         {
             const bool maskBar = g_maskBar;
+            const bool scopeRect = g_scopeRect;
             g_maskBar = false;
+            g_scopeRect = false;
             if (!g_anchoring.load(std::memory_order_relaxed) || g_prims.size() >= 8192u)
                 return;
             const uint32_t verts = GPR_U32(ctx, 5) & PS2_RAM_MASK;
@@ -255,15 +271,22 @@ namespace vcs
             Prim p{1e9f, 1e9f, -1e9f, -1e9f, static_cast<uint32_t>(g_primKeys.size()), n, g_inMenu || g_inLoading};
             if (maskBar)
                 p.part = Part::MaskBar;
-            else if (g_hazeFill && GPR_U32(ctx, 31) == kSpriteUvReturn)
+            else if (scopeRect)
+                p.part = Part::Scope;
+            else if (GPR_U32(ctx, 31) == kSpriteUvReturn)
             {
-                // the sprite routine's caller (its saved return address): the tunnel vision's draw
-                const uint32_t sp = GPR_U32(ctx, 29) & 0x01FFFFFFu;
-                uint32_t caller = 0;
-                if (sp + 12u <= 0x02000000u)
-                    std::memcpy(&caller, rdram + sp + 8u, 4);
-                if (caller >= kTunnelVision && caller < kTunnelVisionEnd)
+                // the sprite routine's caller (its saved return address): tunnel vision or scope / viewfinder
+                const uint32_t caller = guestCaller(rdram, ctx, 8u);
+                if (g_hazeFill && caller >= kTunnelVision && caller < kTunnelVisionEnd)
                     p.part = Part::Screen;
+                else if (g_scopeHud && caller >= kScopeDraw && caller < kTunnelVision)
+                    p.part = Part::Scope;
+            }
+            else if (g_scopeHud && GPR_U32(ctx, 31) == kSpriteReturn)
+            {
+                const uint32_t caller = guestCaller(rdram, ctx, 0x98u);
+                if (caller >= kScopeDraw && caller < kTunnelVision)
+                    p.part = Part::Scope;
             }
             else if (GPR_U32(ctx, 31) == kGlyphBatch)
                 p.part = g_textCentred ? Part::CentredText : Part::Other;
@@ -341,7 +364,7 @@ namespace vcs
                 const uint8_t anchor = full(p) || p.part == Part::MaskBar || p.part == Part::Screen ? GSHwAnchorStretch
                                        : !edges || p.menu                            ? GSHwAnchorCentre
                                        : p.part == Part::Radar                       ? GSHwAnchorLeft
-                                       : p.part == Part::CentredText                 ? GSHwAnchorCentre
+                                       : p.part == Part::CentredText || p.part == Part::Scope ? GSHwAnchorCentre
                                        : centre < 280.0f && b.x0 < 160.0f            ? GSHwAnchorLeft
                                        : centre > 360.0f && b.x1 > 480.0f            ? GSHwAnchorRight
                                                                                      : GSHwAnchorCentre;
@@ -538,8 +561,8 @@ namespace vcs
             const uint32_t ra = GPR_U32(ctx, 31);
             const float s = g_squeeze.load(std::memory_order_relaxed);
             const uint32_t rect = GPR_U32(ctx, 4) & 0x01FFFFFFu;
-            if ((ra == kMaskLeftReturn || ra == kMaskRightReturn) && s < 0.999f && g_anchoring.load(std::memory_order_relaxed) &&
-                rect + 16u <= 0x02000000u)
+            if (g_scopeFill && (ra == kMaskLeftReturn || ra == kMaskRightReturn) && s < 0.999f &&
+                g_anchoring.load(std::memory_order_relaxed) && rect + 16u <= 0x02000000u)
             {
                 float r[4];
                 std::memcpy(r, rdram + rect, 16);
@@ -556,7 +579,10 @@ namespace vcs
                 std::memcpy(rdram + rect, r, 16); // the caller's rect on its stack, rebuilt before each fill
                 g_maskBar = true;
             }
+            else if (g_scopeHud && ra >= kScopeDraw && ra < kTunnelVision)
+                g_scopeRect = true;
             g_origRectFill(rdram, ctx, runtime);
+            g_scopeRect = false;
         }
 
         PS2_GUEST_CC void menuDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -658,7 +684,10 @@ namespace vcs
             }
             // the scope mask's side bars to the screen edges (the frontend's hook of the same routine chains onto this)
             const char *fill = std::getenv("VCS_SCOPE_FILL");
-            if (!(fill && fill[0] == '0') && (g_origRectFill = runtime.lookupFunction(kRectFill)) != nullptr)
+            g_scopeFill = !(fill && fill[0] == '0');
+            const char *scopeHud = std::getenv("VCS_SCOPE_HUD");
+            g_scopeHud = !(scopeHud && scopeHud[0] == '0');
+            if ((g_scopeFill || g_scopeHud) && (g_origRectFill = runtime.lookupFunction(kRectFill)) != nullptr)
                 runtime.replaceFunction(kRectFill, &rectFill);
             const char *haze = std::getenv("VCS_HAZE_FILL"); // the tunnel vision across the whole picture (see the top)
             g_hazeFill = !(haze && haze[0] == '0');

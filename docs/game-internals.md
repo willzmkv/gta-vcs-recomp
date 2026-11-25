@@ -1098,13 +1098,7 @@ black mask before `CHud::Draw` (0x21f768) when the HUD's +0x2C28 is set (SET_BIN
 `FUN_002BF1D8` (+0 left, +4 bottom, +8 right, +0xC top - stored from f12, f15, f14, f13) and filled by `FUN_003E0B10(rect,
 colour, 1)` (one Im2D call). Top / bottom: 0..40 and 232..272 for the camera (0x27) or binoculars, off screen otherwise.
 Sides: rect(0, 240 - s1) and rect(240 + s1, 480), s1 210 (170 with 5a's preference) - the fills returning to 0x21f6f0 /
-0x21f728. The scope itself (`FUN_00323018`, from CHud::Draw) is four textured quadrant quads around (240, 136), half-width
-280 for the sniper rifle: past the 4:3 screen. In widescreen the side bars and the scope were both squeezed into the
-middle 4:3 and clipped to it, so the 3D world showed in the strips beside them (seen with the sniper rifle and the
-camera at 16:9: those strips reached 253 of 255). `vcs_hud.cpp` widens the two side bars to the screen edges and draws
-them unsqueezed (anchor Stretch): left 0 .. 240 + (right - 240) s, right 240 + (left - 240) s .. 480, s the HUD squeeze
-- the inner edge stays where the squeezed bar's was. 4:3 and HUD Stretch (s = 1) are untouched; `VCS_SCOPE_FILL=0` =
-before. Regression check: `tools/regress.py` step "scopemask" (fails with `VCS_SCOPE_FILL=0`).
+0x21f728. The scope itself (`FUN_00323018` - `0x323FE8`, called only from `CHud::Draw` at `0x31C6B4`/`0x31C844`/`0x31C870`) draws textured quadrant quads, sprites (`FUN_003DFF80` `ra=0x3DFFC0` caller `[sp+8]`, `FUN_003A03A8` `ra=0x3A07A8` caller `[sp+0x98]`), and crosshair/frame fills (`FUN_003E0B10`) around `(240, 136)` (e.g. sniper/laser quadrants `-53..693`, camera rounded frame `2..637`, binoculars `-1..641`). Previously `resolveAnchors` saw these non-full-width overlays as `Part::Other`, merged them with the corner HUD elements (clock, weapon, ammo, armor, cash, help box) via Union-Find, and snapped the whole merged HUD back to `GSHwAnchorCentre` (4:3) whenever aiming (`gothamor#156`). `vcs_hud.cpp` now tags draws inside `[0x00323018, 0x00323FE8)` as `Part::Scope` (excluded from Union-Find by `apart(p)` and anchored `GSHwAnchorCentre` unless `full(p)` fills the width; `VCS_SCOPE_HUD=0` = before) so scopes/viewfinders stay centred and circular while corner HUD elements stay at 16:9 screen edges. `vcs_hud.cpp` also widens the two side bars to the screen edges and draws them unsqueezed (anchor Stretch): left 0 .. 240 + (right - 240) s, right 240 + (left - 240) s .. 480, s the HUD squeeze - the inner edge stays where the squeezed bar's was. 4:3 and HUD Stretch (s = 1) are untouched; `VCS_SCOPE_FILL=0` = before. Regression check: `tools/regress.py` step "scopemask" (fails with `VCS_SCOPE_FILL=0`).
 
 **Tunnel vision** (2026-11-10, GitHub issue 93: GON_C3 "Purple Haze"'s haze left the sides of a 16:9 picture clear):
 `SET_TUNNEL_VISION_INTENSITY` (0x0488, one int, 0 off .. 255; the mission's values are in `$G15B2[12]`) turns on a dark
