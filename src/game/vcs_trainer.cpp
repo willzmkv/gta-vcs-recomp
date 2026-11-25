@@ -5,6 +5,7 @@
 #include "game/vcs_freecam.h"
 #include "game/vcs_hud.h"
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
 #include "runtime/ps2_control.h"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -46,9 +48,16 @@ namespace vcs::trainer
         constexpr uint32_t kPedPosition = 0x30u;
         constexpr uint32_t kPedHealth = 0x4E4u; // float
         constexpr uint32_t kPedVehicle = 0x480u; // the vehicle it is in (0 on foot)
+        constexpr uint32_t kWeaponStructOffset = 0x574u; // ped + 0x574: 10 CWeapon structs (+4 type, +8 state, +12 clip, +16 total)
         constexpr uint32_t kPedWeapons = 0x578u; // 10 slots of 0x1C: type, state, ammo in clip, ammo total
         constexpr uint32_t kWeaponSlotSize = 0x1Cu;
         constexpr int kWeaponSlots = 10;
+        constexpr uint32_t kFire = 0x002C0F98u;        // CWeapon::Fire(weapon a0, shooter a1, source a2)
+        constexpr uint32_t kFireEnd = 0x002C1B18u;
+        constexpr uint32_t kFireFrame = 0x80u;
+        constexpr uint32_t kFireFromCar = 0x002C1BB0u; // CWeapon::FireFromCar(weapon a0, shooter/car a1, ...)
+        constexpr uint32_t kFireFromCarEnd = 0x002C1D80u;
+        constexpr uint32_t kFireFromCarFrame = 0x20u;
         constexpr uint32_t kPedState = 0x8C4u;   // 1 on foot, 0x37 driving, 0x39 / 0x3A dying / dead
         constexpr uint32_t kCarHealth = 0x278u;  // float, 1000 undamaged (below 250 it burns)
 
@@ -559,7 +568,7 @@ namespace vcs::trainer
             }
             if (on[NeverWanted])
                 code.op(CLEAR_WANTED_LEVEL).player();
-            if (on[UnlimitedAmmo] || on[NoReload])
+            if (on[NoReload])
                 for (int s = 0; s < kWeaponSlots; ++s)
                 {
                     const uint32_t slot = ped + kPedWeapons + s * kWeaponSlotSize;
@@ -568,11 +577,8 @@ namespace vcs::trainer
                         continue;
                     const uint32_t clip = rd32(ram, slot + 8), total = rd32(ram, slot + 12);
                     g_clipSize[type] = std::max<int>(g_clipSize[type], static_cast<int>(clip));
-                    if (on[UnlimitedAmmo] && total < 9000)
-                        wr32(ram, slot + 12, 9999);
-                    const uint32_t left = rd32(ram, slot + 12); // the total counts the clip
-                    if (on[NoReload] && static_cast<int>(clip) < g_clipSize[type] && left > clip)
-                        wr32(ram, slot + 8, std::min<uint32_t>(g_clipSize[type], left));
+                    if (static_cast<int>(clip) < g_clipSize[type] && total > clip)
+                        wr32(ram, slot + 8, std::min<uint32_t>(g_clipSize[type], total));
                 }
             if (refresh)
             {
@@ -935,9 +941,151 @@ namespace vcs::trainer
         return duration<double>(steady_clock::now().time_since_epoch()).count();
     }
 
-    void install(PS2Runtime &)
+    namespace
+    {
+        struct ActiveShot
+        {
+            uint32_t frameSp = 0;
+            uint32_t ra = 0;
+            uint32_t weapon = 0;
+            uint32_t preTotal = 0;
+        };
+
+        PS2Runtime::RecompiledFunction g_origFire = nullptr, g_rawFire = nullptr;
+        PS2Runtime::RecompiledFunction g_origFireFromCar = nullptr, g_rawFireFromCar = nullptr;
+        std::vector<ActiveShot> g_activeShots; // EE thread: tracks Fire / FireFromCar calls across checkpoint unwinds
+
+        bool isPlayerWeaponSlot(uint32_t ped, uint32_t weapon)
+        {
+            const uint32_t base = ped + kWeaponStructOffset;
+            return ped != 0 && weapon >= base && weapon < base + kWeaponSlots * kWeaponSlotSize &&
+                   (weapon - base) % kWeaponSlotSize == 0;
+        }
+
+        void finishOrUpdateShot(uint8_t *rdram, const R5900Context *ctx, size_t idx)
+        {
+            const ActiveShot shot = g_activeShots[idx];
+            const bool finished = ctx->pc == shot.ra;
+            const uint32_t curTotal = rd32(rdram, shot.weapon + 16);
+            if (finished)
+            {
+                if (shot.preTotal == 1 || curTotal < shot.preTotal)
+                    wr32(rdram, shot.weapon + 16, shot.preTotal);
+                g_activeShots.erase(g_activeShots.begin() + static_cast<std::ptrdiff_t>(idx));
+            }
+            else if (shot.preTotal >= 2 && curTotal < shot.preTotal)
+            {
+                wr32(rdram, shot.weapon + 16, shot.preTotal);
+            }
+        }
+
+        // Preserve ammoTotal across CWeapon::Fire / FireFromCar while UnlimitedAmmo is enabled without granting
+        // free ammo or forcing 9999 (matching VCS's 100% reward at 0x2C18B8 / 0x2C1CD4, plus Camera 0x26).
+        // Because EE checkpoints can unwind mid-call and resume directly at a recompiled resume slot inside Fire /
+        // FireFromCar, we track active shots by stack frame ($sp) across both entry and resume hooks.
+        void callWithoutReserveLoss(PS2Runtime::RecompiledFunction orig, uint32_t frameSize, uint8_t *rdram,
+                                    R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t weapon = GPR_U32(ctx, 4);
+            const uint32_t ped = rd32(rdram, kPlayerPed);
+            if (g_toggles[UnlimitedAmmo].load(std::memory_order_relaxed) && isPlayerWeaponSlot(ped, weapon))
+            {
+                const uint32_t type = rd32(rdram, weapon + 4);
+                const uint32_t preTotal = rd32(rdram, weapon + 16);
+                // Exclude unarmed/melee (< 12) and Remote Detonator (36 = 0x24, consumed 1 -> 0 upon detonating).
+                if (type >= 12 && type != 36 && preTotal > 0)
+                {
+                    const uint32_t frameSp = GPR_U32(ctx, 29) - frameSize;
+                    const uint32_t ra = GPR_U32(ctx, 31);
+                    // Drop any stale unmatched entry sharing frameSp before recording the active call.
+                    for (size_t i = g_activeShots.size(); i-- > 0;)
+                        if (g_activeShots[i].frameSp == frameSp)
+                            g_activeShots.erase(g_activeShots.begin() + static_cast<std::ptrdiff_t>(i));
+                    if (g_activeShots.size() >= 8)
+                        g_activeShots.erase(g_activeShots.begin());
+                    g_activeShots.push_back({frameSp, ra, weapon, preTotal});
+                    // Guard preTotal == 1 against hitting 0 mid-call (which sets state = 3 OutOfAmmo and strips 1-round weapons).
+                    if (preTotal == 1)
+                        wr32(rdram, weapon + 16, 2u);
+                    orig(rdram, ctx, runtime);
+                    for (size_t i = g_activeShots.size(); i-- > 0;)
+                        if (g_activeShots[i].frameSp == frameSp)
+                        {
+                            finishOrUpdateShot(rdram, ctx, i);
+                            break;
+                        }
+                    return;
+                }
+            }
+            orig(rdram, ctx, runtime);
+        }
+
+        void resumeWithoutReserveLoss(PS2Runtime::RecompiledFunction rawFn, uint8_t *rdram, R5900Context *ctx,
+                                      PS2Runtime *runtime)
+        {
+            const uint32_t frameSp = GPR_U32(ctx, 29);
+            rawFn(rdram, ctx, runtime);
+            for (size_t i = g_activeShots.size(); i-- > 0;)
+                if (g_activeShots[i].frameSp == frameSp)
+                {
+                    finishOrUpdateShot(rdram, ctx, i);
+                    break;
+                }
+        }
+
+        PS2_GUEST_CC void hookFire(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            callWithoutReserveLoss(g_origFire, kFireFrame, rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void hookFireResume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            resumeWithoutReserveLoss(g_rawFire, rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void hookFireFromCar(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            callWithoutReserveLoss(g_origFireFromCar, kFireFromCarFrame, rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void hookFireFromCarResume(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            resumeWithoutReserveLoss(g_rawFireFromCar, rdram, ctx, runtime);
+        }
+
+        void hookWithResumes(PS2Runtime &runtime, uint32_t start, uint32_t end,
+                             PS2Runtime::RecompiledFunction &origEntry, PS2Runtime::RecompiledFunction &rawFn,
+                             PS2Runtime::RecompiledFunction entryHook, PS2Runtime::RecompiledFunction resumeHook)
+        {
+            origEntry = runtime.lookupFunction(start);
+            if (!origEntry)
+                return;
+            for (uint32_t pc = start + 4u; pc < end; pc += 4u)
+                if (runtime.hasFunction(pc))
+                {
+                    if (!rawFn)
+                        rawFn = runtime.lookupFunction(pc);
+                    runtime.replaceFunction(pc, resumeHook);
+                }
+            if (!rawFn)
+                rawFn = origEntry;
+            runtime.replaceFunction(start, entryHook);
+        }
+    } // namespace
+
+    void install(PS2Runtime &runtime)
     {
         g_toggles[WarpIntoSpawned] = true; // a spawned vehicle is to be driven
+        if (const char *env = std::getenv("VCS_TRAINER_AMMO_HOOK"); env && env[0] == '0')
+            std::fprintf(stderr, "[trainer] unlimited ammo hooks disabled (VCS_TRAINER_AMMO_HOOK=0)\n");
+        else
+        {
+            // Installed after applyVcs (vcs::driveby), so looking up kFire chains cleanly onto driveby::fire,
+            // while kFire's resume slots invoke g_rawFire directly without re-entering driveby::fire.
+            hookWithResumes(runtime, kFire, kFireEnd, g_origFire, g_rawFire, &hookFire, &hookFireResume);
+            hookWithResumes(runtime, kFireFromCar, kFireFromCarEnd, g_origFireFromCar, g_rawFireFromCar,
+                            &hookFireFromCar, &hookFireFromCarResume);
+        }
         ps2control::addCommand("trainer", command);
     }
 
@@ -1072,7 +1220,7 @@ namespace vcs::trainer
             return post("No such weapon");
         const std::string name = nameOf(g_weaponNames, type, w->fallback);
         queue([w, name](uint8_t *, Scm &code, std::string &notice) {
-            if (toggle(NoReload) || toggle(UnlimitedAmmo))
+            if (toggle(NoReload))
                 g_clipSize[w->type] = 0; // learn the clip again (a new weapon comes with a full one)
             addWeapon(code, *w, true);
             notice = name + " given";

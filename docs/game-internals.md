@@ -3941,6 +3941,18 @@ hidden run (rig `peek` / `poke`, snapshots diffed).
     30.0 / 29.9 shots/s at 30 / 60 / 144 fps, the gun's rate 10.8 / 11.0 / 11.1 (PROGRESS.md).
   - Setting up a drive-by in a test: `SET_CHAR_OBJ_KILL_CHAR_ANY_MEANS` makes the passenger of a standing car get
     out and fire on foot (animation-paced: a few shots a second); the threat search keeps him seated.
+  - **100% completion unlimited ammo check & HUD reserve (`#155`, found 2026-11-24):** `CWeapon::Fire` (`0x002C0F98`) and
+    `CWeapon::FireFromCar` (`0x002C1BB0`) call `CStats::GetPercentageCompleted()` (`FUN_0028B270`, returns `[0x4CD18C] * 100.0f / [0x4CD190]`
+    clamped `<= 100.0f`) at `0x2C18B8` (`ra = 0x2C18C0`) and `0x2C1CD4` (`ra = 0x2C1CDC`): both decrement `ammoInClip` (`+0xC`) per shot
+    and skip decrementing `ammoTotal` (`+0x10`) when `isPlayer && (ammoTotal >= 25000 || (type != 0x24 && pct >= 100.0f))` (`0x24 = 36`
+    is the Remote Detonator, whose `Fire` sets `+0xC = +0x10 = 1` at `0x2C1748..0x2C1750` and consumes it `1 -> 0` to clear itself).
+    Camera (`0x26 = 38`) jumps over the `isPlayer` setup (`0x2C179C`) leaving `$s0 = 0`, so even 100% still consumes Camera film.
+    On `ammoInClip == 0` (`0x2C1938` / `0x2C1D14`), non-zero `ammoTotal` sets `state = 2` (reload, `FUN_002CDFB0` sets `+0xC = min(+0x10, clipSize)`)
+    while `ammoTotal == 0` sets `state = 3` (`OutOfAmmo`). In `CHud::Draw` (`FUN_0031F478`), weapon ammo is hidden when
+    `ammoTotal - ammoInClip >= 10000` (`0x31F8F8..0x31F928`). Hooked in `vcs_trainer.cpp` across both entry and recompiled
+    resume slots inside `[0x002C0F98, 0x002C1B18)` (`-0x80` `$sp` frame) and `[0x002C1BB0, 0x002C1D80)` (`-0x20` `$sp` frame)
+    because nested calls inside `Fire` / `FireFromCar` can unwind on EE scheduler checkpoints and resume mid-function
+    (`VCS_TRAINER_AMMO_HOOK=0` fallback).
 
 ### 12d. Population: density, caps, spawn chance (2026-11-07, Enhancements > World)
 

@@ -1544,6 +1544,11 @@ Python scripts still usable on their own. docs/LAUNCHER.md has the whole of it; 
 | `VCS_CAR_VALID=0` | Gameplay: fallback restoring PS2's 40-slot bounds in `CVehicle::IsVehiclePointerValid_NotInWorld` and `DOES_VEHICLE_EXIST` `0x034B` (reproduces #207 DomestoBot stuck when spawned at slot >= 40) |
 | `VCS_REMOTE_DRIVE=0` | Controls: fallback disabling keyboard/driving scheme routing while piloting an RC vehicle (`Players[0].m_pRemoteVehicle`) |
 | `VCS_BMX_CAM=0` | Camera: disable the #166 BMX follow-camera fix in `vcs_carcam.cpp` (leaves `CBmx` `+0x354 == 8` unmapped in `FUN_0029FAF0` for A/B comparison) |
+| `VCS_TRAINER_AMMO_HOOK=0` | Trainer: disable the #155 `CWeapon::Fire` / `FireFromCar` ammo-preservation hook in `vcs_trainer.cpp` (restores normal reserve consumption for A/B verification) |
+
+## 2026-11-24 - Unlimited ammo (#155)
+
+- **#155 (`vcs_trainer.cpp`, `trainer_menu.cpp`, `tools/trainer_check.py`):** replaced the `tick()` override (`total < 9000 -> 9999`) with entry + resume-slot hooks across `CWeapon::Fire` (`0x002C0F98..0x002C1B18`, chained after `vcs::driveby` at entry and invoking `FUN_002c0f98` directly on resume slots) and `CWeapon::FireFromCar` (`0x002C1BB0..0x002C1D80`) that track active player shots by stack frame (`$sp`) across EE checkpoint unwinds (`g_checkpointUnwind`) and preserve `weapon + 0x10` (`ammoTotal`) (`type >= 12`, excluding Remote Detonator `36` = `0x24`, with `preTotal == 1 -> 2` mid-call guard so 1-round weapons reload cleanly instead of tripping `state = 3 OutOfAmmo`; `VCS_TRAINER_AMMO_HOOK=0` fallback). Existing ammo counts are never inflated when toggling Unlimited ammo, and clips/reloading obey `No reload` independently. Verified on `--opt lto` ThinLTO build: 12/12 A/B weapon checks (`VCS_TRAINER_AMMO_HOOK` on vs `0`: AK burst/reload, 1-round grenade/RPG, camera, driver drive-by, toggle off) and 42/43 `tools/trainer_check.py` checks passed (all weapon/ammo checks passed; only `mission lists` failed due to Portuguese `'7:Soldado'` in the `fortbaxter` test save).
 
 ## 2026-11-24 - v1.0.1 Block A (#166 BMX camera)
 

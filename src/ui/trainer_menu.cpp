@@ -245,7 +245,7 @@ namespace ui
                                          "Street: bat, molotovs, pistol, shotgun, micro SMG. Military: machete, grenades, "
                                          "Equalizer, Spaz, AK, sniper, rocket launcher. Heavy: chainsaw, grenades, "
                                          "Equalizer, Spaz, SMG, assault rifle, laser sniper, minigun."));
-                rows.push_back(toggleRow("Unlimited ammo", tr::UnlimitedAmmo, "Every weapon you carry stays full."));
+                rows.push_back(toggleRow("Unlimited ammo", tr::UnlimitedAmmo, "Firing never uses up reserve ammo (you still reload unless No reload is on)."));
                 rows.push_back(toggleRow("No reload", tr::NoReload, "The clip never runs out: fire without reloading."));
                 rows.push_back(toggleRow("Fast reload", tr::FastReload, "The game's own quick reload."));
                 rows.push_back(actionRow("Remove all weapons", tr::removeWeapons, "Empty hands."));
