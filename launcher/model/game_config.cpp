@@ -129,6 +129,7 @@ namespace launcher
             else if (key == "graphics.post_process") graphicsPostProcess = std::clamp(parseInt(val, graphicsPostProcess), 0, 1);
             else if (key == "graphics.exposure") graphicsExposure = std::clamp(parseInt(val, graphicsExposure), 0, 200);
             else if (key == "graphics.rain_droplets") graphicsRainDroplets = std::clamp(parseInt(val, graphicsRainDroplets), 0, 1);
+            else if (key == "graphics.stochastic") graphicsStochastic = std::clamp(parseInt(val, graphicsStochastic), 0, 1);
             else if (key == "world.hd_radius") worldHdRadius = std::clamp(parseInt(val, worldHdRadius), 0, 3);
             else if (key == "world.view_distance") worldViewDistance = std::clamp(parseInt(val, worldViewDistance), 0, 100);
             else if (key == "world.detail_distance") worldDetailDistance = std::clamp(parseInt(val, worldDetailDistance), 0, 100);
@@ -223,6 +224,7 @@ namespace launcher
             {"graphics.post_process", std::to_string(graphicsPostProcess)},
             {"graphics.exposure", std::to_string(graphicsExposure)},
             {"graphics.rain_droplets", std::to_string(graphicsRainDroplets)},
+            {"graphics.stochastic", std::to_string(graphicsStochastic)},
             {"world.hd_radius", std::to_string(worldHdRadius)},
             {"world.view_distance", std::to_string(worldViewDistance)},
             {"world.detail_distance", std::to_string(worldDetailDistance)},
@@ -339,6 +341,7 @@ namespace launcher
             displayAniso = 0; // Sem filtro anisotrópico
             graphicsPostProcess = 1;
             graphicsRainDroplets = 0;
+            graphicsStochastic = 0;
             worldHdRadius = 0; // ~260m
             worldViewDistance = 0;
             worldDetailDistance = 0;
@@ -358,6 +361,7 @@ namespace launcher
             displayAniso = 4; // 4x Anisotrópico
             graphicsPostProcess = 1;
             graphicsRainDroplets = 1;
+            graphicsStochastic = 1;
             worldHdRadius = 1; // ~450m
             worldViewDistance = 25;
             worldDetailDistance = 20;
@@ -377,6 +381,7 @@ namespace launcher
             displayAniso = 8; // 8x Anisotrópico
             graphicsPostProcess = 1;
             graphicsRainDroplets = 1;
+            graphicsStochastic = 1;
             worldHdRadius = 1; // ~450m
             worldViewDistance = 45;
             worldDetailDistance = 40;
@@ -396,6 +401,7 @@ namespace launcher
             displayAniso = 16; // 16x Anisotrópico
             graphicsPostProcess = 1;
             graphicsRainDroplets = 1;
+            graphicsStochastic = 1;
             worldHdRadius = 2; // ~580m
             worldViewDistance = 75;
             worldDetailDistance = 70;
@@ -415,6 +421,7 @@ namespace launcher
             displayAniso = 16; // 16x Anisotrópico máximo
             graphicsPostProcess = 1;
             graphicsRainDroplets = 1;
+            graphicsStochastic = 1;
             worldHdRadius = 3; // ~720m (Mundo HD completo)
             worldViewDistance = 100;
             worldDetailDistance = 100;

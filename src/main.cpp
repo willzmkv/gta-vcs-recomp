@@ -328,13 +328,13 @@ namespace
     const Preset kEnhanced[] = {{"display.aspect", 0},   {"display.hud", 2},    {"display.scale", 0},
                                 {"display.msaa", 4},     {"display.aniso", 16}, {"display.timing", 1},
                                 {"display.fps", vcs::kCapRefresh}, {"display.vsync", 0},
-                                {"graphics.rain_droplets", 1}};
+                                {"graphics.rain_droplets", 1}, {"graphics.stochastic", 1}};
     const Preset kLight[] = {{"display.aspect", 0}, {"display.hud", 2},    {"display.scale", 1},  {"display.msaa", 1},
                              {"display.aniso", 4},  {"display.timing", 1}, {"display.fps", 60}, {"display.vsync", 0},
-                             {"graphics.rain_droplets", 1}};
+                             {"graphics.rain_droplets", 1}, {"graphics.stochastic", 1}};
     const char *const kPresetKeys[] = {"display.aspect", "display.hud", "display.cutscene_bars", "display.scale", "display.msaa",
                                        "display.aniso",  "display.timing", "display.fps", "display.vsync",
-                                       "graphics.rain_droplets"};
+                                       "graphics.rain_droplets", "graphics.stochastic"};
 
     template <size_t N> void applyPreset(const char *name, const Preset (&values)[N])
     {
@@ -516,28 +516,28 @@ namespace
         {
             const char *key, *label, *help;
             int scale, msaa, aniso, hdRadius, view, detail, fogDist, fogStart, streaming, popDist, veh, ped, bands, distTraffic,
-                distCrowds, droplets;
+                distCrowds, droplets, stochastic;
         };
         const GfxPreset gfxPresets[] = {
             {"presets.gfx_original", "Original (PS2)",
              "Original PlayStation 2 / PSP fidelity: 1x resolution, no MSAA/anisotropy, 5.4 MB streaming pool, and stock "
              "~260 m draw/population limits.",
-             1, 1, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+             1, 1, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
             {"presets.gfx_low", "Low",
              "1x resolution with 2x MSAA, 4x anisotropy, ~450 m detailed city, 12 MB streaming pool, and a modest boost to "
              "draw distance and population.",
-             1, 2, 4, 1, 25, 20, 35, 30, 12, 20, 15, 15, 0, 20, 15, 1},
+             1, 2, 4, 1, 25, 20, 35, 30, 12, 20, 15, 15, 0, 20, 15, 1, 1},
             {"presets.gfx_medium", "Medium",
              "Match window resolution, 4x MSAA, 8x anisotropy, ~450 m detailed city, 20 MB streaming pool, and Crowd bands.",
-             0, 4, 8, 1, 45, 40, 50, 60, 20, 40, 30, 30, 1, 40, 35, 1},
+             0, 4, 8, 1, 45, 40, 50, 60, 20, 40, 30, 30, 1, 40, 35, 1, 1},
             {"presets.gfx_high", "High",
              "2x supersampling, 4x MSAA, 16x anisotropy, ~580 m detailed city, 30 MB streaming pool, and high draw/population "
              "distance.",
-             2, 4, 16, 2, 75, 70, 75, 120, 30, 65, 55, 55, 1, 65, 60, 1},
+             2, 4, 16, 2, 75, 70, 75, 120, 30, 65, 55, 55, 1, 65, 60, 1, 1},
             {"presets.gfx_ultra", "Vice Ultra",
              "4x supersampling, 8x MSAA, 16x anisotropy, full ~720 m HD world, 30 MB streaming pool, and maximum view/detail "
              "reach.",
-             4, 8, 16, 3, 100, 100, 100, 180, 30, 85, 75, 75, 1, 80, 80, 1},
+             4, 8, 16, 3, 100, 100, 100, 180, 30, 85, 75, 75, 1, 80, 80, 1, 1},
         };
         for (const GfxPreset &gp : gfxPresets)
         {
@@ -555,6 +555,7 @@ namespace
                 settings::set("display.aniso", gp.aniso);
                 settings::set("graphics.post_process", 1);
                 settings::set("graphics.rain_droplets", gp.droplets);
+                settings::set("graphics.stochastic", gp.stochastic);
                 settings::set("world.hd_radius", gp.hdRadius);
                 settings::set("world.view_distance", gp.view);
                 settings::set("world.detail_distance", gp.detail);
@@ -832,6 +833,20 @@ namespace
         settings::add(s);
 
         vcs::droplets::registerSettings();        // Graphics > Effects: pre-HUD rain droplets (game/vcs_droplets.h)
+
+        s = {};
+        s.key = "graphics.stochastic";
+        s.page = "Graphics";
+        s.section = "Effects";
+        s.label = "Stochastic texturing";
+        s.help = "Removes visible tiling seams on repeating ground surfaces such as grass, sand, dirt, concrete and asphalt "
+                 "(as SkyGfx Extended). Off matches the PS2.";
+        s.type = Type::Choice;
+        s.choices = {{"Off", 0}, {"On", 1}};
+        s.defaultValue = 0;
+        s.env = "VCS_STOCHASTIC";
+        s.onChange = [](int v) { gsHwSetStochastic(v != 0); };
+        settings::add(s);
         vcs::fog::registerSettings();             // the game's own distance fog: distance / start (game/vcs_fog.h)
         vcs::distance::registerSettings();        // the objects' draw distance (game/vcs_distance.h)
         vcs::distant::registerSettings();         // decorative distant traffic (game/vcs_distant.h)
@@ -1092,6 +1107,19 @@ int main(int argc, char *argv[])
         vcs::world_hd::install(runtime); // HD world further (experimental, game/vcs_world_hd.h)
         vcs::world_hd_coronas::install(runtime); // the lamps' coronas as far (game/vcs_world_hd_coronas.h)
         vcs::droplets::install(runtime); // Xbox Rain Droplets control commands (game/vcs_droplets.h)
+        // stochastic [on|off|stats] -> toggle live or read Shader Stochastic draw/surface counts for automated verification
+        ps2control::addCommand("stochastic", [](const std::string &args, ps2control::Reply reply) {
+            if (args == "on")
+                settings::set("graphics.stochastic", 1);
+            else if (args == "off")
+                settings::set("graphics.stochastic", 0);
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "ok enabled=%d draws=%llu textures=%llu",
+                          settings::value("graphics.stochastic") ? 1 : 0,
+                          static_cast<unsigned long long>(gsHwStochasticDraws()),
+                          static_cast<unsigned long long>(gsHwStochasticTextures()));
+            reply(buf);
+        });
         vcs::streaming_trace::install(runtime); // streaming pipeline trace (experimental, game/vcs_streaming_trace.h)
         vcs::gameinfo::install(runtime); // the F3 overlay's game-state panel, the `gameinfo` command (debug/game_info.h)
         // setting <key> [value] -> ok <value>: a setting read or changed (a hidden run never writes vcs.ini)

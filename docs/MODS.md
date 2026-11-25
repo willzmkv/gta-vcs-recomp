@@ -32,6 +32,7 @@ Texture replacement is not one of these mods: it comes from upstream PR #8 (PCSX
 | Sun rays | Post pass: sun position from the time cycle + depth occlusion | T7, on T3 |
 | PS2 lighting, PS2 water, PS2 env map, dual-pass alpha, no backface culling, PS2 load screens (SkyGFX) | Already the case: the PS2's own renderer, reproduced | Nothing to do |
 | Leeds radiosity / trails (SkyGFX `radiosity`, `trailsSwitch`) | VCS's own (the trails / bloom targets, game-internals.md 6g) | Already there |
+| Stochastic texture tiling (SkyGFX Extended `stochastic`, Deliot & Heitz) | Procedural simplex cell blending in `gs_draw.hlsl` (`SAMPLE_MODE 7`) + `isStochasticSurface` in `gs_hw.cpp` (`VcsWorld` repeating terrain, game-internals.md 6p) | **Done** 2026-11-25 - Graphics > Effects: Stochastic texturing (Off on PS2/Original preset; D3D11/D3D12/Vulkan) |
 | Larger reflection map (SkyGFX `envMapSize`) | The 128x128 reflection target (420, role set in `vcs_display.cpp`) | Backlog |
 | Xbox rim light / gloss / screen water drops (SkyGFX neo) | Native shader variants in `vcs_hle_world.cpp` / `gs_draw.hlsl` | Backlog |
 | Per-pixel lit pipelines, shadow maps, deferred lights, car paint reflections, rain on cars, PBR sky, volumetric clouds | The native renderer drawing the scene a second time (light view) and new shaders | Backlog; milestone-sized each |

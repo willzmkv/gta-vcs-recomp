@@ -11,7 +11,7 @@ namespace render
         rhi::ShaderCode drawVS;
         rhi::ShaderCode worldVS;      // native VCS world draws
         rhi::ShaderCode litVS;        // native VCS lit / skinned models
-        static constexpr int kSampleModes = 7;
+        static constexpr int kSampleModes = 8;
         // [SAMPLE_MODE][dual]: the GS pixel shader built for one way of reading the texture (gs_draw.hlsl; 0: every way,
         // chosen per draw); dual: + the blend factor as the second output (Src1Alpha blending)
         rhi::ShaderCode drawPS[kSampleModes][2];

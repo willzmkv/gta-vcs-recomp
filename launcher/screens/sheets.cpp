@@ -1858,6 +1858,23 @@ namespace screens
             }
             {
                 bool hov = false;
+                if (ui::vcCycleRow("#vc-gfx-stoch", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Shader Stochastic", "Stochastic Texture Tiling"),
+                                   {tr("Desligado (PS2)", "Off (PS2)"), tr("Ligado", "On")},
+                                   cfg.graphicsStochastic, &hov))
+                    changed = true;
+                if (hov)
+                {
+                    inspector.title = tr("SHADER STOCHASTIC", "STOCHASTIC TEXTURE TILING");
+                    inspector.desc = tr("Quebra a repetição em grama, areia, terra e asfalto usando mistura aleatória em malha triangular (Deliot & Heitz, estilo SkyGfx).",
+                                        "Breaks visible tiling grids on grass, sand, dirt and asphalt via procedural simplex cell blending (Deliot & Heitz, SkyGfx style).");
+                    inspector.badge = tr("IMPACTO GPU: BAIXO (+2%)", "GPU COST: LOW (+2%)");
+                    inspector.gpuDeltaPct = 2;
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
                 if (ui::vcActionRow("#vc-gfx-reset", {tableR.x, y, tableR.w, rowH}, rowIdx++,
                                     tr("Restaurar padrões", "Restore Defaults"),
                                     tr("< Restaurar >", "< Restore >"), 0, &hov))

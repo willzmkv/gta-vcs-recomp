@@ -1978,6 +1978,14 @@ maths, then checked in the game (`tools/world_check.py`, the free camera).
   it, and cars about 175 m ahead vanished while driving (16:9, Draw distance 300%, even at 100% traffic: 6 in 3 min).
   The module skips that removal for a car in view within 160 m x GenerationDistMultiplier x the draw distance.
 
+### 6p. World textures and Shader Stochastic (2026-11-25, Graphics > Effects: Stochastic texturing)
+
+Found by inspecting `GTA3PS2.IMG` (`823` TXDs, `2,748` textures), inflated `MAINLA.LVZ` (`DLRW`, `5,567,320` bytes), dumped GPU textures across Leaf Links / Ocean Beach / Fort Baxter, SkyGfx's compiled shader blobs (`res_0xc9/ca/cb.asm`), and `PS2X_HW_STOCHASTIC_LOG=1` draw logs.
+
+- **World textures carry no string names in streamed sectors:** `BEACH`/`MAINLA`/`MALL.LVZ` world dictionaries strip texture names at compile/pack time (unlike vehicle/weapon `.XTX` entries in `GTA3PS2.IMG`, only `8` of whose `2,748` textures matched SkyGfx's `306`-entry `texdb.txt`). Consequently `gs_hw.cpp` cannot key ground materials by name and classifies decoded RGBA texels directly in `isStochasticSurface` (`>= 32x32`, aspect `<= 2:1`, `minA >= 110`, wrap-seamless U/V edges, uniform `8x8` macro-block statistics without text/window spikes or periodic row/column projections), propagating decisions to PNG/DDS replacement packs via `m_replacementStochastic`.
+- **RenderWare PS2 world draw state (`VcsWorld`, `s.mode == 3`):** On `GSNativeDraw::VcsWorld`, RenderWare PS2 keeps `ABE = 1` with `(A=0 Cs, B=1 Cd, D=1 Cd)` standard source-alpha/FIX blending (where `alpha = 128` produces an opaque surface) and `ATE = 1, ATST = 5 (GEQUAL), AREF = 8` active globally across terrain draws (`PS2X_HW_STOCHASTIC_LOG=1`). Therefore `executeDraw` checks `s.mode == 3u && s.tme && s.linear && (!s.abe || (s.ba == 0u && s.bb == 1u && s.bd == 1u)) && !s.texIsRt && !plainTexture && tex && s.wms == 0u && s.wmt == 0u && s.tw >= 32u && s.th >= 32u && (!s.ate || s.atst <= 1u || s.atst == 5u || s.atst == 6u) && texStochastic` before selecting `c.linearIipFgeAte[0] = 5` (`SAMPLE_MODE 7`).
+- **Deliot & Heitz shader (`gs_draw.hlsl` `sampleStochastic`):** Uses an equilateral simplex triangle grid (`3.464101615 = 2 * sqrt(3)` cells per texture repeat), 2D vertex hash (`sin(dot(...)) * 43758.5453`), quadratic barycentric weight sharpening (`w = w * w; w /= (w.x + w.y + w.z);`), and pre-offset screen derivatives (`ddx`/`ddy` fed into `tex.SampleGrad`) with either `m_anisoSampler[1][1]` (mipmapped) or `m_linearRepeat` (`m_anisotropy == 0`). Guarded by `graphics.stochastic` (`Default 0` Off / `Original (PS2)`) and `VCS_STOCHASTIC=0` / `PS2X_HW_STOCHASTIC=0`.
+
 ## 7. Textures: `.XTX`
 
 **Host replacement identity (2026-10-31).** PCSX2 packs match the GS texture as it is sampled, rather than the RAM
