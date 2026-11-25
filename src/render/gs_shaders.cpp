@@ -30,6 +30,8 @@ using BYTE = unsigned char; // fxc's /Fh headers declare `const BYTE name[]`
 #include "dxbc/present_ps.h"
 #include "dxbc/ui_vs.h"
 #include "dxbc/ui_ps.h"
+#include "dxbc/droplets_vs.h"
+#include "dxbc/droplets_ps.h"
 #include "dxbc/gs_draw_ps0_noz.h"
 #include "dxbc/gs_draw_ps0_dual_noz.h"
 #include "dxbc/gs_draw_ps1_noz.h"
@@ -72,6 +74,8 @@ using BYTE = unsigned char; // fxc's /Fh headers declare `const BYTE name[]`
 #include "spirv/present_ps.h"
 #include "spirv/ui_vs.h"
 #include "spirv/ui_ps.h"
+#include "spirv/droplets_vs.h"
+#include "spirv/droplets_ps.h"
 #include "spirv/gs_draw_ps0_noz.h"
 #include "spirv/gs_draw_ps0_dual_noz.h"
 #include "spirv/gs_draw_ps1_noz.h"
@@ -124,6 +128,8 @@ namespace render
                 {{kGsDrawPS6NoZ, sizeof(kGsDrawPS6NoZ)}, {kGsDrawPS6DualNoZ, sizeof(kGsDrawPS6DualNoZ)}},
             },
             {kGsLitInstVS, sizeof(kGsLitInstVS)},
+            {kDropletsVS, sizeof(kDropletsVS)},
+            {kDropletsPS, sizeof(kDropletsPS)},
         };
         if (backend == rhi::Backend::D3D11 || backend == rhi::Backend::D3D12) // (DXBC runs on D3D12 as it is)
             return dxbc;
@@ -160,6 +166,8 @@ namespace render
                 {{kGsDrawPS6NoZ_spv, sizeof(kGsDrawPS6NoZ_spv)}, {kGsDrawPS6DualNoZ_spv, sizeof(kGsDrawPS6DualNoZ_spv)}},
             },
             {kGsLitInstVS_spv, sizeof(kGsLitInstVS_spv)},
+            {kDropletsVS_spv, sizeof(kDropletsVS_spv)},
+            {kDropletsPS_spv, sizeof(kDropletsPS_spv)},
         };
         if (backend == rhi::Backend::Vulkan)
             return spirv;

@@ -1841,6 +1841,23 @@ namespace screens
             }
             {
                 bool hov = false;
+                if (ui::vcCycleRow("#vc-gfx-drop", {tableR.x, y, tableR.w, rowH}, rowIdx++,
+                                   tr("Gotas de Chuva na Lente", "Rain Droplets"),
+                                   {tr("Desligado (PS2)", "Off (PS2)"), tr("Ligado (Xbox)", "On (Xbox)")},
+                                   cfg.graphicsRainDroplets, &hov))
+                    changed = true;
+                if (hov)
+                {
+                    inspector.title = tr("GOTAS DE CHUVA NA LENTE", "XBOX RAIN DROPLETS");
+                    inspector.desc = tr("Simula gotas refratando na lente da câmera durante chuva ou respingos d'água (atrás do HUD, pausado em interiores/túneis/menus).",
+                                        "Refractive screen-space water droplets on the camera lens during rain and splashes (pre-HUD, paused indoors and in menus).");
+                    inspector.badge = tr("IMPACTO GPU: BAIXO (+1%)", "GPU COST: LOW (+1%)");
+                    inspector.gpuDeltaPct = 1;
+                }
+                y += rowH;
+            }
+            {
+                bool hov = false;
                 if (ui::vcActionRow("#vc-gfx-reset", {tableR.x, y, tableR.w, rowH}, rowIdx++,
                                     tr("Restaurar padrões", "Restore Defaults"),
                                     tr("< Restaurar >", "< Restore >"), 0, &hov))

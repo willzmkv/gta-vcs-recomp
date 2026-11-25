@@ -84,6 +84,8 @@ vcs_shader(shaders/gs_util.hlsl ps_fill_color ps_5_0 kGsFillColorPS gs_fill_colo
 vcs_shader(shaders/gs_util.hlsl ps_fill_depth ps_5_0 kGsFillDepthPS gs_fill_depth_ps.h)
 vcs_shader(shaders/ui.hlsl vs_main vs_5_0 kUiVS ui_vs.h)
 vcs_shader(shaders/ui.hlsl ps_main ps_5_0 kUiPS ui_ps.h)
+vcs_shader(shaders/droplets.hlsl vs_main vs_5_0 kDropletsVS droplets_vs.h)
+vcs_shader(shaders/droplets.hlsl ps_main ps_5_0 kDropletsPS droplets_ps.h)
 
 add_library(vcs_render STATIC
     presenter.cpp

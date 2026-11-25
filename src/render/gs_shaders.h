@@ -26,6 +26,8 @@ namespace render
         // drawPS without the depth output (SHADER_DEPTH=0): the rasterised depth, early depth rejection on
         rhi::ShaderCode drawPSNoDepth[kSampleModes][2];
         rhi::ShaderCode litInstVS;    // litVS instanced: per-instance matrices and lights (the distant proxies)
+        rhi::ShaderCode dropletsVS;   // pre-HUD screen-space lens water droplets (gs_hw.cpp)
+        rhi::ShaderCode dropletsPS;
     };
 
     // The backend's shaders (empty for the null backend, which never runs them).

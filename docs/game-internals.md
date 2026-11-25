@@ -4168,6 +4168,17 @@ measured with `tools/melee_check.py`.
 - **Remote-controlled vehicle keyboard input (`Players[0].m_pRemoteVehicle`)**:
   `src/game/vcs_input.cpp` (`remoteDriveEnabled()`, `VCS_REMOTE_DRIVE=0` fallback) includes active `m_pRemoteVehicle` alongside `pedState == 0x37` so `W`/`S` driving keys operate while controlling DomestoBot / RC vehicles rather than stalling in on-foot mode.
 
+## 12c. Camera-lens Rain Droplets state (`gothamor#212`, `src/game/vcs_droplets.cpp`)
+
+- **Weather & pause/interior/cutscene/shelter state**:
+  - `CWeather::Rain` (`0x004CD144`, `float` `0..1`): `0.5` during rain/hurricane, `0.0` in sunny weather.
+  - Pause/menu gates: `CTimer::m_UserPause` (`0x004CD2AC`), `CTimer::m_CodePause` (`0x004CD11C`), and frontend pause manager `vcs::frontend::open()` / `*(0x00729480 + 0x40)` (also checked on the render thread via `!f.menu` in `gs_hw.cpp::composeDisplay()`).
+  - Cutscene active: `rd32(rd32(0x0048F820) + 0x1C) != 0`.
+  - Interior / rain-suppressed zones: `0x006F4DEC > 0.5f` (camera interior/fade) or `*(rd32(0x00486838) + 0x3378) > 0.01f` (timecycle interior flag).
+  - Roof / overhead shelter: mirrors `FUN_003EA5D0(FindPlayerPed())` using `Players[0].m_pPed` (`0x004E4910`), `(rd32(rd32(ped + 0x160) + 0xD0) & 0x800) && rd8(ped + 0x22C) && rd8(ped + 0x22D)`.
+- **Water splash triggers (`src/game/vcs_particle_timing.cpp`)**: `CParticle::AddParticle` (`0x001E9078` / `0x001E9040`) notifies `vcs::droplets::notifySplash(...)` when water splash particle types (`26` `SPLASH`, `44` `CAR_SPLASH`, `45` `BOAT_SPLASH`, `50` `PED_SPLASH`, `75` `SWIM_SPLASH`) spawn within `8.0` m (`<= 64.0f` sq) of `TheCamera` position (`0x006F4500`, `kCameraMat + 0x30`).
+- **Pre-HUD VBlank note**: VCS at 30 FPS renders 3D only on alternating VBlanks (`Frame::had3d == false` on odd VBlanks, while `composeDisplay()` still blits `shown` onto `*m_display`). `drawDroplets()` must be gated on `!f.menu` (and CPU-cleared droplet state) rather than `f.had3d`, or droplets strobe at 15/30 Hz.
+
 ## 13. Open questions / next research targets
 
 - Main loop, frame limiter, CTimer (section 4) - milestone 4 (60 fps).

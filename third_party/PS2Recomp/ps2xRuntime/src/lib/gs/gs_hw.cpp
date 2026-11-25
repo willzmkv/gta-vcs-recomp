@@ -52,6 +52,8 @@ namespace
     std::atomic<uint64_t> g_glyphDraws{0};
     constexpr uint64_t kGlyphAtlasKey = 0xF1F1F1F100000000ull; // its texture key: no GS texture key has these high bits
     std::atomic<uint32_t> g_outputW{0}, g_outputH{0};   // [gta-recomp] gsHwSetOutputSize
+    std::mutex g_dropletsMutex;                         // [gta-recomp] gsHwSetDroplets
+    std::vector<GSHwDroplet> g_droplets;
     std::atomic<float> g_aspectWidening{1.0f};          // [gta-recomp] gsHwSetAspectWidening
     std::atomic<uint32_t> g_frameW{0}, g_frameH{0};     // [gta-recomp] gsHwSetFrameSize
     struct TargetRole                                   // [gta-recomp] gsHwSetTargetRole
@@ -254,6 +256,14 @@ void gsHwSetOutputSize(uint32_t width, uint32_t height)
 {
     g_outputW.store(width, std::memory_order_relaxed);
     g_outputH.store(height, std::memory_order_relaxed);
+}
+void gsHwSetDroplets(const GSHwDroplet *drops, uint32_t count) // [gta-recomp]
+{
+    std::lock_guard<std::mutex> lock(g_dropletsMutex);
+    if (!drops || !count)
+        g_droplets.clear();
+    else
+        g_droplets.assign(drops, drops + count);
 }
 
 GSHwOptions GSHwOptions::fromEnvironment()
@@ -753,6 +763,14 @@ namespace
         float params[4];
     };
 
+    struct DropVertex // [gta-recomp] render/shaders/droplets.hlsl VSIn
+    {
+        float pos[2];
+        float local[2];
+        float uvRect[4];
+        float props[4];
+    };
+
     // GS blend (A - B) * C / 128 + D as a fixed-function blend (C from the shader's second output); false when not
     // expressible (drawn unblended).
     struct GsBlend
@@ -911,6 +929,28 @@ namespace
             q.depth = {true, true, rhi::Compare::Always};
             q.name = "gs fill depth";
             m_fillDepth = m_dev.createPipeline(q);
+            if (sh.dropletsVS.data && sh.dropletsPS.data) // [gta-recomp] pre-HUD rain droplets
+            {
+                rhi::PipelineDesc dp;
+                dp.vertex = sh.dropletsVS;
+                dp.pixel = sh.dropletsPS;
+                dp.topology = rhi::Topology::Triangles;
+                dp.attributes = {
+                    {"POSITION", 0, rhi::VertexFormat::Float2, static_cast<uint32_t>(offsetof(DropVertex, pos))},
+                    {"TEXCOORD", 0, rhi::VertexFormat::Float2, static_cast<uint32_t>(offsetof(DropVertex, local))},
+                    {"TEXCOORD", 1, rhi::VertexFormat::Float4, static_cast<uint32_t>(offsetof(DropVertex, uvRect))},
+                    {"TEXCOORD", 2, rhi::VertexFormat::Float4, static_cast<uint32_t>(offsetof(DropVertex, props))},
+                };
+                dp.stride = sizeof(DropVertex);
+                dp.blend.enable = true;
+                dp.blend.srcColor = rhi::BlendFactor::SrcAlpha;
+                dp.blend.dstColor = rhi::BlendFactor::InvSrcAlpha;
+                dp.blend.srcAlpha = rhi::BlendFactor::Zero;
+                dp.blend.dstAlpha = rhi::BlendFactor::One;
+                dp.blend.writeMask = 0x7;
+                dp.name = "gs droplets";
+                m_droplets = m_dev.createPipeline(dp);
+            }
             m_ready = m_drawCb && m_quadCb && m_worldCb && m_point && m_linear && m_blit && m_fillColor && m_fillDepth;
         }
 
@@ -1244,6 +1284,8 @@ namespace
                 const float sw = m_displayW * rs.x, sh = m_displayH * rs.y;
                 const bool scaled = std::fabs(w - sw) > 0.5f || std::fabs(h - sh) > 0.5f;
                 blit(shown, {x0 / tw, y0 / th, (x0 + sw) / tw, (y0 + sh) / th}, *m_display, 0, 0, w, h, scaled, true);
+                if (!f.menu) // [gta-recomp] lens droplets behind the native HUD layer (drawn on every VBlank, not just had3d frames)
+                    drawDroplets(shown, {x0 / tw, y0 / th, (x0 + sw) / tw, (y0 + sh) / th}, *m_display, w, h);
                 if (layer)
                     drawHudLayer(*layer, f.displayX, f.displayY);
             }
@@ -1429,6 +1471,89 @@ namespace
             m_dev.setConstants(0, *m_quadCb);
             m_dev.setTexture(0, &src, linear ? m_linear.get() : m_point.get());
             m_dev.draw(4);
+            m_dev.setTexture(0, nullptr, nullptr);
+        }
+
+        void drawDroplets(rhi::Texture &src, std::array<float, 4> uv, rhi::Texture &dst, uint32_t w, uint32_t h) // [gta-recomp]
+        {
+            if (!m_droplets || !w || !h)
+                return;
+            std::vector<GSHwDroplet> drops;
+            {
+                std::lock_guard<std::mutex> lock(g_dropletsMutex);
+                if (g_droplets.empty())
+                    return;
+                drops = g_droplets;
+            }
+            const float fw = static_cast<float>(w), fh = static_cast<float>(h);
+            const float aspectInv = fh / std::max(fw, 1.0f);
+            const float uSpan = uv[2] - uv[0], vSpan = uv[3] - uv[1];
+            m_dropVerts.clear();
+            m_dropVerts.reserve(drops.size() * 6u);
+            for (const GSHwDroplet &d : drops)
+            {
+                const float rxNorm = d.ry * aspectInv;
+                const float ryNorm = d.ry;
+                const float cx = d.x * 2.0f - 1.0f;
+                const float cy = 1.0f - d.y * 2.0f;
+                const float hx = rxNorm * 2.0f;
+                const float hy = ryNorm * 2.0f;
+                const float uCenter = uv[0] + d.x * uSpan;
+                const float vCenter = uv[1] + d.y * vSpan;
+                const float uAmp = rxNorm * uSpan * 0.78f;
+                const float vAmp = ryNorm * vSpan * 0.78f;
+                auto makeV = [&](float lx, float ly) -> DropVertex {
+                    DropVertex v{};
+                    v.pos[0] = cx + lx * hx;
+                    v.pos[1] = cy - ly * hy;
+                    v.local[0] = lx;
+                    v.local[1] = ly;
+                    v.uvRect[0] = uCenter;
+                    v.uvRect[1] = vCenter;
+                    v.uvRect[2] = uAmp;
+                    v.uvRect[3] = vAmp;
+                    v.props[0] = d.alpha;
+                    v.props[1] = d.trail;
+                    v.props[2] = d.seed;
+                    v.props[3] = d.tint;
+                    return v;
+                };
+                const DropVertex tl = makeV(-1.0f, -1.0f);
+                const DropVertex tr = makeV(1.0f, -1.0f);
+                const DropVertex bl = makeV(-1.0f, 1.0f);
+                const DropVertex br = makeV(1.0f, 1.0f);
+                m_dropVerts.push_back(tl);
+                m_dropVerts.push_back(bl);
+                m_dropVerts.push_back(tr);
+                m_dropVerts.push_back(tr);
+                m_dropVerts.push_back(bl);
+                m_dropVerts.push_back(br);
+            }
+            if (m_dropVerts.empty())
+                return;
+            const size_t bytes = m_dropVerts.size() * sizeof(DropVertex);
+            if (!m_dropVb || m_dropVbCapacity < bytes)
+            {
+                endPass();
+                m_dropVbCapacity = std::max<size_t>(bytes + bytes / 2, 128u << 10);
+                m_dropVb = m_dev.createBuffer({m_dropVbCapacity, rhi::BufferUsage::Vertex, true, "gs droplet vertices"});
+            }
+            if (!m_dropVb)
+                return;
+            m_dev.updateBuffer(*m_dropVb, m_dropVerts.data(), bytes);
+            bindPass(&dst, nullptr);
+            QuadConstants q{};
+            std::memcpy(q.rect, uv.data(), sizeof(q.rect)); // uvBounds in droplets.hlsl
+            q.uvRect[0] = 1.0f / std::max(static_cast<float>(src.desc().width), 1.0f);
+            q.uvRect[1] = 1.0f / std::max(static_cast<float>(src.desc().height), 1.0f);
+            q.uvRect[2] = fw / fh;
+            m_dev.setScissor(0, 0, static_cast<int>(w), static_cast<int>(h));
+            m_dev.setPipeline(*m_droplets);
+            m_dev.updateBuffer(*m_quadCb, &q, sizeof(q));
+            m_dev.setConstants(0, *m_quadCb);
+            m_dev.setTexture(0, &src, m_linear.get());
+            m_dev.setVertexBuffer(*m_dropVb, 0);
+            m_dev.draw(static_cast<uint32_t>(m_dropVerts.size()));
             m_dev.setTexture(0, nullptr, nullptr);
         }
 
@@ -2721,7 +2846,7 @@ namespace
         uint32_t m_msaa = 1, m_anisotropy = 0;           // [gta-recomp] GSHwOptions
         std::unique_ptr<rhi::Sampler> m_anisoSampler[2][2]; // [gta-recomp] [U repeat][V repeat]
         std::unique_ptr<rhi::Sampler> m_gatherSampler[2][2]; // [gta-recomp] nearest, [U repeat][V repeat]: gs_draw.hlsl mode 3
-        std::unique_ptr<rhi::Pipeline> m_blit, m_fillColor, m_fillDepth;
+        std::unique_ptr<rhi::Pipeline> m_blit, m_fillColor, m_fillDepth, m_droplets;
         std::unordered_map<uint32_t, std::unique_ptr<rhi::Pipeline>> m_drawPipelines;
         std::unordered_map<uint32_t, Rt> m_rts;
         std::vector<std::unique_ptr<rhi::Texture>> m_spareTargets; // [gta-recomp] spareTarget / makeTarget
@@ -2762,6 +2887,9 @@ namespace
         std::unique_ptr<rhi::Buffer> m_postVb;
         size_t m_postVbCapacity = 0;
         std::vector<HwVertex> m_postVerts;
+        std::unique_ptr<rhi::Buffer> m_dropVb;
+        size_t m_dropVbCapacity = 0;
+        std::vector<DropVertex> m_dropVerts;
         size_t m_hudVbCapacity = 0;
         std::unique_ptr<rhi::Texture> m_hudDepth;
         uint32_t m_displayW = 640, m_displayH = 448;

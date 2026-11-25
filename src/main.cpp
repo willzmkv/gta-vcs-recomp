@@ -23,6 +23,7 @@
 #include "disc/vcs_disc_id.h"
 #include "game/vcs_aim.h"
 #include "game/vcs_display.h"
+#include "game/vcs_droplets.h"
 #include "game/vcs_driveby.h"
 #include "game/vcs_framerate.h"
 #include "game/vcs_movie.h"
@@ -326,11 +327,14 @@ namespace
     };
     const Preset kEnhanced[] = {{"display.aspect", 0},   {"display.hud", 2},    {"display.scale", 0},
                                 {"display.msaa", 4},     {"display.aniso", 16}, {"display.timing", 1},
-                                {"display.fps", vcs::kCapRefresh}, {"display.vsync", 0}};
+                                {"display.fps", vcs::kCapRefresh}, {"display.vsync", 0},
+                                {"graphics.rain_droplets", 1}};
     const Preset kLight[] = {{"display.aspect", 0}, {"display.hud", 2},    {"display.scale", 1},  {"display.msaa", 1},
-                             {"display.aniso", 4},  {"display.timing", 1}, {"display.fps", 60}, {"display.vsync", 0}};
+                             {"display.aniso", 4},  {"display.timing", 1}, {"display.fps", 60}, {"display.vsync", 0},
+                             {"graphics.rain_droplets", 1}};
     const char *const kPresetKeys[] = {"display.aspect", "display.hud", "display.cutscene_bars", "display.scale", "display.msaa",
-                                       "display.aniso",  "display.timing", "display.fps", "display.vsync"};
+                                       "display.aniso",  "display.timing", "display.fps", "display.vsync",
+                                       "graphics.rain_droplets"};
 
     template <size_t N> void applyPreset(const char *name, const Preset (&values)[N])
     {
@@ -512,28 +516,28 @@ namespace
         {
             const char *key, *label, *help;
             int scale, msaa, aniso, hdRadius, view, detail, fogDist, fogStart, streaming, popDist, veh, ped, bands, distTraffic,
-                distCrowds;
+                distCrowds, droplets;
         };
         const GfxPreset gfxPresets[] = {
             {"presets.gfx_original", "Original (PS2)",
              "Original PlayStation 2 / PSP fidelity: 1x resolution, no MSAA/anisotropy, 5.4 MB streaming pool, and stock "
              "~260 m draw/population limits.",
-             1, 1, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0},
+             1, 1, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0},
             {"presets.gfx_low", "Low",
              "1x resolution with 2x MSAA, 4x anisotropy, ~450 m detailed city, 12 MB streaming pool, and a modest boost to "
              "draw distance and population.",
-             1, 2, 4, 1, 25, 20, 35, 30, 12, 20, 15, 15, 0, 20, 15},
+             1, 2, 4, 1, 25, 20, 35, 30, 12, 20, 15, 15, 0, 20, 15, 1},
             {"presets.gfx_medium", "Medium",
              "Match window resolution, 4x MSAA, 8x anisotropy, ~450 m detailed city, 20 MB streaming pool, and Crowd bands.",
-             0, 4, 8, 1, 45, 40, 50, 60, 20, 40, 30, 30, 1, 40, 35},
+             0, 4, 8, 1, 45, 40, 50, 60, 20, 40, 30, 30, 1, 40, 35, 1},
             {"presets.gfx_high", "High",
              "2x supersampling, 4x MSAA, 16x anisotropy, ~580 m detailed city, 30 MB streaming pool, and high draw/population "
              "distance.",
-             2, 4, 16, 2, 75, 70, 75, 120, 30, 65, 55, 55, 1, 65, 60},
+             2, 4, 16, 2, 75, 70, 75, 120, 30, 65, 55, 55, 1, 65, 60, 1},
             {"presets.gfx_ultra", "Vice Ultra",
              "4x supersampling, 8x MSAA, 16x anisotropy, full ~720 m HD world, 30 MB streaming pool, and maximum view/detail "
              "reach.",
-             4, 8, 16, 3, 100, 100, 100, 180, 30, 85, 75, 75, 1, 80, 80},
+             4, 8, 16, 3, 100, 100, 100, 180, 30, 85, 75, 75, 1, 80, 80, 1},
         };
         for (const GfxPreset &gp : gfxPresets)
         {
@@ -550,6 +554,7 @@ namespace
                 settings::set("display.msaa", gp.msaa);
                 settings::set("display.aniso", gp.aniso);
                 settings::set("graphics.post_process", 1);
+                settings::set("graphics.rain_droplets", gp.droplets);
                 settings::set("world.hd_radius", gp.hdRadius);
                 settings::set("world.view_distance", gp.view);
                 settings::set("world.detail_distance", gp.detail);
@@ -826,11 +831,12 @@ namespace
         s.onChange = [](int v) { present::setExposurePercent(v); };
         settings::add(s);
 
-        vcs::fog::registerSettings(); // the game's own distance fog: distance / start (game/vcs_fog.h)
-        vcs::distance::registerSettings(); // the objects' draw distance (game/vcs_distance.h)
-        vcs::distant::registerSettings();  // decorative distant traffic (game/vcs_distant.h)
-        vcs::memory::registerSettings(); // the streaming heap's size (game/vcs_memory.h)
-        vcs::world_hd::registerSettings(); // HD world distance (experimental, game/vcs_world_hd.h)
+        vcs::droplets::registerSettings();        // Graphics > Effects: pre-HUD rain droplets (game/vcs_droplets.h)
+        vcs::fog::registerSettings();             // the game's own distance fog: distance / start (game/vcs_fog.h)
+        vcs::distance::registerSettings();        // the objects' draw distance (game/vcs_distance.h)
+        vcs::distant::registerSettings();         // decorative distant traffic (game/vcs_distant.h)
+        vcs::memory::registerSettings();          // the streaming heap's size (game/vcs_memory.h)
+        vcs::world_hd::registerSettings();        // HD world distance (experimental, game/vcs_world_hd.h)
 
         // The reflection on car paint (docs/game-internals.md 6g): the PS2 samples the frame once per spot, so a panel
         // flickers as the camera moves - the same at every resolution, but plainer to see when the rest of the picture is
@@ -1085,6 +1091,7 @@ int main(int argc, char *argv[])
         vcs::world_areas::install(runtime); // the world's area streaming (game/vcs_world.h; VCS_TRACE_AREAS=1)
         vcs::world_hd::install(runtime); // HD world further (experimental, game/vcs_world_hd.h)
         vcs::world_hd_coronas::install(runtime); // the lamps' coronas as far (game/vcs_world_hd_coronas.h)
+        vcs::droplets::install(runtime); // Xbox Rain Droplets control commands (game/vcs_droplets.h)
         vcs::streaming_trace::install(runtime); // streaming pipeline trace (experimental, game/vcs_streaming_trace.h)
         vcs::gameinfo::install(runtime); // the F3 overlay's game-state panel, the `gameinfo` command (debug/game_info.h)
         // setting <key> [value] -> ok <value>: a setting read or changed (a hidden run never writes vcs.ini)
