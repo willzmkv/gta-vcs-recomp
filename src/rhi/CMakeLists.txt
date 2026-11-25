@@ -3,12 +3,7 @@
 # machine. The null backend (VCS_RHI=null) is always there: no GPU work, for bring-up and tests of the CPU side.
 include(FetchContent)
 
-if(WIN32)
-    set(_vcs_vulkan_default OFF)
-else()
-    set(_vcs_vulkan_default ON)
-endif()
-option(VCS_RHI_VULKAN "Build the Vulkan RHI backend" ${_vcs_vulkan_default})
+option(VCS_RHI_VULKAN "Build the Vulkan RHI backend" ON)
 set(VCS_RHI_D3D11 ${WIN32} CACHE INTERNAL "")
 option(VCS_RHI_D3D12 "Build the D3D12 RHI backend (Windows)" ${WIN32})
 

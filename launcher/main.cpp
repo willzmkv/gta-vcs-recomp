@@ -253,6 +253,7 @@ namespace
                 const bool loaded = cfg.loadIni(tmpIni);
                 cfg.displayScale = 4;
                 cfg.worldHdRadius = 2;
+                cfg.displayWindow = 0; // Borderless Fullscreen -> writes display.window=1
                 cfg.mouseCarSensitivity = 150;
                 cfg.mouseCarReturn = -1;
                 const bool saved = cfg.saveIni(tmpIni);
@@ -261,11 +262,14 @@ namespace
                 std::ifstream checkIn(tmpIni);
                 const std::string iniContent((std::istreambuf_iterator<char>(checkIn)), {});
                 check(loaded && saved && cfg2.displayScale == 4 && cfg2.worldHdRadius == 2 &&
-                          cfg2.mouseCarSensitivity == 150 && cfg2.mouseCarReturn == -1 &&
+                          cfg2.displayWindow == 0 && cfg2.mouseCarSensitivity == 150 && cfg2.mouseCarReturn == -1 &&
                           cfg2.displayRenderer == cfg.displayRenderer &&
+                          iniContent.find("display.window=1") != std::string::npos &&
                           iniContent.find("iso=D:\\Games\\VCS.iso") != std::string::npos &&
                           iniContent.find("custom.keep_me=42") != std::string::npos,
                       "GameConfig: vcs.ini load/save roundtrip preserves unknown keys");
+                GameConfig winDef;
+                check(winDef.displayWindow == 1, "GameConfig: default displayWindow is Windowed (1)");
 #ifdef _WIN32
                 check(iniContent.find("display.renderer=3") != std::string::npos,
                       "GameConfig: Windows D3D12 writes rhi::Backend::D3D12 (3) to vcs.ini");

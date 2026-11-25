@@ -1251,26 +1251,27 @@ namespace vcs::input
         // Control presets: one click sets the driving / shooting scheme (the trigger options and gamepad free aim) to
         // match a GTA game. They only move those few settings; the button map, sticks and the rest stay as they are, so
         // "Custom" is simply whatever you set by hand afterwards.
-        auto preset = [](int drive, int shoot, int freeAim) {
+        auto preset = [](int drive, int shoot, int freeAim, int aimAssist) {
             settings::set("pad.trigger_drive", drive);
             settings::set("pad.trigger_shoot", shoot);
             settings::set("pad.free_aim", freeAim);
+            settings::set("pad.aim_assist", aimAssist);
         };
         struct Preset
         {
             const char *key, *label, *help;
-            int drive, shoot, freeAim;
+            int drive, shoot, freeAim, aimAssist;
         };
         const Preset presets[] = {
             {"pad.preset_vcs", "Original (GTA III / VC / SA / VCS)",
              "The classic PS2 layout, shared by Grand Theft Auto III, Vice City, San Andreas and Vice City Stories: "
              "Cross accelerates and Square brakes, Circle fires and R1 locks on. The triggers look around in a car and "
              "change weapon on foot.",
-             0, 0, 0},
+             0, 0, 0, 1},
             {"pad.preset_modern", "Modern (GTA IV / GTA V)",
-             "The modern layout: R2 accelerates / fires and L2 brakes / aims, with free aim on the right stick (no "
-             "lock-on). Look around and change weapon move to the D-pad. Best with a DualSense's adaptive triggers.",
-             1, 1, 1},
+             "The modern layout: R2 accelerates / fires and L2 brakes / aims, with free aim on the right stick (with GTA V "
+             "aim assist). Look around and change weapon move to the D-pad. Best with a DualSense's adaptive triggers.",
+             1, 1, 1, 1},
         };
         for (const Preset &p : presets)
         {
@@ -1282,9 +1283,31 @@ namespace vcs::input
             s.help = p.help;
             s.type = Type::Action;
             s.button = "Use this scheme";
-            s.onChange = [preset, p](int) { preset(p.drive, p.shoot, p.freeAim); };
+            s.onChange = [preset, p](int) { preset(p.drive, p.shoot, p.freeAim, p.aimAssist); };
             settings::add(s);
         }
+
+        // Keeps vcs.ini's pad.preset synchronized with Launcher's preset dropdown without hiding individual toggles.
+        s = {};
+        s.key = "pad.preset";
+        s.page = kPad;
+        s.section = "Presets";
+        s.label = "Control preset";
+        s.type = Type::Integer;
+        s.min = 0;
+        s.max = 2;
+        s.defaultValue = 1;
+        s.hidden = true;
+        s.read = [] {
+            const int td = settings::value("pad.trigger_drive"), ts = settings::value("pad.trigger_shoot"),
+                      fa = settings::value("pad.free_aim"), aa = settings::value("pad.aim_assist");
+            if (td == 0 && ts == 0 && fa == 0)
+                return 1;
+            if (td == 1 && ts == 1 && fa == 1 && aa == 1)
+                return 2;
+            return 0;
+        };
+        settings::add(s);
 
         for (const Control &c : kControls)
         {
@@ -1315,7 +1338,7 @@ namespace vcs::input
             {"pad.deadzone_right", "Right stick deadzone", "The same for the right stick (the camera).", 0, 40, 12},
             {"pad.camera_speed", "Camera speed", "How fast the right stick turns the camera (above 100% full speed comes before "
                                                  "full tilt).",
-             25, 300, 100},
+             10, 400, 100},
             {"pad.trigger", "Trigger press point", "How far LT / RT go down before they press (L2 / R2 are buttons on the PS2).",
              5, 95, 30},
         };

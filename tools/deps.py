@@ -6,8 +6,8 @@
                                          pin without .git, on Windows the FFmpeg archive; DIR/manifest.json records the
                                          pins and the platform
     python tools/deps.py check [DIR] [--platform P]        is DIR complete and at this source's pins? (exit 0 / 1)
-The platform is this machine's unless given: Linux adds the Vulkan backend's (headers, volk, VMA) and takes FFmpeg from
-the system instead of the prebuilt Windows archive.
+# The platform is this machine's unless given: both Windows and Linux include the Vulkan backend headers/loader (src/rhi),
+# while FFmpeg comes from the prebuilt Windows archive or Linux's system packages.
 
 With deps/ in the repository root, toolchain.configure points CMake at it (FETCHCONTENT_SOURCE_DIR_<NAME>, the FFmpeg
 URL, FETCHCONTENT_FULLY_DISCONNECTED): nothing is downloaded. tools/release.py runs `fetch` into the release.
@@ -28,15 +28,15 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import toolchain as tc  # noqa: E402
 
-# the CMake files with FetchContent_Declare that a Windows build of the game and the recompiler uses (not ps2xStudio,
-# which is off; not sse2neon, ARM only; not the Vulkan backend's, off on Windows). The launcher downloads nothing.
+# the CMake files with FetchContent_Declare that the game and recompiler builds use (not ps2xStudio, which is off; not
+# sse2neon, ARM only). The launcher downloads nothing.
 CMAKE_FILES = [
     "src/platform/CMakeLists.txt",
+    "src/rhi/CMakeLists.txt",
     "third_party/PS2Recomp/ps2xRecomp/CMakeLists.txt",
     "third_party/PS2Recomp/ps2xAnalyzer/CMakeLists.txt",
 ]
-# ... and on Linux the Vulkan backend's too (src/rhi: Vulkan-Headers, volk, VMA)
-CMAKE_FILES_LINUX = CMAKE_FILES + ["src/rhi/CMakeLists.txt"]
+CMAKE_FILES_LINUX = CMAKE_FILES
 PLATFORMS = ("windows", "linux")
 
 
@@ -54,7 +54,7 @@ def declared(platform=None):
     {name, url} (None on Linux: the system's FFmpeg)."""
     platform = platform or this_platform()
     deps = {}
-    for rel in (CMAKE_FILES_LINUX if platform == "linux" else CMAKE_FILES):
+    for rel in CMAKE_FILES:
         with open(os.path.join(tc.ROOT, rel), encoding="utf-8") as f:
             text = re.sub(r"#[^\n]*", "", f.read())  # comments may hold parentheses
         for m in re.finditer(r"FetchContent_Declare\(\s*(\w+)([^)]*)\)", text):
