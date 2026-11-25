@@ -6265,7 +6265,6 @@ namespace
         std::atomic<bool> m_shownWide{true}; // [gta-recomp] the displayed picture's shape: the presented one (showing3d)
         bool m_menuShown = false;            // [gta-recomp] 4:3 because of the game's menu (decideShape)
         bool m_everHad3d = false;            // [gta-recomp] gameplay / flyover 3D seen at least once (decideShape)
-        int64_t m_no3dSinceNs = 0;           // [gta-recomp] host timestamp when a continuous !had3d streak started
 
         // 3D or not over the last 32 frames (the game draws 3D in every other VBlank at 30 fps): 3D in 4 or more of them
         // shows 3D, none shows 2D, in between keeps the current shape (fades, loading flashes).
@@ -6284,12 +6283,7 @@ namespace
                 return !(e && e[0] == '0');
             }();
             if (frame.had3d)
-            {
                 m_everHad3d = true;
-                m_no3dSinceNs = 0;
-            }
-            else if (!frame.menu && m_no3dSinceNs == 0)
-                m_no3dSinceNs = steadyNs();
             m_3dHistory = (m_3dHistory << 1) | (frame.had3d ? 1u : 0u);
             if (menuSwitch && frame.menu && !frame.had3d)
             {
@@ -6306,10 +6300,10 @@ namespace
             }
             else if (n == 0)
             {
-                // [gta-recomp] Brief !had3d blackouts during interior doors / cutscene fades exceed 32 frames at 60-240 fps;
-                // keep widescreen during gameplay unless in a pause menu or >= 1.0 s has elapsed without 3D.
-                if (!fadeShape || frame.menu || !m_everHad3d ||
-                    (m_no3dSinceNs != 0 && steadyNs() - m_no3dSinceNs >= 1000000000ll))
+                // [gta-recomp] Gameplay transitions (interior doors, cutscene fades, side-mission starts such as
+                // Vigilante) clear 3D for 1-2+ s without pause menu / loading screen; keep widescreen whenever 3D has
+                // started and neither pause menu nor loading screen is open. PS2X_HW_FADE_SHAPE=0 restores the old check.
+                if (!fadeShape || frame.menu || !m_everHad3d)
                     m_showing3d = false;
             }
             frame.shown = m_showing3d.load(std::memory_order_relaxed) ? 1 : 0;

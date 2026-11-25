@@ -532,24 +532,60 @@ namespace vcs::prompts
         constexpr int kSubGrid = 4;
         constexpr uint32_t kSetFontStyle = 0x003F4000u, kFontStyle = 0x0048A1DCu;
         // CHud's two message drawers (functions.csv): FUN_0031CA80 when the message's +0x21C flag is 1, FUN_003219E0
-        // when it is 0 - the same text (the HUD's +0x1C), each with a widescreen (cutscene) branch
-        constexpr uint32_t kSubtitleFrom = 0x0031CA80u, kSubtitleTo = 0x0031D8A8u;
+        // when it is 0 - the same text (the HUD's +0x1C), each with a widescreen (cutscene) branch. Within FUN_0031CA80,
+        // [0x31CA80, 0x31CE00) draws the bottom subtitle; [0x31CE00, 0x31D8A8) draws buffered HUD messages (+0x50D010 /
+        // +0x81E / +0xA1E / +0xC1E).
+        constexpr uint32_t kSubtitleFrom = 0x0031CA80u, kSubtitleEnd = 0x0031CE00u, kSubtitleTo = 0x0031D8A8u;
         constexpr uint32_t kSubtitle2From = 0x003219E0u, kSubtitle2To = 0x00321CF8u;
         // the help box (FUN_00321CF8: SetFontStyle(1) at 0x322048 / 0x322050 before its text) in Oswald too - the player
         // saw the help boxes still in the game's font (2026-11-18)
         constexpr uint32_t kHelpBoxFrom = 0x00321CF8u, kHelpBoxTo = 0x003221A0u;
+        // Side-mission HUD timers / counters / progress (FUN_0031F368), HUD onscreen messages (FUN_00321758), Mission
+        // Failed sub-caption (FUN_00322668) and centered 2D banners (FUN_0025CD98): drawn in Oswald too when selected,
+        // keeping their own scale, drop shadow, colour and no subtitle box. VCS_HUD_OSWALD=0 reverts them to "Game".
+        constexpr uint32_t kHudTimerCounterFrom = 0x0031F368u, kHudTimerCounterTo = 0x0031F3A8u;
+        constexpr uint32_t kHudMsgsFrom = 0x00321758u, kHudMsgsTo = 0x003219DCu;
+        constexpr uint32_t kMissionFailReasonFrom = 0x00322668u, kMissionFailReasonTo = 0x0032275Cu;
+        constexpr uint32_t kHudBannerFrom = 0x0025CD98u, kHudBannerTo = 0x0025CF90u;
         // Oswald is taller than the game's letters at the same scale and reaches lower: in the help box it read too big,
         // the last line's descenders hung below the box and long lines touched its right edge (the player, 2026-11-18).
         // Its text there is drawn at kHelpTextScale of the subtitles' size and the box's line height kept at
-        // kHelpBoxScale - room below the last line (fontSetScale / fontHeightField while g_inHelpBox: the last style set
-        // came from the help box)
+        // kHelpBoxScale - room below the last line (fontSetScale / fontHeightField while SubMode::HelpBox: the last style
+        // set came from the help box)
         constexpr float kHelpTextScale = 0.74f, kHelpBoxScale = 0.84f;
-        bool g_inHelpBox = false; // game thread
-        bool g_inSubFont = false; // fontRender: drawing with the subtitles' copy (style 4)
-        bool inSubtitleFn(uint32_t ra)
+        enum class SubMode : uint8_t
         {
-            return (ra >= kSubtitleFrom && ra < kSubtitleTo) || (ra >= kSubtitle2From && ra < kSubtitle2To) ||
-                   (ra >= kHelpBoxFrom && ra < kHelpBoxTo);
+            None,
+            Subtitle,
+            HelpBox,
+            HudText,
+        };
+        SubMode g_subMode = SubMode::None; // game thread
+        bool g_inSubFont = false;          // fontRender: drawing with the subtitles' copy (style 4)
+        bool hudOswaldOn()
+        {
+            static const bool on = [] {
+                const char *v = std::getenv("VCS_HUD_OSWALD");
+                return !v || v[0] != '0';
+            }();
+            return on;
+        }
+        SubMode subModeForRa(uint32_t ra)
+        {
+            if (ra >= kSubtitleFrom && ra < kSubtitleEnd)
+                return SubMode::Subtitle;
+            if (ra >= kSubtitle2From && ra < kSubtitle2To)
+                return SubMode::Subtitle;
+            if (ra >= kHelpBoxFrom && ra < kHelpBoxTo)
+                return SubMode::HelpBox;
+            if (ra >= kSubtitleEnd && ra < kSubtitleTo)
+                return hudOswaldOn() ? SubMode::HudText : SubMode::Subtitle;
+            if (!hudOswaldOn())
+                return SubMode::None;
+            if ((ra >= kHudTimerCounterFrom && ra < kHudTimerCounterTo) || (ra >= kHudMsgsFrom && ra < kHudMsgsTo) ||
+                (ra >= kMissionFailReasonFrom && ra < kMissionFailReasonTo) || (ra >= kHudBannerFrom && ra < kHudBannerTo))
+                return SubMode::HudText;
+            return SubMode::None;
         }
         constexpr uint16_t kSubV = 253;
         std::atomic<int> g_subSetting{0}; // 0 the game's font, 1 Oswald
@@ -841,6 +877,7 @@ namespace vcs::prompts
         // runs; classify reads them back as the vertices' dx.
         constexpr uint32_t kRectVertices = 0x003E0888u, kPositionScaleX = 0x0048A0D8u;
         constexpr uint32_t kSubPixelMark = 0x40u;
+        constexpr uint32_t kSubLineMark = 0x10u; // carried in v row offsets: true bottom subtitle line (box & white eligible)
         PS2Runtime::RecompiledFunction g_origRectVertices = nullptr;
         PS2_GUEST_CC void rectVertices(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
@@ -941,26 +978,37 @@ namespace vcs::prompts
             }
 
             const float top = static_cast<float>(kSubV) / 256.0f;
-            bool letter = g_subPixel && g_inSubFont;
+            const bool wantSubPixel = g_subPixel;
+            const bool wantLineMark = g_subMode == SubMode::Subtitle;
+            bool letter = g_inSubFont && (wantSubPixel || wantLineMark);
             for (int k = 0; k < 4 && letter; ++k)
                 letter = ctx->f[kV[k]] >= top - 1e-6f; // every corner on or below the row (a letter's: top kSubV)
             if (letter && (ctx->f[13] == top || ctx->f[15] == top || ctx->f[19] == top || ctx->f[17] == top))
             {
-                const uint32_t rect = GPR_U32(ctx, 5) & kRamMask;
-                float x0 = 0.0f, x1 = 0.0f, scale = 0.0f;
-                std::memcpy(&x0, rdram + rect, 4);
-                std::memcpy(&x1, rdram + ((rect + 8u) & kRamMask), 4);
-                std::memcpy(&scale, rdram + kPositionScaleX, 4);
-                auto sixteenths = [](float x) {
-                    const float f = x - std::trunc(x);
-                    return static_cast<uint32_t>(std::clamp(static_cast<int>(std::lround(std::fabs(f) * 16.0f)), 0, 15));
-                };
-                const uint32_t left = sixteenths(x0 * scale), right = sixteenths(x1 * scale);
+                uint32_t left = 0, right = 0;
+                if (wantSubPixel)
+                {
+                    const uint32_t rect = GPR_U32(ctx, 5) & kRamMask;
+                    float x0 = 0.0f, x1 = 0.0f, scale = 0.0f;
+                    std::memcpy(&x0, rdram + rect, 4);
+                    std::memcpy(&x1, rdram + ((rect + 8u) & kRamMask), 4);
+                    std::memcpy(&scale, rdram + kPositionScaleX, 4);
+                    auto sixteenths = [](float x) {
+                        const float f = x - std::trunc(x);
+                        return static_cast<uint32_t>(std::clamp(static_cast<int>(std::lround(std::fabs(f) * 16.0f)), 0, 15));
+                    };
+                    left = sixteenths(x0 * scale);
+                    right = sixteenths(x1 * scale);
+                }
                 float uMin = ctx->f[kU[0]];
                 for (int k = 1; k < 4; ++k)
                     uMin = std::min(uMin, ctx->f[kU[k]]);
+                const uint32_t lineBit = wantLineMark ? kSubLineMark : 0u;
                 for (int k = 0; k < 4; ++k)
-                    ctx->f[kV[k]] += static_cast<float>(kSubPixelMark | (ctx->f[kU[k]] <= uMin ? left : right)) / 32768.0f;
+                {
+                    const uint32_t subBits = wantSubPixel ? (kSubPixelMark | (ctx->f[kU[k]] <= uMin ? left : right)) : 0u;
+                    ctx->f[kV[k]] += static_cast<float>(subBits | lineBit) / 32768.0f;
+                }
             }
             g_origRectVertices(rdram, ctx, runtime);
         }
@@ -968,8 +1016,12 @@ namespace vcs::prompts
         PS2_GUEST_CC void fontSetScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             if ((GPR_U32(ctx, 4) & kRamMask) == kSubFont)
-                ctx->f[12] *= (g_inHelpBox ? kHelpTextScale : g_subSize.load(std::memory_order_relaxed) / 100.0f) /
-                              static_cast<float>(kSubGrid);
+            {
+                const float scaleMul = g_subMode == SubMode::HelpBox    ? kHelpTextScale
+                                       : g_subMode == SubMode::Subtitle ? (g_subSize.load(std::memory_order_relaxed) / 100.0f)
+                                                                        : 1.0f;
+                ctx->f[12] *= scaleMul / static_cast<float>(kSubGrid);
+            }
             g_origFontSetScale(rdram, ctx, runtime);
         }
         // FUN_003E5D90(font): its line height (+6), a leaf. CFont::GetHeight (FUN_003F4110, returning to 0x3F4128) times
@@ -984,7 +1036,7 @@ namespace vcs::prompts
             std::memcpy(&h, rdram + ((font + 6u) & kRamMask), 2);
             h &= 0xFFFFu;
             if (font == kSubFont && GPR_U32(ctx, 31) == kGetHeightReturn)
-                h = static_cast<uint32_t>(std::lround(h * (g_inHelpBox ? kHelpBoxScale : 1.0f) / kSubGrid));
+                h = static_cast<uint32_t>(std::lround(h * (g_subMode == SubMode::HelpBox ? kHelpBoxScale : 1.0f) / kSubGrid));
             SET_GPR_U32(ctx, 2, h);
             ctx->pc = GPR_U32(ctx, 31);
         }
@@ -992,10 +1044,11 @@ namespace vcs::prompts
         {
             uint32_t style = GPR_U32(ctx, 4);
             const uint32_t ra = GPR_U32(ctx, 31);
-            if (inSubtitleFn(ra))
+            const SubMode mode = subModeForRa(ra);
+            if (mode != SubMode::None)
                 g_subCalls.fetch_add(1, std::memory_order_relaxed);
-            g_inHelpBox = ra >= kHelpBoxFrom && ra < kHelpBoxTo;
-            if (style == 1u && g_subReady && subtitlesOn() && inSubtitleFn(ra) && rd32(kFontStyles) == kSubFonts)
+            g_subMode = mode;
+            if (style == 1u && g_subReady && subtitlesOn() && mode != SubMode::None && rd32(kFontStyles) == kSubFonts)
             {
                 style = 4u;
                 g_subSwitched.fetch_add(1, std::memory_order_relaxed);
@@ -1590,7 +1643,7 @@ namespace vcs::prompts
             g_shadow = GPR_U32(ctx, 11) != 0;
             // Subtitle shadow Off: the drop shadow pass of Oswald's text not drawn (print calls render twice, the shadow
             // first; nothing reads what it returns) - the help box keeps the game's
-            if (g_inSubFont && g_shadow && !g_inHelpBox && !g_subShadow.load(std::memory_order_relaxed))
+            if (g_inSubFont && g_shadow && g_subMode == SubMode::Subtitle && !g_subShadow.load(std::memory_order_relaxed))
             {
                 ctx->pc = GPR_U32(ctx, 31);
                 return;
@@ -1682,7 +1735,7 @@ namespace vcs::prompts
                     u0 = std::min(u0, uv[2 * i]);
                     v0 = std::min(v0, uv[2 * i + 1]);
                 }
-                if (std::fabs(v0 - kSubV) < 0.75f)
+                if (v0 >= static_cast<float>(kSubV) - 0.1f && v0 < static_cast<float>(kSubV) + 0.85f)
                 {
                     const int letter = static_cast<int>(std::lround((u0 - 0.5f) / 2.0f));
                     if (letter < 0 || letter >= static_cast<int>(sub.size()) || !sub[letter].valid)
@@ -1698,12 +1751,14 @@ namespace vcs::prompts
                     }
                     hit.shadow = false;
                     hit.tint = true;
-                    // the box behind the line and the white text: the subtitles and mission text only, which sit in the
-                    // lower half (the help box's Oswald is at the top and has a box of its own)
+                    // the box behind the line and the white text: the subtitles and mission text only (kSubLineMark
+                    // set by rectVertices), sitting in the lower half (HUD counters and mission-failed sub-captions keep
+                    // their own game colours and stay box-free)
                     float y0 = 1e9f;
                     for (uint32_t i = 0; i < count; ++i)
                         y0 = std::min(y0, xy[2 * i + 1]);
-                    const bool lower = y0 > 224.0f;
+                    const uint32_t tag = static_cast<uint32_t>(std::lround((v0 - static_cast<float>(kSubV)) * 128.0f));
+                    const bool lower = (tag & kSubLineMark) != 0u && y0 > 224.0f;
                     hit.box = lower ? static_cast<uint8_t>(g_subBox.load(std::memory_order_relaxed)) : 0u;
                     hit.white = lower && g_subWhite.load(std::memory_order_relaxed) != 0;
                     g_subLettersDrawn.fetch_add(1, std::memory_order_relaxed);
@@ -1838,8 +1893,8 @@ namespace vcs::prompts
         s.page = "Enhancements";
         s.section = "Subtitles";
         s.label = "Subtitle font";
-        s.help = "The lines at the bottom of the screen - what people say in cutscenes, the mission's instructions - and "
-                 "the help boxes. Original: the game's own letters. Oswald: a clean, tall font, sharp at any resolution, with an outline "
+        s.help = "Subtitles, mission instructions, help boxes, and side-mission timers, counters and failure text. "
+                 "Original: the game's own letters. Oswald: a clean, tall font, sharp at any resolution, with an outline "
                  "that keeps it readable over anything. The game's layout and colours stay.";
         s.type = settings::Type::Choice;
         s.choices = {{"Original", 0}, {"Oswald", 1}};
