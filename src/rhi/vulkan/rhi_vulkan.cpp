@@ -111,6 +111,16 @@ namespace rhi
             return on;
         }
 
+        // PS2X_RHI_RADV_EPILOG=0: disable the RADV 26.3.1 VK_EXT_extended_dynamic_state epilog-cache workaround (Rule 1 fallback).
+        bool radvEpilogWorkaround()
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("PS2X_RHI_RADV_EPILOG");
+                return !(e && *e == '0');
+            }();
+            return on;
+        }
+
         // PS2X_RHI_FULL_COPY=1: a dynamic vertex / index buffer's whole capacity copied into the frame's ring, as before
         bool fullCopy()
         {
@@ -1445,6 +1455,7 @@ namespace rhi
                 VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
                 p2.pNext = &driver;
                 vkGetPhysicalDeviceProperties2(m_core->physical, &p2);
+                m_isRadv = driver.driverID == VK_DRIVER_ID_MESA_RADV;
                 if (driver.driverName[0])
                     m_adapterName += std::string(" (") + driver.driverName + " " + driver.driverInfo + ")";
                 return true;
@@ -1516,6 +1527,12 @@ namespace rhi
                 qi.queueCount = 1;
                 qi.pQueuePriorities = &priority;
                 VkPhysicalDeviceVulkan12Features have12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+                VkPhysicalDeviceExtendedDynamicStateFeaturesEXT haveDynamic{
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+                const bool radvDynamicState = m_isRadv && dynamicDepth() && radvEpilogWorkaround() &&
+                                              deviceHas(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+                if (radvDynamicState)
+                    have12.pNext = &haveDynamic;
                 VkPhysicalDeviceFeatures2 have{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
                 have.pNext = &have12;
                 vkGetPhysicalDeviceFeatures2(m_core->physical, &have);
@@ -1534,6 +1551,18 @@ namespace rhi
                 f2.features.samplerAnisotropy = supported.samplerAnisotropy;
                 f2.features.textureCompressionBC = supported.textureCompressionBC;
                 std::vector<const char *> extensions{VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
+                // RADV 26.3.1 can select a fragment epilog for FragDepth with core 1.3 dynamic
+                // depth testing, but gates creation of the epilog cache on extension feature bits.
+                // Explicitly enable the supported extension feature so that cache is initialized.
+                VkPhysicalDeviceExtendedDynamicStateFeaturesEXT enableDynamic{
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+                if (radvDynamicState && haveDynamic.extendedDynamicState)
+                {
+                    enableDynamic.extendedDynamicState = VK_TRUE;
+                    f12.pNext = &enableDynamic;
+                    extensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+                    std::fprintf(stderr, "[rhi] Vulkan: enabling RADV fragment epilog cache workaround\n");
+                }
                 if (!m_offscreen)
                     extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
                 // GPU time on the CPU's clock (the input delay, PS2X_RHI_STATS): CLOCK_MONOTONIC is steady_clock on Linux
@@ -2998,6 +3027,7 @@ namespace rhi
             uint32_t m_queueFamily = 0;
             VkSurfaceKHR m_surface = VK_NULL_HANDLE;
             bool m_offscreen = false;
+            bool m_isRadv = false;
             bool m_calibration = false; // VK_KHR_calibrated_timestamps on (noteInputDelay)
 
             bool deviceHas(const char *name)

@@ -92,6 +92,12 @@ prompt) or opens a terminal with the command. `VCS_LAUNCHER_VIDEO=x11|wayland`, 
 - **Profiler**: `VCS_PROFILE=5` works as on Windows (`src/debug/profiler.cpp`: one SIGPROF per sample instead of
   SuspendThread), including `VCS_PROFILE_THREAD`, `VCS_PROFILE_SPIKES` and `VCS_PROFILE_GUEST_FILE`.
   `VCS_PROFILE_CALLERS` and `VCS_PROFILE_LINES` are Windows only: `perf record -g build/vcs <iso>` covers them.
+- **RADV 26.3.1 HUD crash**: with core Vulkan 1.3 dynamic depth testing, RADV can generate a fragment
+  epilog for a shader that exports `FragDepth` without initializing its epilog cache. This affects the
+  GS's depth-only HUD fill at `vkCmdDraw`. The Vulkan backend explicitly enables
+  `VK_EXT_extended_dynamic_state` and its feature bit on RADV when advertised, which initializes the
+  cache without disabling dynamic depth or changing the draw (`PS2X_RHI_RADV_EPILOG=0` disables the
+  workaround). See Mesa's `radv_device.c` and `radv_pipeline_graphics.c` at tag `mesa-26.3.1`.
 - **Vulkan**: `PS2X_RHI_DEBUG=1` turns on the Khronos validation layer and prints its messages as `[rhi] vulkan`.
   `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true` adds the synchronization checks. `PS2X_RHI_STATS=1` prints draws,
   descriptor writes, passes, suspended passes, barriers, upload volume and the CPU's waits (fence, acquire, submit,
@@ -107,6 +113,34 @@ prompt) or opens a terminal with the command. `VCS_LAUNCHER_VIDEO=x11|wayland`, 
   or the log (`controls_check.py` then fails its "screenshot key": the PNG is black).
 - **Benchmarks**: run without the control channel (`PS2X_PERF_LOG` gives the [perf] lines): the control channel turns
   on the brightness probe, a full GPU wait every frame (PERFORMANCE.md 16).
+
+### Disc-free Vulkan depth-fill check
+
+This runs the actual GS quad vertex shader and depth-fill fragment shader through the Vulkan RHI, then
+reads back a D32F pixel. Use the pinned dependencies already fetched by CMake under `build/release/_deps`
+(or point `deps` at the matching Vulkan-Headers, volk and VMA source directories). Run on RADV for the
+crash regression; Lavapipe can check the rendering result and Vulkan validation but not the RADV workaround.
+
+```sh
+deps=build/release/_deps
+d=build/vulkan-depth-smoke
+s=src/render/shaders/gs_util.hlsl
+mkdir -p "$d"
+python3 tools/hlsl_spirv.py --stage vert --entry vs_main --name kQuadVS --out "$d/vs_main.h" "$s"
+python3 tools/hlsl_spirv.py --stage frag --entry ps_fill_depth --name kFillDepthPS --out "$d/ps_fill_depth.h" "$s"
+clang -I"$deps/vulkanheaders-src/include" -c "$deps/volk-src/volk.c" -o "$d/volk.o"
+clang++ -std=c++20 -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections \
+  -DVK_NO_PROTOTYPES -DVCS_HAVE_VULKAN=1 -Isrc -I"$d" \
+  -I"$deps/vulkanheaders-src/include" -I"$deps/volk-src" -I"$deps/vulkanmemoryallocator-src/include" \
+  tools/vulkan_depth_smoke.cpp src/rhi/rhi.cpp src/rhi/vulkan/rhi_vulkan.cpp "$d/volk.o" \
+  -ldl -pthread -o "$d/test"
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json \
+  PS2X_RHI_STATIC_DEPTH=0 VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true "$d/test"
+```
+
+Expect `Vulkan validation layer on`, a RADV device, and `HUD depth fill passed`, with no validation errors.
+For a full game check, rebuild with `python3 tools/build.py`, then run past the intro with validation on
+and both render threads left at their defaults.
 
 ## Differences from Windows, and why
 
