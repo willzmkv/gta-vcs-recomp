@@ -43,8 +43,21 @@
 //    never went out. The hook lets the trail move on once per 1/30 s of game time (the steps summed per cannon, as the
 //    blades in 4.) by writing the set-up time (+8) as now on the frames in between, the real one otherwise; the rest
 //    (the points' motion, the fire, PushPeds every 4th frame) stays per frame, on the step.
+// 6. Pushing vehicles in CPhysical::ApplyCollision (GitHub issue 205; 0x34CD5C..0x34D60C). When a body without flag
+//    0x2000 (vehicles, world geometry; peds carry 0x2000 so walking against a parked car takes this path) hits a moving
+//    or movable object and the contact falls through the normal bounce exit, ApplyCollision applies 0.3 / 0.8 * impulse
+//    to both objects through ApplyMoveForce (0x34D4A8 obj2, 0x34D5E0 obj1) and ApplyTurnForce (0x34D4C8 obj2, 0x34D604
+//    obj1) once a frame without ms_fTimeStep. Above 30 fps that acted every shorter frame, letting Vic shove cars down
+//    the street at ~3.4 m/s at 120 fps instead of barely budging them at 30 fps. Both move and turn hooks scale those
+//    calls by frameScale.
+// 7. Skimmer / boat planing lift in CBoat::ProcessControl (GitHub issue 205; 0x1A1260..0x1A1358). FUN_0036A090 already
+//    multiplies the buoyancy impulse written to 0x28($sp) by CTimer::ms_fTimeStep, and the planing lift block reads
+//    0x28($sp) and multiplies by ms_fTimeStep a second time at 0x1A12AC before ApplyMoveForce (0x1A1360). With dt^2 per
+//    frame, integrated lift drops linearly with frame rate (4x weaker per second at 120 fps), keeping the Skimmer's
+//    hull deep in the water where quadratic drag pins it around 5 m/s instead of taking off. Dividing ApplyMoveForce at
+//    0x1A1360 by frameScale cancels the duplicate dt factor without touching <= 30 fps.
 //
-// VCS_PHYSICS_TIMESTEP=0 keeps all five at the game's per-frame amounts.
+// VCS_PHYSICS_TIMESTEP=0 keeps all seven at the game's unscaled amounts.
 #include "game/vcs_physics_timing.h"
 
 #include "game/vcs_framerate.h"
@@ -60,22 +73,29 @@ namespace vcs
 {
     namespace
     {
-        constexpr uint32_t kApplyTurnForce = 0x00347E78u;  // CPhysical::ApplyTurnForce(f12-f14 force, f15-f17 point, a0)
-        constexpr uint32_t kBodyPushReturn = 0x003F36D4u;  // FUN_003F34F0's call: the push from a body under a wheel
-        constexpr uint32_t kBrakeWobbleReturn = 0x0033BE5Cu; // CBike::ProcessControl's call: the brake wobble (3.)
-        constexpr uint32_t kBladeCollision = 0x003EE308u;  // CVehicle's rotor blade test (4.): f13 the damage multiplier
-        constexpr uint32_t kProcessWheelCar = 0x003E6C18u; // CVehicle::ProcessWheel
+        constexpr uint32_t kApplyMoveForce = 0x00347D20u;        // CPhysical::ApplyMoveForce(f12-f14 force, a0)
+        constexpr uint32_t kApplyTurnForce = 0x00347E78u;        // CPhysical::ApplyTurnForce(f12-f14 force, f15-f17 point, a0)
+        constexpr uint32_t kBodyPushReturn = 0x003F36D4u;        // FUN_003F34F0's call: the push from a body under a wheel
+        constexpr uint32_t kBrakeWobbleReturn = 0x0033BE5Cu;     // CBike::ProcessControl's call: the brake wobble (3.)
+        constexpr uint32_t kCollisionPushMove2 = 0x0034D4A8u;    // CPhysical::ApplyCollision's obj2 push (6.)
+        constexpr uint32_t kCollisionPushTurn2 = 0x0034D4C8u;
+        constexpr uint32_t kCollisionPushMove1 = 0x0034D5E0u;    // CPhysical::ApplyCollision's obj1 push (6.)
+        constexpr uint32_t kCollisionPushTurn1 = 0x0034D604u;
+        constexpr uint32_t kBoatPlaningLiftReturn = 0x001A1360u; // CBoat::ProcessControl's planing lift (7.)
+        constexpr uint32_t kBladeCollision = 0x003EE308u;        // CVehicle's rotor blade test (4.): f13 the damage multiplier
+        constexpr uint32_t kProcessWheelCar = 0x003E6C18u;       // CVehicle::ProcessWheel
         constexpr uint32_t kProcessWheelBike = 0x003E7618u;
-        constexpr uint32_t kBrakeSlots = 0x0007FF00u;      // the patched ProcessWheels' rolling-resistance constants
+        constexpr uint32_t kBrakeSlots = 0x0007FF00u;            // the patched ProcessWheels' rolling-resistance constants
         constexpr float kBrakeConstants[] = {0.54f, 0.09f, 0.9f, 0.18f}; // as the game loaded them (0x3F0A3D71 ...)
-        constexpr uint32_t kTimeStep = 0x004CD110u;        // CTimer::ms_fTimeStep (1.0 = 1/50 s)
-        constexpr uint32_t kFrameCounter = 0x004CD124u;    // CTimer::m_FrameCounter
-        constexpr uint32_t kTimeMs = 0x004CD104u;          // CTimer::m_snTimeInMilliseconds
-        constexpr uint32_t kCannonUpdate = 0x00186AA8u;    // CWaterCannon::Update_OncePerFrame(cannon a0, index a1) (5.)
+        constexpr uint32_t kTimeStep = 0x004CD110u;              // CTimer::ms_fTimeStep (1.0 = 1/50 s)
+        constexpr uint32_t kFrameCounter = 0x004CD124u;          // CTimer::m_FrameCounter
+        constexpr uint32_t kTimeMs = 0x004CD104u;                // CTimer::m_snTimeInMilliseconds
+        constexpr uint32_t kCannonUpdate = 0x00186AA8u;          // CWaterCannon::Update_OncePerFrame(cannon a0, index a1) (5.)
         constexpr uint32_t kCannons = 0x004E3A60u, kCannonSize = 0x250u, kCannonCount = 3u;
-        constexpr float kPs2Step = 50.0f / 30.0f;          // a 30 fps frame
+        constexpr float kPs2Step = 50.0f / 30.0f;                // a 30 fps frame
 
-        PS2Runtime::RecompiledFunction g_origTurnForce = nullptr, g_origWheelCar = nullptr, g_origWheelBike = nullptr,
+        PS2Runtime::RecompiledFunction g_origMoveForce = nullptr, g_origTurnForce = nullptr,
+                                       g_origWheelCar = nullptr, g_origWheelBike = nullptr,
                                        g_origBlade = nullptr, g_origCannon = nullptr;
 
         bool enabled()
@@ -145,18 +165,36 @@ namespace vcs
                          (tx * f(0x00) + ty * f(0x04) + tz * f(0x08)) / turnMass);
         }
 
+        void scaleForce3(R5900Context *ctx, float s)
+        {
+            ctx->f[12] *= s;
+            ctx->f[13] *= s;
+            ctx->f[14] *= s;
+        }
+
+        PS2_GUEST_CC void applyMoveForce(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ra = GPR_U32(ctx, 31);
+            if (ra == kCollisionPushMove2 || ra == kCollisionPushMove1)
+                scaleForce3(ctx, frameScale(rdram));
+            else if (ra == kBoatPlaningLiftReturn)
+            {
+                // CBoat::ProcessControl multiplies 0x28($sp) (already ms_fTimeStep-scaled by FUN_0036A090) by
+                // ms_fTimeStep again at 0x1A12AC; dividing by frameScale (< 1 above 30 fps) cancels that factor.
+                const float scale = frameScale(rdram);
+                if (scale > 1e-4f)
+                    scaleForce3(ctx, 1.0f / scale);
+            }
+            g_origMoveForce(rdram, ctx, runtime);
+        }
+
         PS2_GUEST_CC void applyTurnForce(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t ra = GPR_U32(ctx, 31);
             if (ra == kBodyPushReturn)
                 ctx->f[14] *= frameScale(rdram);
-            else if (ra == kBrakeWobbleReturn)
-            {
-                const float scale = frameScale(rdram);
-                ctx->f[12] *= scale;
-                ctx->f[13] *= scale;
-                ctx->f[14] *= scale;
-            }
+            else if (ra == kBrakeWobbleReturn || ra == kCollisionPushTurn2 || ra == kCollisionPushTurn1)
+                scaleForce3(ctx, frameScale(rdram));
             logTurnForce(rdram, ctx);
             g_origTurnForce(rdram, ctx, runtime);
         }
@@ -293,13 +331,19 @@ namespace vcs
 
     void installPhysicsTimingHooks(PS2Runtime &runtime)
     {
+        g_origMoveForce = runtime.lookupFunction(kApplyMoveForce);
         g_origTurnForce = runtime.lookupFunction(kApplyTurnForce);
         g_origWheelCar = runtime.lookupFunction(kProcessWheelCar);
         g_origWheelBike = runtime.lookupFunction(kProcessWheelBike);
+        if (g_origMoveForce)
+            runtime.replaceFunction(kApplyMoveForce, &applyMoveForce);
+        else
+            std::fprintf(stderr, "[physics-timing] ApplyMoveForce 0x%x not found: vehicle pushing and boat planing lift stay on the frame rate\n",
+                         kApplyMoveForce);
         if (g_origTurnForce)
             runtime.replaceFunction(kApplyTurnForce, &applyTurnForce);
         else
-            std::fprintf(stderr, "[physics-timing] ApplyTurnForce 0x%x not found: the push from bodies under wheels and the bike's brake wobble stay on the frame rate\n",
+            std::fprintf(stderr, "[physics-timing] ApplyTurnForce 0x%x not found: the push from bodies under wheels, brake wobble and vehicle pushing stay on the frame rate\n",
                          kApplyTurnForce);
         g_origBlade = runtime.lookupFunction(kBladeCollision);
         if (g_origBlade)
