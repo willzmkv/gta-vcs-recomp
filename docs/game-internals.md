@@ -1041,7 +1041,7 @@ end, Im2D primitives drawn with the depth test off get the HUD's z (`VCS_HUD_RW=
   FUN_00471400, then **FUN_003b53f8 (the menu / pause-menu draw)** (through 0x3b568c / 0x3b56d8 and 0x3cdfbc to the
   page drawing), then FUN_003e0b10 (a full-screen overlay). In the pause menu no 3D is drawn and CHud::Draw is not
   called: the frame is the copy of FBP 140 into FBP 0, then 2D only into FBP 140 (backdrop, map, icons, text, the
-  overlay). The map's player arrow blinks.
+  overlay). The map's player arrow blinks. Both the pause menu (`FUN_003B53F8`) and the loading screen (`FUN_0021E170`) set `frame.menu = true`; by contrast, gameplay/mission fades (e.g., `'Vigilante'` start blackout ~1.27 s / 76+ `!had3d` frames) clear 3D with `frame.menu = false`, so `decideShape` (`gs_hw.cpp`) must keep `m_showing3d = true` once `m_everHad3d` is set whenever `!frame.menu` instead of dropping to `4:3` on a frame or `1.0 s` timer.
 - **HUD textures**: the clock and money digits (orange and green, with outlines) and the wanted star are one
   128x64 atlas with 16-texel cells side by side; the ammo count and text use a 256x256 font atlas. All HUD textures
   are bilinear-filtered (TEX1 MMAG / MMIN linear) and drawn smaller than their texels (a clock digit: 15 x 21.5
@@ -1929,6 +1929,12 @@ Read with `tools/eedecomp.py` and the rig (`prompts subtitles` counts the switch
   Oswald letters come from the copy's button table, refreshed every frame from the prompts' `kTable` - both in guest
   scratch below the prompts' `inRam` floor (0x100000), which had made the prompts find no font (every help box with
   the PS2's buttons while Oswald was on) and the copy keep empty button records (blank gaps).
+- **Side-mission HUD, floating messages, banners and Mission Failed sub-caption** (2026-11-25, `VCS_HUD_OSWALD`):
+  outside `FUN_0031CA80`/`FUN_003219E0`/`FUN_00321CF8`, four other `Style 1` `"Game"` callers render in-world HUD text:
+  - `FUN_0031F368` (`0x0031F368..0x0031F3A8`, `0x31F370` `style=1, scale 0.6f, justify 20`): called by `FUN_003209D0` (`0x320AD8`, onscreen timers `Tempo`), `FUN_00320C08` (`0x320CCC`, counters `Nível`, `Mortes`, `Viajens`), `FUN_00320F28` (`0x32100C`/`0x3213B4`, progress bars / dual counters), `FUN_002A9708` (`0x2A9908`), and `FUN_002A9BB0` (`0x2A9C30`/`0x2A9CA8`).
+  - `FUN_00322668` (`0x00322668..0x0032275C`, `0x3226BC` `style=1, justify 2`, pink `(237, 130, 180, 180)`): `CHud + 0x101E` centered Mission Failed sub-caption below Pricedown `"FALHA NA MISSÃO!"`.
+  - `FUN_00321758` (`0x00321758..0x003219DC`, `0x3217C8` `lbu 0x18($s0)`): onscreen floating messages `0x50D010` (`bit 5 == 1`), counterpart to `[0x0031CE00, 0x0031D8A8)` in `FUN_0031CA80` (`bit 5 == 0` / buffered `+0x81E`/`+0xA1E`/`+0xC1E`); and `FUN_0025CD98` (`0x0025CD98..0x0025CF90`, `0x25CDF8` `style=1`) centered 2D banners (`after5`).
+  - `subModeForRa(ra)` classifies them as `SubMode::HudText` (while `[0x0031CA80, 0x0031CE00)` and `FUN_003219E0` are `SubMode::Subtitle`, and `FUN_00321CF8` is `SubMode::HelpBox`). `kSubLineMark` (`0x10u`) in the `v` top-corner offset tag plus `y0 > 224.0f` gates `Subtitle size`, `Subtitle shadow = Off`, `Subtitle background`, and `Subtitle colour = White` strictly to `SubMode::Subtitle`, leaving side-mission HUD/fail text with its own scale, outline shadow, game colours, and no background box.
 
 ### 6o. Draw distance: the LOD scale and the two far planes (2026-11-07, Enhancements > World)
 
