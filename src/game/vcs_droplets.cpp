@@ -33,9 +33,10 @@ namespace vcs::droplets
         constexpr uint32_t kPlayerPed = 0x004E4910u;  // CWorld::Players[0].m_pPed
         constexpr uint32_t kMenuMgr = 0x00729480u;    // +0x40 menu open (byte)
         constexpr uint32_t kCameraMat = 0x006F44D0u;  // TheCamera matrix: right(+0), fwd(+0x10), up(+0x20), pos(+0x30)
-        constexpr uint32_t kCameraInterior = 0x006F4DECu; // >0.5 inside interior / fade
+        constexpr uint32_t kCurrArea = 0x00489F7Cu;   // CGame::currArea (0 = outdoors)
 
-        constexpr size_t kMaxDrops = 768;
+        constexpr size_t kMaxDrops = 640;
+        constexpr size_t kMaxTrailCap = 480;
         constexpr size_t kMaxMoving = 160;
         constexpr size_t kMaxSend = 640;
 
@@ -138,9 +139,13 @@ namespace vcs::droplets
             }
         }
 
-        void spawnDrop(float x, float y, float sizeNorm, float ttlSec, bool moving, bool fades, float alphaMul = 1.0f)
+        void spawnDrop(float x, float y, float sizeNorm, float ttlSec, bool moving, bool fades, float alphaMul = 1.0f,
+                       bool isTrail = false)
         {
+            if (g_drops.capacity() < kMaxDrops)
+                g_drops.reserve(kMaxDrops);
             Drop *slot = nullptr;
+            size_t activeCount = 0;
             size_t movingCount = 0;
             for (Drop &d : g_drops)
             {
@@ -149,11 +154,16 @@ namespace vcs::droplets
                     if (!slot)
                         slot = &d;
                 }
-                else if (d.moving)
+                else
                 {
-                    ++movingCount;
+                    ++activeCount;
+                    if (d.moving)
+                        ++movingCount;
                 }
             }
+            // Keep headroom below kMaxSend so high-speed trail beads never evict or hide fading primary drops.
+            if (isTrail && activeCount >= kMaxTrailCap)
+                return;
             if (moving && movingCount >= kMaxMoving)
                 moving = false;
             if (!slot)
@@ -163,7 +173,7 @@ namespace vcs::droplets
                     g_drops.emplace_back();
                     slot = &g_drops.back();
                 }
-                else
+                else if (!isTrail)
                 {
                     // Recycle the oldest fading drop so storms never stall.
                     float bestRatio = -1.0f;
@@ -247,7 +257,7 @@ namespace vcs::droplets
         }
 
         const uint32_t tc = rd32(rdram, kTimeCyclePtr);
-        const bool interior = rdf(rdram, kCameraInterior) > 0.5f ||
+        const bool interior = rd32(rdram, kCurrArea) != 0u ||
                               (valid(tc, 0x3380u) && rdf(rdram, tc + 0x3378u) > 0.01f);
         if (interior)
         {
@@ -365,7 +375,7 @@ namespace vcs::droplets
                 if (d.trailAcc >= d.size * 0.85f)
                 {
                     d.trailAcc = 0.0f;
-                    spawnDrop(d.x, d.y, std::max(0.0055f, d.size * 0.42f), 0.55f, false, true, 0.65f);
+                    spawnDrop(d.x, d.y, std::max(0.0055f, d.size * 0.42f), 0.55f, false, true, 0.65f, true);
                 }
                 ++movingCount;
             }
@@ -382,7 +392,8 @@ namespace vcs::droplets
                 continue;
             const float lifeFrac = d.ttl > 0.0f ? std::clamp(d.age / d.ttl, 0.0f, 1.0f) : 1.0f;
             const float fadeIn = std::clamp(d.age / 0.07f, 0.0f, 1.0f);
-            const float fadeOut = d.fades ? (1.0f - lifeFrac * lifeFrac) : 1.0f;
+            const float remain = 1.0f - lifeFrac;
+            const float fadeOut = d.fades ? (remain * remain) : 1.0f;
             const float alpha = fadeIn * fadeOut * d.alphaMul * 0.92f;
             if (alpha <= 0.01f)
                 continue;
