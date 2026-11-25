@@ -311,6 +311,21 @@ namespace
                           hasSub("enhance.subtitle_background=50") && hasSub("enhance.subtitle_colour=0"),
                       "GameConfig: the subtitle options and the prompt icon style round trip, the colour at the game's default");
 
+                {
+                    std::ofstream out(tmpIni, std::ios::binary | std::ios::trunc);
+                    out << "graphics.rain_droplets=1\n";
+                }
+                GameConfig fx;
+                fx.loadIni(tmpIni);
+                fx.saveIni(tmpIni);
+                std::ifstream fxIn(tmpIni);
+                const std::string fxText((std::istreambuf_iterator<char>(fxIn)), {});
+                check(fx.graphicsRainDroplets == 1 && fxText.find("graphics.rain_droplets=1") != std::string::npos,
+                      "GameConfig: Rain droplets round trips cleanly");
+                fx.applyPreset(GraphicsPreset::OriginalPS2);
+                check(fx.graphicsRainDroplets == 0,
+                      "GameConfig: OriginalPS2 preset disables rain droplets");
+
                 const fs::path modGood = tmpDir / "mod_good";
                 const fs::path modPsp = tmpDir / "mod_psp";
                 const fs::path modPt = tmpDir / "PT-BR (VCS.rec)";

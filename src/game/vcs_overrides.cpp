@@ -12,6 +12,7 @@
 #include "debug/rsl_shadow.h"
 #include "debug/rsl_trace.h"
 #include "game/vcs_display.h"
+#include "game/vcs_droplets.h"
 #include "game/vcs_driveby.h"
 #include "game/vcs_framerate.h"
 #include "game/vcs_movie.h"
@@ -1114,6 +1115,7 @@ namespace
         vcs::volume::onGameFrame(rdram);            // the music / effects levels and the pause menu's (game/vcs_volume.h)
         vcs::world::onGameFrame(rdram);             // density, draw distance and their guards (game/vcs_world_detail.h)
         vcs::gameinfo::onGameFrame(rdram);          // the F3 game-state panel's snapshot (debug/game_info.h)
+        vcs::droplets::onGameFrame(rdram);          // pre-HUD screen-space rain droplets (game/vcs_droplets.h)
         vcs::onFrameKick();                         // the HUD context ends (game/vcs_hud.h)
         vcs::frontend::onFrameKick();               // the pause menu's drawing is over (game/vcs_frontend.h)
         vcs::prompts::onFrameKick(rdram);           // the button prompts' glyphs to the renderer (game/vcs_prompts.h)

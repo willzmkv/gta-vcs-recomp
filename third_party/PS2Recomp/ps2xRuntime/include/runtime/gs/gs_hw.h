@@ -163,3 +163,14 @@ uint64_t gsHwTextureForRaster(uint32_t address);
 // per-kind table on (PS2X_HW_DRAW_SOURCES=1 does from boot and logs it every 5 s). The totals are always in the perf
 // line (gs_draws ...). Main thread.
 std::string gsHwDrawSourceReport(bool reset);
+// [gta-recomp] Pre-HUD screen-space water droplets rendered in composeDisplay() between 3D scene blit and HUD layer.
+struct GSHwDroplet
+{
+    float x, y;     // normalized display position (0..1)
+    float rx, ry;   // normalized radius
+    float alpha;    // 0..1
+    float trail;    // 0..1 (teardrop elongation when sliding)
+    float seed;     // 0..1 organic shape variation
+    float tint;     // 0..1 catchlight/caustic strength
+};
+void gsHwSetDroplets(const GSHwDroplet *drops, uint32_t count);

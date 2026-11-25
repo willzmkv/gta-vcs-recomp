@@ -21,6 +21,7 @@
 // VCS_PARTICLE_LOG=1 prints the AddParticle calls per second by return address every 10 s (which sites run per frame).
 #include "game/vcs_particle_timing.h"
 
+#include "game/vcs_droplets.h"
 #include "game/vcs_framerate.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -385,6 +386,19 @@ namespace vcs
                 SET_GPR_U32(ctx, 2, 0u); // as AddParticle with the pool full (these callers ignore it)
                 ctx->pc = ra;
                 return;
+            }
+            const uint32_t ptype = GPR_U32(ctx, 4);
+            if (ptype == 26u || ptype == 44u || ptype == 45u || ptype == 50u || ptype == 75u)
+            {
+                const uint32_t pos = GPR_U32(ctx, 5) & PS2_RAM_MASK;
+                if (pos >= 0x00100000u && pos + 12u <= PS2_RAM_SIZE)
+                {
+                    const float dx = rd<float>(rdram, pos) - rd<float>(rdram, 0x006F4500u);
+                    const float dy = rd<float>(rdram, pos + 4u) - rd<float>(rdram, 0x006F4504u);
+                    const float dz = rd<float>(rdram, pos + 8u) - rd<float>(rdram, 0x006F4508u);
+                    if (dx * dx + dy * dy + dz * dz <= 64.0f)
+                        vcs::droplets::notifySplash(ptype == 44u || ptype == 45u ? 0.35f : 0.45f);
+                }
             }
             (*Original)(rdram, ctx, runtime);
         }

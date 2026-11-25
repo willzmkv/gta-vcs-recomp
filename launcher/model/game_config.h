@@ -66,6 +66,7 @@ namespace launcher
         int displayAniso = 16;          // 0, 2, 4, 8, 16
         int graphicsPostProcess = 1;    // 0 = Off, 1 = Trails + Bloom
         int graphicsExposure = 100;     // 0..200
+        int graphicsRainDroplets = 0;   // 0 = Off (PS2), 1 = On (Xbox Rain Droplets)
 
         // World, Draw Distance & Fog
         int worldHdRadius = 0;          // 0 = ~260m, 1 = ~450m, 2 = ~580m, 3 = ~720m
