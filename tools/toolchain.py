@@ -779,6 +779,11 @@ NINJA_DOWNLOADS = {
     "linux-aarch64": ("https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux-aarch64.zip",
                       "fd2cacc8050a7f12a16a2e48f9e06fca5c14fc4c2bee2babb67b58be17a607fc", "ninja-1.13.2"),
 }
+GLSLANG_DOWNLOADS = {
+    "windows": ("https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip",
+                "82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b", "glslang-16.6.0-windows-x86_64"),
+}
+MIN_GLSLANG = (11, 0)
 _PROBED = {}  # (tool, path) -> version tuple or None: each candidate runs once per process
 
 
@@ -833,6 +838,16 @@ def ninja_version(path):
         m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", out.strip())
         return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else None
     return _probe("ninja", path, run)
+
+
+def glslang_version(path):
+    """(major, minor, patch) of a glslangValidator / glslang binary that runs, else None."""
+    def run(path):
+        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=60)
+        text = (out.stdout or "") + "\n" + (out.stderr or "")
+        m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text)
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else None
+    return _probe("glslang", path, run)
 
 
 def _numbers(path):
@@ -1141,6 +1156,33 @@ def build_tools(env, download=True):
     return found
 
 
+def glslang_exe(env, download=True):
+    """Path to glslangValidator / glslang (for SPIR-V Vulkan shaders), downloading Khronos's pinned Windows build into
+    build/build-tools if missing."""
+    given = env.get("VCS_GLSLANG")
+    if given:
+        version = glslang_version(given) if os.path.isfile(given) else None
+        if not version or version < MIN_GLSLANG:
+            fail("VCS_GLSLANG=%s is not glslang %s or newer that runs" % (given, _version_text(MIN_GLSLANG)), "no_glslang")
+        return given
+    dirs = []
+    sdk = env.get("VULKAN_SDK") or os.environ.get("VULKAN_SDK")
+    if sdk:
+        dirs.append(os.path.join(sdk, "bin"))
+    dirs += _tool_dirs(env)
+    vk_tool = GLSLANG_DOWNLOADS.get(download_platform())
+    if vk_tool:
+        dirs.append(os.path.join(TOOLS_DIR, vk_tool[2], "bin"))
+    path, _, _ = _find_tool(["glslangValidator", "glslang"], glslang_version, MIN_GLSLANG, dirs)
+    if not path and download and IS_WINDOWS:
+        path = _download_tool("glslang", GLSLANG_DOWNLOADS, glslang_version, MIN_GLSLANG,
+                              ["glslangValidator", "glslang"],
+                              hint="install the Vulkan SDK or set VCS_GLSLANG", code="no_glslang",
+                              need="glslangValidator")
+        print("[toolchain] glslang: " + path)
+    return path
+
+
 def stale_tools(build_dir):
     """True when the CMake or Ninja a build tree was set up with is gone (uninstalled, Visual Studio moved, another
     build folder): it can neither build nor set itself up again, so it is configured afresh with today's."""
@@ -1232,8 +1274,18 @@ def configure(env, force=False, build_dir=BUILD_DIR, defines=None):
             print("[build] %s was built for %s CPUs; this PC's is %s: building it again for this one"
                   % (show(build_dir), CPU_TEXT.get(cached, cached), CPU_TEXT[level]))
         defines = dict(defines or {}, PS2X_CPU=level)
+    if IS_WINDOWS and configured and cached_value(build_dir, "VCS_RHI_VULKAN") != "ON":
+        want_vk = (defines or {}).get("VCS_RHI_VULKAN", os.environ.get("VCS_RHI_VULKAN", "ON")).upper()
+        if want_vk not in ("0", "OFF", "FALSE", "NO"):
+            defines = dict(defines or {}, VCS_RHI_VULKAN="ON")
+            force = True
     if configured and not force and not defines:
         return
+    vk_on = IS_WINDOWS and (defines or {}).get("VCS_RHI_VULKAN",
+            os.environ.get("VCS_RHI_VULKAN", "ON")).upper() not in ("0", "OFF", "FALSE", "NO")
+    if vk_on and not (defines or {}).get("VCS_GLSLANG"):
+        if g := glslang_exe(env):
+            defines = dict(defines or {}, VCS_GLSLANG=g.replace(os.sep, "/"))
     cmd = ["cmake", "-S", ROOT, "-B", build_dir, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF"]
     cmd += ["-D%s=%s" % (k, v) for k, v in (defines or {}).items()]
     cmd += compiler_defines(env) + deps_defines() + python_defines()

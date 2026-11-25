@@ -507,6 +507,108 @@ namespace
         s.onChange = [](int v) { vcs::setCutsceneFraming(v != 0); };
         settings::add(s);
 
+        // Graphics quality presets matching Launcher (launcher/model/game_config.cpp).
+        struct GfxPreset
+        {
+            const char *key, *label, *help;
+            int scale, msaa, aniso, hdRadius, view, detail, fogDist, fogStart, streaming, popDist, veh, ped, bands, distTraffic,
+                distCrowds;
+        };
+        const GfxPreset gfxPresets[] = {
+            {"presets.gfx_original", "Original (PS2)",
+             "Original PlayStation 2 / PSP fidelity: 1x resolution, no MSAA/anisotropy, 5.4 MB streaming pool, and stock "
+             "~260 m draw/population limits.",
+             1, 1, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0},
+            {"presets.gfx_low", "Low",
+             "1x resolution with 2x MSAA, 4x anisotropy, ~450 m detailed city, 12 MB streaming pool, and a modest boost to "
+             "draw distance and population.",
+             1, 2, 4, 1, 25, 20, 35, 30, 12, 20, 15, 15, 0, 20, 15},
+            {"presets.gfx_medium", "Medium",
+             "Match window resolution, 4x MSAA, 8x anisotropy, ~450 m detailed city, 20 MB streaming pool, and Crowd bands.",
+             0, 4, 8, 1, 45, 40, 50, 60, 20, 40, 30, 30, 1, 40, 35},
+            {"presets.gfx_high", "High",
+             "2x supersampling, 4x MSAA, 16x anisotropy, ~580 m detailed city, 30 MB streaming pool, and high draw/population "
+             "distance.",
+             2, 4, 16, 2, 75, 70, 75, 120, 30, 65, 55, 55, 1, 65, 60},
+            {"presets.gfx_ultra", "Vice Ultra",
+             "4x supersampling, 8x MSAA, 16x anisotropy, full ~720 m HD world, 30 MB streaming pool, and maximum view/detail "
+             "reach.",
+             4, 8, 16, 3, 100, 100, 100, 180, 30, 85, 75, 75, 1, 80, 80},
+        };
+        for (const GfxPreset &gp : gfxPresets)
+        {
+            s = {};
+            s.key = gp.key;
+            s.page = "Graphics";
+            s.section = "Presets";
+            s.label = gp.label;
+            s.help = gp.help;
+            s.type = Type::Action;
+            s.button = "Apply";
+            s.onChange = [gp](int) {
+                settings::set("display.scale", gp.scale);
+                settings::set("display.msaa", gp.msaa);
+                settings::set("display.aniso", gp.aniso);
+                settings::set("graphics.post_process", 1);
+                settings::set("world.hd_radius", gp.hdRadius);
+                settings::set("world.view_distance", gp.view);
+                settings::set("world.detail_distance", gp.detail);
+                settings::set("fog.distance", gp.fogDist);
+                settings::set("fog.start", gp.fogStart);
+                settings::set("memory.streaming", gp.streaming);
+                settings::set("world.population_distance", gp.popDist);
+                settings::set("world.vehicle_density", gp.veh);
+                settings::set("world.pedestrian_density", gp.ped);
+                settings::set("world.crowd_bands", gp.bands);
+                settings::set("world.distant_traffic", gp.distTraffic);
+                settings::set("world.distant_crowds", gp.distCrowds);
+                std::fprintf(stderr, "[settings] graphics preset %s\n", gp.label);
+            };
+            settings::add(s);
+        }
+
+        // The graphics API, when the build has more than one (Windows: D3D11, D3D12, Vulkan; Linux: Vulkan);
+        // VCS_RHI=d3d11|d3d12|vulkan|null chooses for one run (render/presenter.h).
+        s = {};
+        s.key = "display.renderer";
+        s.page = "Graphics";
+        s.section = "Renderer";
+        s.label = "Graphics API";
+        s.help = "The graphics API the game draws with. D3D12 (the default on Windows) costs the CPU least per draw - dense "
+                 "streets, many cars; D3D11 is the reference it is checked against; Vulkan is supported on Windows and Linux.";
+        s.type = Type::Choice;
+        for (rhi::Backend b : {rhi::Backend::D3D11, rhi::Backend::D3D12, rhi::Backend::Vulkan})
+            if (rhi::backendBuilt(b))
+                s.choices.push_back({rhi::backendName(b), static_cast<int>(b)});
+        s.defaultValue = static_cast<int>(rhi::defaultBackend());
+        s.apply = Apply::Restart;
+        s.onChange = [](int v) { present::setBackend(v); };
+        if (s.choices.size() > 1)
+            settings::add(s);
+
+        // The graphics card, on a PC with more than one (GitHub issue 112: a laptop started the game on its integrated
+        // chip): the cards this PC has, by name, the fastest first and the default. vcs.ini keeps the card's id (rhi::Gpu);
+        // a card no longer there falls back to the fastest. The log's "[rhi] graphics cards" line names them with their
+        // ids (VCS_GPU=<id> for one run), "[present] ... on ..." the one in use.
+        if (const std::vector<rhi::Gpu> gpus = rhi::listGpus(); !gpus.empty())
+        {
+            s = {};
+            s.key = "display.gpu";
+            s.page = "Graphics";
+            s.section = "Renderer";
+            s.label = "Graphics card";
+            s.help = "The graphics card the game draws with, on a PC with more than one (most gaming laptops). The first "
+                     "is the fastest, and the default.";
+            s.type = Type::Choice;
+            for (const rhi::Gpu &g : gpus)
+                s.choices.push_back({g.name + (g.integrated ? " (integrated)" : ""), g.id});
+            s.defaultValue = gpus[0].id;
+            s.apply = Apply::Restart;
+            s.env = "VCS_GPU";
+            s.onChange = [](int v) { present::setGpu(v); };
+            settings::add(s);
+        }
+
         s = {};
         s.key = "display.scale";
         s.alias = "scale";
@@ -729,10 +831,7 @@ namespace
         vcs::distant::registerSettings();  // decorative distant traffic (game/vcs_distant.h)
         vcs::memory::registerSettings(); // the streaming heap's size (game/vcs_memory.h)
         vcs::world_hd::registerSettings(); // HD world distance (experimental, game/vcs_world_hd.h)
-        vcs::streaming_trace::registerSettings(); // streaming pipeline trace (experimental, game/vcs_streaming_trace.h)
 
-        // The graphics API, when the build has more than one (Windows: D3D11, D3D12, Vulkan with VCS_RHI_VULKAN);
-        // VCS_RHI=d3d11|d3d12|vulkan|null chooses for one run (render/presenter.h).
         // The reflection on car paint (docs/game-internals.md 6g): the PS2 samples the frame once per spot, so a panel
         // flickers as the camera moves - the same at every resolution, but plainer to see when the rest of the picture is
         // sharp. Always Auto: the original at 1x, Smooth above it - no setting (the user's choice, DECISIONS.md
@@ -742,48 +841,6 @@ namespace
             if (const char *e = std::getenv("VCS_REFLECTIONS"); e && *e >= '0' && *e <= '2' && !e[1])
                 mode = *e - '0';
             vcs::setReflectionFilter(mode);
-        }
-
-        // The graphics API, when the build has more than one (Windows with VCS_RHI_VULKAN); VCS_RHI=d3d11|vulkan|null
-        // chooses for one run (render/presenter.h).
-        s = {};
-        s.key = "display.renderer";
-        s.page = "Graphics";
-        s.section = "Renderer";
-        s.label = "Graphics API";
-        s.help = "The graphics API the game draws with. D3D12 (the default on Windows) costs the CPU least per draw - dense "
-                 "streets, many cars; D3D11 is the reference it is checked against; Vulkan is the one on Linux.";
-        s.type = Type::Choice;
-        for (rhi::Backend b : {rhi::Backend::D3D11, rhi::Backend::D3D12, rhi::Backend::Vulkan})
-            if (rhi::backendBuilt(b))
-                s.choices.push_back({rhi::backendName(b), static_cast<int>(b)});
-        s.defaultValue = static_cast<int>(rhi::defaultBackend());
-        s.apply = Apply::Restart;
-        s.onChange = [](int v) { present::setBackend(v); };
-        if (s.choices.size() > 1)
-            settings::add(s);
-
-        // The graphics card, on a PC with more than one (GitHub issue 112: a laptop started the game on its integrated
-        // chip): the cards this PC has, by name, the fastest first and the default. vcs.ini keeps the card's id (rhi::Gpu);
-        // a card no longer there falls back to the fastest. The log's "[rhi] graphics cards" line names them with their
-        // ids (VCS_GPU=<id> for one run), "[present] ... on ..." the one in use.
-        if (const std::vector<rhi::Gpu> gpus = rhi::listGpus(); !gpus.empty())
-        {
-            s = {};
-            s.key = "display.gpu";
-            s.page = "Graphics";
-            s.section = "Renderer";
-            s.label = "Graphics card";
-            s.help = "The graphics card the game draws with, on a PC with more than one (most gaming laptops). The first "
-                     "is the fastest, and the default.";
-            s.type = Type::Choice;
-            for (const rhi::Gpu &g : gpus)
-                s.choices.push_back({g.name + (g.integrated ? " (integrated)" : ""), g.id});
-            s.defaultValue = gpus[0].id;
-            s.apply = Apply::Restart;
-            s.env = "VCS_GPU";
-            s.onChange = [](int v) { present::setGpu(v); };
-            settings::add(s);
         }
 
         vcs::input::registerSettings(); // the Keyboard & mouse and Gamepad pages (game/vcs_input.h)
@@ -824,6 +881,8 @@ namespace
             std::fprintf(stderr, "[settings] all reset to defaults\n");
         };
         settings::add(s);
+
+        vcs::streaming_trace::registerSettings(); // Debug tab last, after Advanced (game/vcs_streaming_trace.h)
     }
 
     // The window opens where it was last closed (monitor, position, size, maximized): window.* in vcs.ini, written

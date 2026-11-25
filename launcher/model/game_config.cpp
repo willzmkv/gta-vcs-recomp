@@ -98,7 +98,13 @@ namespace launcher
             if (key == "display.scale" || key == "display.msaa" || key == "world.hd_radius" || key == "world.view_distance")
                 graphicsConfigured = true;
 
-            if (key == "display.window") displayWindow = std::clamp(parseInt(val, displayWindow), 0, 1);
+            if (key == "display.window")
+            {
+                // UI index: 0 = Borderless Fullscreen, 1 = Windowed; vcs.ini stores 0 = Windowed, 1 = Full screen.
+                const int raw = parseInt(val, -1);
+                if (raw == 0 || raw == 1)
+                    displayWindow = (raw == 0) ? 1 : 0;
+            }
             else if (key == "display.aspect") displayAspect = parseInt(val, displayAspect);
             else if (key == "display.hud") displayHud = std::clamp(parseInt(val, displayHud), 0, 2);
             else if (key == "display.cutscene_bars") displayCutsceneBars = std::clamp(parseInt(val, displayCutsceneBars), 0, 1);
@@ -201,7 +207,7 @@ namespace launcher
     bool GameConfig::saveIni(const fs::path &iniPath) const
     {
         std::vector<std::pair<std::string, std::string>> known = {
-            {"display.window", std::to_string(displayWindow)},
+            {"display.window", std::to_string(displayWindow == 0 ? 1 : 0)},
             {"display.aspect", std::to_string(displayAspect)},
             {"display.hud", std::to_string(displayHud)},
             {"display.cutscene_bars", std::to_string(displayCutsceneBars)},

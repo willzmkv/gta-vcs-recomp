@@ -146,7 +146,7 @@ and both render threads left at their defaults.
 
 | Area | Windows | Linux | Why |
 |---|---|---|---|
-| Renderer | D3D11 (reference) | Vulkan | D3D11 is Windows only. The Vulkan backend builds on Windows too (`-DVCS_RHI_VULKAN=ON`, then Graphics > Graphics API), to compare it with D3D11 on the same PC |
+| Renderer | D3D11 (reference) | Vulkan | D3D11 is Windows only. The Vulkan backend builds by default on Windows too (`-DVCS_RHI_VULKAN=ON`, `OFF` to skip; glslang downloads into `build/build-tools`), then Graphics > Graphics API, to compare it with D3D11 on the same PC |
 | Shaders | D3DCompile (Windows' d3dcompiler_47.dll) -> DXBC (`tools/hlsl_dxbc.py`; fxc's bytes) | glslang -> SPIR-V (`tools/hlsl_spirv.py`) | One HLSL source. glslang ignores `[[vk::index(1)]]`, so the script moves the second output to Location 0 Index 1 itself. `VCS_SPIRV` adds a point size, which Vulkan needs for points |
 | Dear ImGui | `imgui_impl_dx11` | `render/ui_renderer.cpp` (through the RHI) | One pipeline for every target format (the swapchain's BGRA, the RGBA captures) |
 | Write watch (`ps2_write_watch.cpp`) | `GetWriteWatch` (dirty bits: free writes) | userfaultfd async write-protect + `PAGEMAP_SCAN`, **opt-in** (`PS2X_WRITE_WATCH=1`) | Correct (0 wrong skips), but each first write to a page after a fold is a page fault on the game thread: no net gain measured (PERFORMANCE.md 20) |
