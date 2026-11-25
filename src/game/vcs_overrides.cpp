@@ -46,6 +46,7 @@
 #include "runtime/ps2_perf.h"
 #include <ps2_recompiled_functions.h>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -359,6 +360,239 @@ namespace
         SET_GPR_S32(ctx, 2, static_cast<int32_t>(m + 64u));
         SET_GPR_S32(ctx, 1, 0x3F800000);
         ctx->f[0] = 1.0f;
+        ctx->pc = GPR_U32(ctx, 31);
+    }
+
+    // FUN_002C0A40(dst, m1, m2): RenderWare affine 4x3 matrix multiply (RwMatrixMultiply) + FUN_001B4FB8(frame, dirty):
+    // recursive hierarchy update (RwFrameUpdateObjects). In Little Havana ~5.4% of GameThread was emulating those two
+    // functions per bone/frame (FUN_002C0A40 2.1%, FUN_001B4FB8 1.8% + dispatchGuestBranch ~1.5%).
+    // VCS_NATIVE_RWFRAME=0 disables both; VCS_NATIVE_RWFRAME_VERIFY=1 runs both native and guest on every call to verify bit-exact parity.
+    PS2Runtime::RecompiledFunction g_origRwMatrixMul = nullptr;
+    PS2Runtime::RecompiledFunction g_origRwFrameUpdate = nullptr;
+
+    inline float readF32Fast(const uint8_t *rdram, uint32_t phys)
+    {
+        float v;
+        std::memcpy(&v, rdram + phys, 4);
+        return v;
+    }
+    inline void writeF32Fast(uint8_t *rdram, uint32_t phys, float v)
+    {
+        std::memcpy(rdram + phys, &v, 4);
+    }
+
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+    void rwMatrixMulDirect(uint8_t *rdram, uint32_t dstPhys, uint32_t m1Phys, uint32_t m2Phys)
+    {
+        // Load all operands before writing dst (exact aliasing safety if dst == m1 or dst == m2, and preserves exact PS2 FPU order).
+        const float b00 = readF32Fast(rdram, m2Phys + 0u),  b01 = readF32Fast(rdram, m2Phys + 4u),  b02 = readF32Fast(rdram, m2Phys + 8u);
+        const float b10 = readF32Fast(rdram, m2Phys + 16u), b11 = readF32Fast(rdram, m2Phys + 20u), b12 = readF32Fast(rdram, m2Phys + 24u);
+        const float b20 = readF32Fast(rdram, m2Phys + 32u), b21 = readF32Fast(rdram, m2Phys + 36u), b22 = readF32Fast(rdram, m2Phys + 40u);
+        const float b30 = readF32Fast(rdram, m2Phys + 48u), b31 = readF32Fast(rdram, m2Phys + 52u), b32 = readF32Fast(rdram, m2Phys + 56u);
+
+        const float a00 = readF32Fast(rdram, m1Phys + 0u),  a01 = readF32Fast(rdram, m1Phys + 4u),  a02 = readF32Fast(rdram, m1Phys + 8u);
+        const float a10 = readF32Fast(rdram, m1Phys + 16u), a11 = readF32Fast(rdram, m1Phys + 20u), a12 = readF32Fast(rdram, m1Phys + 24u);
+        const float a20 = readF32Fast(rdram, m1Phys + 32u), a21 = readF32Fast(rdram, m1Phys + 36u), a22 = readF32Fast(rdram, m1Phys + 40u);
+        const float a30 = readF32Fast(rdram, m1Phys + 48u), a31 = readF32Fast(rdram, m1Phys + 52u), a32 = readF32Fast(rdram, m1Phys + 56u);
+
+        // Order matches FUN_002c0a40 lines 44-81 (z term first via $f5/$f2, wait: row0 adds x + y first then + z, wait check FUN_002c0a40!):
+        // x: ps2_fadd(ps2_fadd(a00*b00, a01*b10), a02*b20)
+        // y: ps2_fadd(ps2_fadd(a00*b01, a01*b11), a02*b21)
+        // z: ps2_fadd(ps2_fadd(a00*b02, a01*b12), a02*b22)
+        // row3 x: ps2_fadd(ps2_fadd(ps2_fadd(a30*b00, a31*b10), a32*b20), b30)
+        // row3 y: ps2_fadd(ps2_fadd(ps2_fadd(a30*b01, a31*b11), a32*b21), b31)
+        // row3 z: ps2_fadd(ps2_fadd(ps2_fadd(a30*b02, a31*b12), a32*b22), b32)
+        auto row = [&](float rx, float ry, float rz, uint32_t outOff) {
+            const float ox = ps2_fadd(ps2_fadd(ps2_fmul(rx, b00), ps2_fmul(ry, b10)), ps2_fmul(rz, b20));
+            const float oy = ps2_fadd(ps2_fadd(ps2_fmul(rx, b01), ps2_fmul(ry, b11)), ps2_fmul(rz, b21));
+            const float oz = ps2_fadd(ps2_fadd(ps2_fmul(rx, b02), ps2_fmul(ry, b12)), ps2_fmul(rz, b22));
+            writeF32Fast(rdram, dstPhys + outOff, ox);
+            writeF32Fast(rdram, dstPhys + outOff + 4u, oy);
+            writeF32Fast(rdram, dstPhys + outOff + 8u, oz);
+        };
+        row(a00, a01, a02, 0u);
+        row(a10, a11, a12, 16u);
+        row(a20, a21, a22, 32u);
+        const float tx = ps2_fadd(ps2_fadd(ps2_fadd(ps2_fmul(a30, b00), ps2_fmul(a31, b10)), ps2_fmul(a32, b20)), b30);
+        const float ty = ps2_fadd(ps2_fadd(ps2_fadd(ps2_fmul(a30, b01), ps2_fmul(a31, b11)), ps2_fmul(a32, b21)), b31);
+        const float tz = ps2_fadd(ps2_fadd(ps2_fadd(ps2_fmul(a30, b02), ps2_fmul(a31, b12)), ps2_fmul(a32, b22)), b32);
+        writeF32Fast(rdram, dstPhys + 48u, tx);
+        writeF32Fast(rdram, dstPhys + 52u, ty);
+        writeF32Fast(rdram, dstPhys + 56u, tz);
+    }
+
+    PS2_GUEST_CC void rwMatrixMulNative(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t a0 = GPR_U32(ctx, 4), a1 = GPR_U32(ctx, 5), a2 = GPR_U32(ctx, 6);
+        const uint32_t p0 = a0 & 0x1FFFFFFFu, p1 = a1 & 0x1FFFFFFFu, p2 = a2 & 0x1FFFFFFFu;
+        if (ctx->pc != 0x002C0A40u || g_ps2ReadWatch.span || g_ps2WriteWatch.span ||
+            p0 >= PS2_RAM_SIZE - 0x40u || p1 >= PS2_RAM_SIZE - 0x40u || p2 >= PS2_RAM_SIZE - 0x40u)
+        {
+            g_origRwMatrixMul(rdram, ctx, runtime);
+            return;
+        }
+        static const bool verify = std::getenv("VCS_NATIVE_RWFRAME_VERIFY") != nullptr;
+        if (verify)
+        {
+            uint8_t origDst[64];
+            std::memcpy(origDst, rdram + p0, 64);
+            const R5900Context savedCtx = *ctx;
+            const uint64_t expectedV0 = GPR_U64(ctx, 4);
+            rwMatrixMulDirect(rdram, p0, p1, p2);
+            uint8_t nativeDst[64];
+            std::memcpy(nativeDst, rdram + p0, 64);
+            std::memcpy(rdram + p0, origDst, 64);
+            *ctx = savedCtx;
+            g_origRwMatrixMul(rdram, ctx, runtime);
+            static uint64_t checked = 0, diffs = 0;
+            ++checked;
+            if (std::memcmp(nativeDst, rdram + p0, 64) != 0 || GPR_U64(ctx, 2) != expectedV0)
+                if (++diffs <= 20)
+                    std::fprintf(stderr, "[rwframe-verify] 0x2C0A40 mismatch #%llu at dst=0x%08x\n", (unsigned long long)diffs, a0);
+            if ((checked & 0xFFFFFu) == 0u)
+                std::fprintf(stderr, "[rwframe-verify] 0x2C0A40 checked=%llu diffs=%llu\n", (unsigned long long)checked, (unsigned long long)diffs);
+            return;
+        }
+        rwMatrixMulDirect(rdram, p0, p1, p2);
+        SET_GPR_U64(ctx, 2, GPR_U64(ctx, 4));
+        ctx->pc = GPR_U32(ctx, 31);
+    }
+
+    PS2_GUEST_CC void rwFrameUpdateNative(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t root = GPR_U32(ctx, 4), rootDirty = GPR_U32(ctx, 5);
+        if (ctx->pc != 0x001B4FB8u || g_ps2ReadWatch.span || g_ps2WriteWatch.span)
+        {
+            g_origRwFrameUpdate(rdram, ctx, runtime);
+            return;
+        }
+        auto runNative = [&](uint8_t *mem) -> bool {
+            if (root == 0u)
+                return true;
+            struct Item { uint32_t node, dirty; };
+            std::array<Item, 64> localBuf{};
+            std::vector<Item> heapStack;
+            size_t sp = 0;
+            auto push = [&](uint32_t n, uint32_t d) {
+                if (heapStack.empty() && sp < localBuf.size())
+                    localBuf[sp++] = {n, d};
+                else
+                {
+                    if (heapStack.empty())
+                        heapStack.assign(localBuf.begin(), localBuf.begin() + sp);
+                    heapStack.push_back({n, d});
+                }
+            };
+            push(root, rootDirty);
+            while (heapStack.empty() ? (sp > 0) : !heapStack.empty())
+            {
+                const Item cur = heapStack.empty() ? localBuf[--sp] : [&] { Item it = heapStack.back(); heapStack.pop_back(); return it; }();
+                uint32_t node = cur.node, pd = cur.dirty;
+                while (node != 0u)
+                {
+                    const uint32_t p = node & 0x1FFFFFFFu;
+                    if (p >= PS2_RAM_SIZE - 0xA0u)
+                        return false;
+                    const uint32_t flags = mem[p + 3u];
+                    const uint32_t dirty = pd | flags;
+                    if (dirty & 2u)
+                    {
+                        uint32_t parent;
+                        std::memcpy(&parent, mem + p + 4u, 4);
+                        const uint32_t parentM = (parent + 0x50u) & 0x1FFFFFFFu;
+                        if (parentM >= PS2_RAM_SIZE - 0x40u)
+                            return false;
+                        rwMatrixMulDirect(mem, p + 0x50u, p + 0x10u, parentM);
+                        mem[p + 3u] = static_cast<uint8_t>(flags & 0xFDu);
+                    }
+                    uint32_t child = 0u, sibling = 0u;
+                    std::memcpy(&child, mem + p + 0x90u, 4);
+                    std::memcpy(&sibling, mem + p + 0x94u, 4);
+                    if (sibling != 0u)
+                        push(sibling, pd);
+                    node = child;
+                    pd = dirty;
+                }
+            }
+            return true;
+        };
+        static const bool verify = std::getenv("VCS_NATIVE_RWFRAME_VERIFY") != nullptr;
+        if (verify && root != 0u)
+        {
+            struct Snap { uint32_t phys; std::array<uint8_t, 0x98> before, nativeAfter; };
+            std::vector<Snap> snaps;
+            {
+                std::vector<uint32_t> q{root};
+                while (!q.empty())
+                {
+                    const uint32_t n = q.back();
+                    q.pop_back();
+                    if (!n)
+                        continue;
+                    const uint32_t phys = n & 0x1FFFFFFFu;
+                    if (phys >= PS2_RAM_SIZE - 0x98u)
+                        break;
+                    bool seen = false;
+                    for (const auto &s : snaps)
+                        if (s.phys == phys) { seen = true; break; }
+                    if (seen)
+                        continue;
+                    Snap s{};
+                    s.phys = phys;
+                    std::memcpy(s.before.data(), rdram + phys, 0x98);
+                    snaps.push_back(s);
+                    uint32_t ch = 0, sib = 0;
+                    std::memcpy(&ch, rdram + phys + 0x90u, 4);
+                    std::memcpy(&sib, rdram + phys + 0x94u, 4);
+                    if (sib) q.push_back(sib);
+                    if (ch) q.push_back(ch);
+                }
+            }
+            const R5900Context savedCtx = *ctx;
+            const uint32_t expectedRa = GPR_U32(ctx, 31);
+            const bool ok = runNative(rdram);
+            for (auto &s : snaps)
+            {
+                std::memcpy(s.nativeAfter.data(), rdram + s.phys, 0x98);
+                std::memcpy(rdram + s.phys, s.before.data(), 0x98);
+            }
+            *ctx = savedCtx;
+            g_origRwFrameUpdate(rdram, ctx, runtime);
+            int resumes = 0;
+            while (((ctx->pc >= 0x001B4FB8u && ctx->pc < 0x001B503Cu) || ctx->pc == 0x002C0A40u) && resumes++ < 256)
+            {
+                if (ctx->pc == 0x002C0A40u)
+                    g_origRwMatrixMul(rdram, ctx, runtime);
+                else
+                    g_origRwFrameUpdate(rdram, ctx, runtime);
+            }
+            static uint64_t checked = 0, diffs = 0;
+            ++checked;
+            if (ok)
+                for (const auto &s : snaps)
+                    if (std::memcmp(s.nativeAfter.data(), rdram + s.phys, 0x98) != 0)
+                    {
+                        if (++diffs <= 20)
+                        {
+                            size_t off = 0;
+                            while (off < 0x98 && s.nativeAfter[off] == rdram[s.phys + off])
+                                ++off;
+                            std::fprintf(stderr, "[rwframe-verify] 0x1B4FB8 mismatch #%llu at node=0x%08x off=0x%zx pc=0x%08x ra=0x%08x\n",
+                                         (unsigned long long)diffs, s.phys, off, ctx->pc, expectedRa);
+                        }
+                        break;
+                    }
+            if ((checked & 0xFFFFu) == 0u)
+                std::fprintf(stderr, "[rwframe-verify] 0x1B4FB8 checked=%llu diffs=%llu\n", (unsigned long long)checked, (unsigned long long)diffs);
+            return;
+        }
+        if (!runNative(rdram))
+        {
+            g_origRwFrameUpdate(rdram, ctx, runtime);
+            return;
+        }
         ctx->pc = GPR_U32(ctx, 31);
     }
 
@@ -1260,6 +1494,15 @@ namespace
             g_origIdentity = runtime.lookupFunction(0x003F9E50u);
             if (g_origIdentity)
                 runtime.replaceFunction(0x003F9E50u, &identityMatrix);
+        }
+        if (!std::getenv("VCS_NATIVE_RWFRAME") || std::getenv("VCS_NATIVE_RWFRAME")[0] != '0')
+        {
+            g_origRwMatrixMul = runtime.lookupFunction(0x002C0A40u);
+            if (g_origRwMatrixMul)
+                runtime.replaceFunction(0x002C0A40u, &rwMatrixMulNative);
+            g_origRwFrameUpdate = runtime.lookupFunction(0x001B4FB8u);
+            if (g_origRwFrameUpdate)
+                runtime.replaceFunction(0x001B4FB8u, &rwFrameUpdateNative);
         }
         vcs::rslnative::install(runtime); // before the RSL tools: they wrap whatever the flush is then
         vcs::rsltrace::install(runtime);

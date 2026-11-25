@@ -1215,6 +1215,28 @@ uint32_t GSCpuBackend::SampleTexture(const GSDrawState &state, float s, float t,
            (static_cast<uint32_t>(a) << 24);
 }
 
+bool GSCpuBackend::ComputePaletteTable(const GSDrawState &state, uint32_t (&table)[256])
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto &tex = state.context.tex0;
+    if (!isFourBitIndexedPsm(tex.psm) && !isEightBitIndexedPsm(tex.psm))
+        return false;
+    const uint32_t count = isFourBitIndexedPsm(tex.psm) ? 16u : 256u;
+    for (uint32_t i = 0; i < count; ++i)
+        table[i] = LookupCLUT(state, static_cast<u8>(i), tex.cpsm, tex.csm, tex.csa, tex.psm);
+    return true;
+}
+
+bool GSCpuBackend::DecodeTextureBuffer(const GSDrawState &state, const uint8_t *vram, size_t vramBytes, bool wrapVram,
+                                       bool hasPalette, const uint32_t (&palette)[256], std::vector<uint32_t> &out)
+{
+    const auto &tex = state.context.tex0;
+    const uint32_t w = state.textureWidth, h = state.textureHeight;
+    out.resize(static_cast<size_t>(w) * h);
+    return GSMem::ReadRectRGBA(tex.psm, tex.tbp0, tex.tbw, w, h, vram, vramBytes, wrapVram,
+                               hasPalette ? palette : nullptr, state.texa.ta0, state.texa.ta1, state.texa.aem, out.data());
+}
+
 // [gta-recomp] Whole-texture decode for the hardware renderer (same texel path as SampleTexture).
 void GSCpuBackend::DecodeTexture(const GSDrawState &state, std::vector<uint32_t> &out)
 {
@@ -1225,6 +1247,15 @@ void GSCpuBackend::DecodeTexture(const GSDrawState &state, std::vector<uint32_t>
     out.resize(static_cast<size_t>(w) * h);
     uint32_t table[256];
     const bool paletted = paletteTable(state, table);
+    static const bool fastDecode = [] {
+        const char *e = std::getenv("PS2X_HW_FAST_DECODE");
+        return !(e && *e == '0');
+    }();
+    if (fastDecode && m_vram &&
+        GSMem::ReadRectRGBA(tex.psm, tex.tbp0, tex.tbw, static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                            m_vram, m_vramSize, true, paletted ? table : nullptr, state.texa.ta0, state.texa.ta1,
+                            state.texa.aem, out.data()))
+        return;
     for (int y = 0; y < h; ++y)
         for (int x = 0; x < w; ++x)
         {

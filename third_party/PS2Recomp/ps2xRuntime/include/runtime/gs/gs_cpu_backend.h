@@ -36,6 +36,10 @@ public:
     // [gta-recomp] For the hardware renderer: the whole texture of `state` (TEX0/TEXA/current CLUT) as
     // RGBA8 (PS2 values, 0x80 = 1.0), width x height = state.textureWidth x textureHeight.
     void DecodeTexture(const GSDrawState &state, std::vector<uint32_t> &out);
+    // [gta-recomp] Snapshot CLUT palette + stateless buffer decoder so helper threads can decode VRAM snapshots (#113).
+    bool ComputePaletteTable(const GSDrawState &state, uint32_t (&table)[256]);
+    static bool DecodeTextureBuffer(const GSDrawState &state, const uint8_t *vram, size_t vramBytes, bool wrapVram,
+                                    bool hasPalette, const uint32_t (&palette)[256], std::vector<uint32_t> &out);
     // [gta-recomp] The same from texels already fetched (raw values as a VRAM read returns them, width x height, row by
     // row) - docs/FULLY_NATIVE.md step 3c: a texture decoded from the upload that wrote it
     void DecodeTextureFromTexels(const GSDrawState &state, const std::vector<uint32_t> &texels, std::vector<uint32_t> &out);

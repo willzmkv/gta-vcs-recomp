@@ -140,6 +140,22 @@ namespace rhi
             }();
             return on;
         }
+        bool directRing()
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("PS2X_RHI_DIRECT_RING");
+                return !(e && e[0] == '0');
+            }();
+            return on;
+        }
+        bool stateOpt()
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("PS2X_VK_STATE_OPT");
+                return !(e && e[0] == '0');
+            }();
+            return on;
+        }
 
         bool statsOn()
         {
@@ -932,18 +948,45 @@ namespace rhi
                     return;
                 if (b.desc().dynamic)
                 {
+                    const size_t activeBytes = std::max<size_t>(size, 4);
+                    const size_t cbBytes = fullCopy() ? b.desc().size : ((activeBytes + 255u) & ~size_t(255u));
+                    if (m_recording && directRing())
+                    {
+                        const size_t n = b.desc().usage == BufferUsage::Constant ? cbBytes : (fullCopy() ? b.desc().size : activeBytes);
+                        const Slice s = ringAlloc(n);
+                        std::memcpy(s.data, data, size);
+                        if (n > size && b.desc().usage == BufferUsage::Constant)
+                            std::memset(s.data + size, 0, n - size);
+                        b.used = n;
+                        b.sliceBuffer = s.buffer;
+                        b.sliceOffset = s.offset;
+                        b.sliceFrame = m_frameSerial;
+                        if (&b == m_vertexBuffer || &b == m_indexBuffer)
+                            m_buffersDirty = true;
+                        for (uint32_t i = 0; i < kUniformSlots; ++i)
+                            if (m_uniforms[i] == &b)
+                            {
+                                m_uniformDirtyMask |= static_cast<uint8_t>(1u << i);
+                                m_descriptorsDirty = true;
+                            }
+                        return;
+                    }
                     // WRITE_DISCARD: the rest of the buffer is undefined in D3D; ours keeps the old bytes. A vertex / index
                     // buffer's slice holds only what was written: the renderer's are sized for the largest frame seen and
                     // each frame copied all of it (~1 ms a frame on the laptop, PERFORMANCE.md 27; PS2X_RHI_FULL_COPY=1); a constant buffer's
-                    // descriptor covers the whole buffer, so it is copied whole
+                    // slice holds the 256-byte-aligned update written (PS2X_RHI_FULL_COPY=1 allocates the whole buffer)
                     std::memcpy(b.shadow.data(), data, size);
-                    b.used = (b.desc().usage == BufferUsage::Constant || fullCopy()) ? b.shadow.size() : std::max<size_t>(size, 4);
+                    b.used = b.desc().usage == BufferUsage::Constant ? (fullCopy() ? b.shadow.size() : cbBytes)
+                                                                     : (fullCopy() ? b.shadow.size() : activeBytes);
                     b.sliceFrame = 0; // a new slice at the next use
                     if (&b == m_vertexBuffer || &b == m_indexBuffer)
                         m_buffersDirty = true;
-                    for (VkBuf *u : m_uniforms)
-                        if (u == &b)
+                    for (uint32_t i = 0; i < kUniformSlots; ++i)
+                        if (m_uniforms[i] == &b)
+                        {
+                            m_uniformDirtyMask |= static_cast<uint8_t>(1u << i);
                             m_descriptorsDirty = true;
+                        }
                     return;
                 }
                 outsideRendering();
@@ -1036,6 +1079,7 @@ namespace rhi
                     m_textures[i] = nullptr;
                     m_samplers[i] = nullptr;
                 }
+                m_texturesDirty = true;
                 m_descriptorsDirty = true;
                 setViewport(0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h));
                 setScissor(0, 0, static_cast<int>(w), static_cast<int>(h));
@@ -1049,22 +1093,35 @@ namespace rhi
             void setViewport(float x, float y, float width, float height) override
             {
                 // D3D's Y-up NDC: the viewport upside down
-                m_viewport = {x, y + height, width, -height, 0.0f, 1.0f};
-                m_viewportDirty = true;
+                const VkViewport vp{x, y + height, width, -height, 0.0f, 1.0f};
+                if (!stateOpt() || m_viewport.x != vp.x || m_viewport.y != vp.y ||
+                    m_viewport.width != vp.width || m_viewport.height != vp.height)
+                {
+                    m_viewport = vp;
+                    m_viewportDirty = true;
+                }
             }
 
             void setScissor(int x, int y, int width, int height) override
             {
                 int x0 = std::max(x, 0), y0 = std::max(y, 0);
                 int x1 = std::max(x + width, x0), y1 = std::max(y + height, y0);
-                m_scissor = {{x0, y0}, {static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0)}};
-                m_scissorDirty = true;
+                const VkRect2D sc{{x0, y0}, {static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0)}};
+                if (!stateOpt() || m_scissor.offset.x != sc.offset.x || m_scissor.offset.y != sc.offset.y ||
+                    m_scissor.extent.width != sc.extent.width || m_scissor.extent.height != sc.extent.height)
+                {
+                    m_scissor = sc;
+                    m_scissorDirty = true;
+                }
             }
 
             void setBlendConstant(const float rgba[4]) override
             {
-                std::memcpy(m_blendConstant, rgba, sizeof(m_blendConstant));
-                m_blendDirty = true;
+                if (!stateOpt() || std::memcmp(m_blendConstant, rgba, sizeof(m_blendConstant)) != 0)
+                {
+                    std::memcpy(m_blendConstant, rgba, sizeof(m_blendConstant));
+                    m_blendDirty = true;
+                }
             }
 
             void setPipeline(Pipeline &pipeline) override
@@ -1079,33 +1136,52 @@ namespace rhi
 
             void setVertexBuffer(Buffer &buffer, uint32_t offset) override
             {
-                m_vertexBuffer = static_cast<VkBuf *>(&buffer);
-                m_vertexOffset = offset;
-                m_buffersDirty = true;
+                auto *b = static_cast<VkBuf *>(&buffer);
+                if (!stateOpt() || b != m_vertexBuffer || offset != m_vertexOffset)
+                {
+                    m_vertexBuffer = b;
+                    m_vertexOffset = offset;
+                    m_buffersDirty = true;
+                }
             }
 
             void setIndexBuffer(Buffer &buffer, bool uint32Indices) override
             {
-                m_indexBuffer = static_cast<VkBuf *>(&buffer);
-                m_index32 = uint32Indices;
-                m_buffersDirty = true;
+                auto *b = static_cast<VkBuf *>(&buffer);
+                if (!stateOpt() || b != m_indexBuffer || uint32Indices != m_index32)
+                {
+                    m_indexBuffer = b;
+                    m_index32 = uint32Indices;
+                    m_buffersDirty = true;
+                }
             }
 
             void setTexture(uint32_t slot, Texture *texture, Sampler *sampler) override
             {
                 if (slot >= kTextureSlots)
                     return;
-                m_textures[slot] = static_cast<VkTexture *>(texture);
-                m_samplers[slot] = static_cast<VkSamp *>(sampler);
-                m_descriptorsDirty = true;
+                auto *t = static_cast<VkTexture *>(texture);
+                auto *s = static_cast<VkSamp *>(sampler);
+                if (!stateOpt() || t != m_textures[slot] || s != m_samplers[slot])
+                {
+                    m_textures[slot] = t;
+                    m_samplers[slot] = s;
+                    m_texturesDirty = true;
+                    m_descriptorsDirty = true;
+                }
             }
 
             void setConstants(uint32_t slot, Buffer &buffer) override
             {
                 if (slot >= kUniformSlots)
                     return;
-                m_uniforms[slot] = static_cast<VkBuf *>(&buffer);
-                m_descriptorsDirty = true;
+                auto *b = static_cast<VkBuf *>(&buffer);
+                if (!stateOpt() || b != m_uniforms[slot])
+                {
+                    m_uniforms[slot] = b;
+                    m_uniformDirtyMask |= static_cast<uint8_t>(1u << slot);
+                    m_descriptorsDirty = true;
+                }
             }
 
             void draw(uint32_t vertexCount, uint32_t firstVertex) override
@@ -1922,7 +1998,8 @@ namespace rhi
                 m_boundPipeline = VK_NULL_HANDLE;
                 m_pushed.valid = false;
                 m_emitted = {};
-                m_pipelineDirty = m_descriptorsDirty = m_buffersDirty = true;
+                m_pipelineDirty = m_descriptorsDirty = m_texturesDirty = m_buffersDirty = true;
+                m_uniformDirtyMask = (1u << kUniformSlots) - 1u;
                 m_viewportDirty = m_scissorDirty = m_blendDirty = true;
                 m_markerDepth = 0;
             }
@@ -2034,23 +2111,29 @@ namespace rhi
                     m_vertexBuffer = nullptr;
                 if (object == m_indexBuffer)
                     m_indexBuffer = nullptr;
-                for (VkBuf *&u : m_uniforms)
-                    if (u == object)
+                for (uint32_t i = 0; i < kUniformSlots; ++i)
+                    if (m_uniforms[i] == object)
                     {
-                        u = nullptr;
+                        m_uniforms[i] = nullptr;
+                        m_uniformDirtyMask |= static_cast<uint8_t>(1u << i);
                         m_descriptorsDirty = true;
                     }
                 for (uint32_t i = 0; i < kTextureSlots; ++i)
                 {
                     if (m_textures[i] == object)
-                        m_textures[i] = nullptr, m_descriptorsDirty = true;
+                        m_textures[i] = nullptr, m_texturesDirty = true, m_descriptorsDirty = true;
                     if (m_samplers[i] == object)
-                        m_samplers[i] = nullptr, m_descriptorsDirty = true;
+                        m_samplers[i] = nullptr, m_texturesDirty = true, m_descriptorsDirty = true;
                 }
                 if (object == m_pipeline)
                 {
                     m_pipeline = nullptr;
                     m_boundPipeline = VK_NULL_HANDLE;
+                }
+                if (object == m_lastVariantPipe)
+                {
+                    m_lastVariantPipe = nullptr;
+                    m_lastVariantPso = VK_NULL_HANDLE;
                 }
                 if (object == m_boundPipe)
                     m_boundPipe = nullptr;
@@ -2217,29 +2300,39 @@ namespace rhi
             {
                 if (!m_pipeline || !m_inPass || (indexed && !m_indexBuffer))
                     return false;
-                // textures the shader reads: readable (outside the rendering), not the pass's own targets
-                VkTexture *sampled[kTextureSlots];
-                for (uint32_t i = 0; i < kTextureSlots; ++i)
+                VkTexture *sampled[kTextureSlots]{};
+                VkDeviceSize uniformOffsets[kUniformSlots]{};
+                VkBuffer uniformBuffers[kUniformSlots]{};
+                const bool needTex = !stateOpt() || m_texturesDirty || !m_pushed.valid;
+                const uint8_t needUbo = (!stateOpt() || !m_pushed.valid) ? uint8_t((1u << kUniformSlots) - 1u) : m_uniformDirtyMask;
+                if (needTex)
                 {
-                    VkTexture *t = m_textures[i];
-                    if (t && (t == m_passColor || t == m_passDepth || t->samples != VK_SAMPLE_COUNT_1_BIT || t->resting != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
-                        t = nullptr; // D3D unbinds a texture that is also the target: reads zeros
-                    sampled[i] = t ? t : m_dummyTexture.get();
-                    if (sampled[i]->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                    // textures the shader reads: readable (outside the rendering), not the pass's own targets
+                    for (uint32_t i = 0; i < kTextureSlots; ++i)
                     {
-                        outsideRendering();
-                        barrier(m_cmd, *sampled[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                        VkTexture *t = m_textures[i];
+                        if (t && (t == m_passColor || t == m_passDepth || t->samples != VK_SAMPLE_COUNT_1_BIT || t->resting != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+                            t = nullptr; // D3D unbinds a texture that is also the target: reads zeros
+                        sampled[i] = t ? t : m_dummyTexture.get();
+                        if (sampled[i]->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                        {
+                            outsideRendering();
+                            barrier(m_cmd, *sampled[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                        }
                     }
                 }
-                // dynamic buffers changed since the last draw: new slices (no commands)
-                VkDeviceSize uniformOffsets[kUniformSlots] = {};
-                VkBuffer uniformBuffers[kUniformSlots] = {};
-                for (uint32_t i = 0; i < kUniformSlots; ++i)
+                if (needUbo)
                 {
-                    VkBuf *b = m_uniforms[i] ? m_uniforms[i] : m_zeroBuffer.get();
-                    if (b->desc().dynamic && b->sliceFrame != m_frameSerial)
-                        m_descriptorsDirty = true;
-                    uniformBuffers[i] = bufferOf(*b, uniformOffsets[i]);
+                    // dynamic buffers changed since the last draw: new slices (no commands)
+                    for (uint32_t i = 0; i < kUniformSlots; ++i)
+                    {
+                        if (!(needUbo & (1u << i)))
+                            continue;
+                        VkBuf *b = m_uniforms[i] ? m_uniforms[i] : m_zeroBuffer.get();
+                        if (b->desc().dynamic && b->sliceFrame != m_frameSerial)
+                            m_descriptorsDirty = true;
+                        uniformBuffers[i] = bufferOf(*b, uniformOffsets[i]);
+                    }
                 }
                 if ((m_vertexBuffer && m_vertexBuffer->desc().dynamic && m_vertexBuffer->sliceFrame != m_frameSerial) ||
                     (indexed && m_indexBuffer->desc().dynamic && m_indexBuffer->sliceFrame != m_frameSerial))
@@ -2329,7 +2422,7 @@ namespace rhi
                     }
                     m_blendDirty = false;
                 }
-                if (m_descriptorsDirty)
+                if (needTex || needUbo)
                 {
                     // only the slots that differ from what this command buffer last pushed (push descriptors keep the
                     // rest); a new command buffer pushes everything
@@ -2346,34 +2439,43 @@ namespace rhi
                         w.pBufferInfo = b;
                         w.pImageInfo = i;
                     };
-                    for (uint32_t i = 0; i < kUniformSlots; ++i)
+                    if (needUbo)
                     {
-                        VkBuf *b = m_uniforms[i] ? m_uniforms[i] : m_zeroBuffer.get();
-                        ubo[i] = {uniformBuffers[i], uniformOffsets[i], std::max<VkDeviceSize>((b->desc().size + 15u) & ~VkDeviceSize(15), 16)};
-                        auto &was = m_pushed.ubo[i];
-                        if (!m_pushed.valid || was.buffer != ubo[i].buffer || was.offset != ubo[i].offset || was.range != ubo[i].range)
+                        for (uint32_t i = 0; i < kUniformSlots; ++i)
                         {
-                            was = ubo[i];
-                            write(i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &ubo[i], nullptr);
-                            ++m_stats.writesUbo;
+                            if (!(needUbo & (1u << i)))
+                                continue;
+                            VkBuf *b = m_uniforms[i] ? m_uniforms[i] : m_zeroBuffer.get();
+                            const size_t uboBytes = (fullCopy() || !b->desc().dynamic) ? b->desc().size : b->used;
+                            ubo[i] = {uniformBuffers[i], uniformOffsets[i], std::max<VkDeviceSize>((uboBytes + 15u) & ~VkDeviceSize(15), 16)};
+                            auto &was = m_pushed.ubo[i];
+                            if (!m_pushed.valid || was.buffer != ubo[i].buffer || was.offset != ubo[i].offset || was.range != ubo[i].range)
+                            {
+                                was = ubo[i];
+                                write(i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &ubo[i], nullptr);
+                                ++m_stats.writesUbo;
+                            }
                         }
                     }
-                    for (uint32_t i = 0; i < kTextureSlots; ++i)
+                    if (needTex)
                     {
-                        images[i] = {VK_NULL_HANDLE, sampled[i]->sampledView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-                        if (!m_pushed.valid || m_pushed.view[i] != images[i].imageView)
+                        for (uint32_t i = 0; i < kTextureSlots; ++i)
                         {
-                            m_pushed.view[i] = images[i].imageView;
-                            write(kTextureBinding + i, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &images[i]);
-                            ++m_stats.writesTexture;
-                        }
-                        samplers[i] = {(m_samplers[i] ? m_samplers[i] : m_defaultSampler.get())->sampler, VK_NULL_HANDLE,
-                                       VK_IMAGE_LAYOUT_UNDEFINED};
-                        if (!m_pushed.valid || m_pushed.sampler[i] != samplers[i].sampler)
-                        {
-                            m_pushed.sampler[i] = samplers[i].sampler;
-                            write(kSamplerBinding + i, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &samplers[i]);
-                            ++m_stats.writesSampler;
+                            images[i] = {VK_NULL_HANDLE, sampled[i]->sampledView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                            if (!m_pushed.valid || m_pushed.view[i] != images[i].imageView)
+                            {
+                                m_pushed.view[i] = images[i].imageView;
+                                write(kTextureBinding + i, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &images[i]);
+                                ++m_stats.writesTexture;
+                            }
+                            samplers[i] = {(m_samplers[i] ? m_samplers[i] : m_defaultSampler.get())->sampler, VK_NULL_HANDLE,
+                                           VK_IMAGE_LAYOUT_UNDEFINED};
+                            if (!m_pushed.valid || m_pushed.sampler[i] != samplers[i].sampler)
+                            {
+                                m_pushed.sampler[i] = samplers[i].sampler;
+                                write(kSamplerBinding + i, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &samplers[i]);
+                                ++m_stats.writesSampler;
+                            }
                         }
                     }
                     if (n)
@@ -2386,6 +2488,8 @@ namespace rhi
                     }
                     m_pushed.valid = true;
                     m_stats.descriptorWrites += n;
+                    m_texturesDirty = false;
+                    m_uniformDirtyMask = 0u;
                     m_descriptorsDirty = false;
                 }
                 if (m_buffersDirty)
@@ -2442,9 +2546,16 @@ namespace rhi
             VkPipeline variant(VkPipe &p, VkFormat color, VkFormat depth, VkSampleCountFlagBits samples)
             {
                 const uint64_t key = static_cast<uint64_t>(color) | (static_cast<uint64_t>(depth) << 24) | (static_cast<uint64_t>(samples) << 48);
+                if (stateOpt() && &p == m_lastVariantPipe && key == m_lastVariantKey && m_lastVariantPso)
+                    return m_lastVariantPso;
                 auto it = p.variants.find(key);
                 if (it != p.variants.end())
+                {
+                    m_lastVariantPipe = &p;
+                    m_lastVariantKey = key;
+                    m_lastVariantPso = it->second;
                     return it->second;
+                }
                 const PipelineDesc &d = p.desc;
                 // dynamic depth: everything the VkPipeline holds but the depth state, as a key into the shared cache
                 std::string shared;
@@ -3093,6 +3204,9 @@ namespace rhi
             VkPipe *m_pipeline = nullptr;
             VkPipeline m_boundPipeline = VK_NULL_HANDLE;
             VkPipe *m_boundPipe = nullptr; // PS2X_RHI_STATS: the RHI pipeline last bound (what a bind changes)
+            VkPipe *m_lastVariantPipe = nullptr;
+            uint64_t m_lastVariantKey = 0;
+            VkPipeline m_lastVariantPso = VK_NULL_HANDLE;
             std::unordered_map<std::string, VkPipeline> m_sharedPipelines; // dynamicDepth: one VkPipeline per all-but-depth state
             VkBuf *m_vertexBuffer = nullptr, *m_indexBuffer = nullptr;
             uint32_t m_vertexOffset = 0;
@@ -3103,7 +3217,8 @@ namespace rhi
             VkViewport m_viewport{};
             VkRect2D m_scissor{};
             float m_blendConstant[4] = {0, 0, 0, 0};
-            bool m_pipelineDirty = true, m_descriptorsDirty = true, m_buffersDirty = true;
+            bool m_pipelineDirty = true, m_descriptorsDirty = true, m_texturesDirty = true, m_buffersDirty = true;
+            uint8_t m_uniformDirtyMask = (1u << kUniformSlots) - 1u;
             // what the current command buffer's push descriptors hold (a destroyed object's handle may come back as a
             // new one's: compared by value, so that case pushes again only when the value differs - and an equal
             // handle is the same Vulkan object at that point)

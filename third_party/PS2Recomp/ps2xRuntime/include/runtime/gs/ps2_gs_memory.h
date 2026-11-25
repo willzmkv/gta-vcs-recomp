@@ -585,6 +585,11 @@ namespace GSMem
 	bool WriteRectP8(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 w, u32 h, const u8* src);
 	bool WriteRectP4(u8* data, u32 bp, u32 bw, u32 x, u32 y, u32 w, u32 h, const u8* src);
 
+	// [gta-recomp] Whole-rectangle texture decode mirroring ReadTexture (slice-0 page table + optional 256-entry CLUT):
+	// stateless and thread-safe for parallel VRAM snapshot decoding on worker threads (#113).
+	bool ReadRectRGBA(u32 psm, u32 bp, u32 bw, u32 w, u32 h, const u8* data, size_t dataBytes,
+	                  bool wrapVram, const u32* palette, u8 ta0, u8 ta1, u8 aem, u32* out);
+
 	// [gta-recomp] The 256-byte VRAM blocks (0..16383) a w x h rectangle at x,y of a buffer touches, and those it covers
 	// completely (every byte written). CT32 / CT16 / T8 / T4 only: false for other formats.
 	bool RectBlocks(u32 psm, u32 bp, u32 bw, u32 x, u32 y, u32 w, u32 h, std::vector<u16>& touched, std::vector<u16>* full);

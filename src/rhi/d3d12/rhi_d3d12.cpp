@@ -84,6 +84,22 @@ namespace rhi
             static const double ms = std::getenv("PS2X_HOST_SPIKES") ? std::atof(std::getenv("PS2X_HOST_SPIKES")) : 0.0;
             return ms;
         }
+        bool directRing()
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("PS2X_RHI_DIRECT_RING");
+                return !(e && e[0] == '0');
+            }();
+            return on;
+        }
+        bool stateOpt()
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("PS2X_D3D12_STATE_OPT");
+                return !(e && e[0] == '0');
+            }();
+            return on;
+        }
         struct Spans
         {
             double pso = 0, texture = 0, buffer = 0, memory = 0, wait = 0, present = 0, collect = 0;
@@ -93,9 +109,18 @@ namespace rhi
         struct Span
         {
             double &to;
-            std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-            explicit Span(double &t) : to(t) {}
-            ~Span() { to += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(); }
+            std::chrono::steady_clock::time_point start;
+            bool active;
+            explicit Span(double &t)
+                : to(t), start(spikeMs() > 0.0 ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}),
+                  active(spikeMs() > 0.0)
+            {
+            }
+            ~Span()
+            {
+                if (active)
+                    to += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            }
         };
 
         DXGI_FORMAT resourceFormat(Format f)
@@ -440,13 +465,34 @@ namespace rhi
             std::vector<std::unique_ptr<Chunk>> chunks;
             std::mutex mutex;
 
+            void prewarm(ID3D12Device *device)
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (!chunks.empty())
+                    return;
+                auto c = std::make_unique<Chunk>();
+                const D3D12_HEAP_PROPERTIES heap = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+                const D3D12_RESOURCE_DESC bd = bufferDesc(kChunk);
+                void *mapped = nullptr;
+                if (SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                              IID_PPV_ARGS(&c->buffer))) &&
+                    SUCCEEDED(c->buffer->Map(0, nullptr, &mapped)))
+                {
+                    c->data = static_cast<uint8_t *>(mapped);
+                    c->ranges.init(kChunk);
+                    chunks.push_back(std::move(c));
+                }
+            }
+
             Chunk *alloc(ID3D12Device *device, UINT64 size, UINT64 &offset)
             {
                 size = alignUp(std::max<UINT64>(size, 512), 512);
-                std::lock_guard<std::mutex> lock(mutex);
-                for (auto &c : chunks)
-                    if (c->ranges.alloc(size, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, offset))
-                        return c.get();
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    for (auto &c : chunks)
+                        if (c->ranges.alloc(size, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, offset))
+                            return c.get();
+                }
                 auto c = std::make_unique<Chunk>();
                 const UINT64 bytes = std::max(kChunk, size);
                 const D3D12_HEAP_PROPERTIES heap = heapProps(D3D12_HEAP_TYPE_UPLOAD);
@@ -459,6 +505,7 @@ namespace rhi
                 c->data = static_cast<uint8_t *>(mapped);
                 c->ranges.init(bytes);
                 c->ranges.alloc(size, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, offset);
+                std::lock_guard<std::mutex> lock(mutex);
                 chunks.push_back(std::move(c));
                 return chunks.back().get();
             }
@@ -467,6 +514,21 @@ namespace rhi
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 c->ranges.release(offset, alignUp(std::max<UINT64>(size, 512), 512));
+            }
+
+            struct ReleaseRange
+            {
+                Chunk *chunk;
+                UINT64 offset, size;
+            };
+
+            void releaseBatch(const std::vector<ReleaseRange> &items)
+            {
+                if (items.empty())
+                    return;
+                std::lock_guard<std::mutex> lock(mutex);
+                for (const ReleaseRange &r : items)
+                    r.chunk->ranges.release(r.offset, alignUp(std::max<UINT64>(r.size, 512), 512));
             }
         };
 
@@ -482,6 +544,24 @@ namespace rhi
             };
             std::vector<std::unique_ptr<Heap>> heaps;
             std::mutex mutex;
+
+            void prewarm(ID3D12Device *device)
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (!heaps.empty())
+                    return;
+                auto h = std::make_unique<Heap>();
+                D3D12_HEAP_DESC hd{};
+                hd.SizeInBytes = kHeap;
+                hd.Properties = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+                hd.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+                hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+                if (SUCCEEDED(device->CreateHeap(&hd, IID_PPV_ARGS(&h->heap))))
+                {
+                    h->ranges.init(kHeap);
+                    heaps.push_back(std::move(h));
+                }
+            }
 
             Heap *alloc(ID3D12Device *device, UINT64 size, UINT64 align, UINT64 &offset)
             {
@@ -880,6 +960,7 @@ namespace rhi
                     std::memset(zero, 0, 65536);
                     m_zeroBuffer->Unmap(0, nullptr);
                 }
+                m_zeroVa = m_zeroBuffer->GetGPUVirtualAddress();
 
                 ComPtr<IDXGIFactory5> factory5;
                 BOOL tearing = FALSE;
@@ -917,6 +998,8 @@ namespace rhi
                 m_core->alive = true;
                 m_core->unbind = [this](const void *object) { unbind(object); };
                 m_core->startReaper();
+                m_core->staging.prewarm(device);
+                m_core->textureHeaps.prewarm(device);
                 beginFrame();
                 return true;
             }
@@ -1107,7 +1190,7 @@ namespace rhi
                 d.usage = UsageSampled;
                 d.samples = 1;
                 d.mipLevels = std::max(1u, std::min(levelCount, 16u));
-                auto t = makeTexture(d, true);
+                auto t = makeTexture(d, true, true);
                 if (!t)
                     return nullptr;
                 uint32_t pitches[16];
@@ -1153,14 +1236,38 @@ namespace rhi
                     return;
                 if (b.desc().dynamic)
                 {
+                    static const bool fullCb = std::getenv("PS2X_RHI_FULL_COPY") && *std::getenv("PS2X_RHI_FULL_COPY") == '1';
+                    const size_t activeBytes = std::max<size_t>(size, 4);
+                    const size_t cbBytes = fullCb ? b.desc().size : alignUp(activeBytes, 256);
+                    if (m_recording && directRing())
+                    {
+                        const UINT64 align = b.desc().usage == BufferUsage::Constant ? 256u : 16u;
+                        const size_t n = b.desc().usage == BufferUsage::Constant ? cbBytes : activeBytes;
+                        const Slice s = ringAlloc(n, align);
+                        std::memcpy(s.data, data, size);
+                        if (n > size && b.desc().usage == BufferUsage::Constant)
+                            std::memset(s.data + size, 0, n - size);
+                        b.used = n;
+                        b.sliceVa = s.va;
+                        b.sliceFrame = m_frameSerial;
+                        if (&b == m_vertexBuffer || &b == m_indexBuffer)
+                            m_buffersDirty = true;
+                        for (uint32_t i = 0; i < kUniformSlots; ++i)
+                            if (m_uniforms[i] == &b)
+                                m_uniformDirtyMask |= static_cast<uint8_t>(1u << i);
+                        return;
+                    }
                     // WRITE_DISCARD: the rest of the buffer is undefined in D3D; ours keeps the old bytes. A vertex / index
                     // buffer's slice holds only what was written (rhi_vulkan.cpp, PERFORMANCE.md 27); a constant buffer's
-                    // is whole
+                    // only needs the 256-byte-aligned slice written (PS2X_RHI_FULL_COPY=1 allocates the whole buffer)
                     std::memcpy(b.shadow.data(), data, size);
-                    b.used = b.desc().usage == BufferUsage::Constant ? b.shadow.size() : std::max<size_t>(size, 4);
+                    b.used = b.desc().usage == BufferUsage::Constant ? (fullCb ? b.shadow.size() : cbBytes) : activeBytes;
                     b.sliceFrame = 0; // a new slice at the next use
                     if (&b == m_vertexBuffer || &b == m_indexBuffer)
                         m_buffersDirty = true;
+                    for (uint32_t i = 0; i < kUniformSlots; ++i)
+                        if (m_uniforms[i] == &b)
+                            m_uniformDirtyMask |= static_cast<uint8_t>(1u << i);
                     return;
                 }
                 // a static buffer updated (the renderer never does; its meshes are made once): a new resource with these
@@ -1171,6 +1278,9 @@ namespace rhi
                 makeStatic(b, whole.data(), whole.size());
                 if (&b == m_vertexBuffer || &b == m_indexBuffer)
                     m_buffersDirty = true;
+                for (uint32_t i = 0; i < kUniformSlots; ++i)
+                    if (m_uniforms[i] == &b)
+                        m_uniformDirtyMask |= static_cast<uint8_t>(1u << i);
             }
 
             std::unique_ptr<Sampler> createSampler(const SamplerDesc &desc) override
@@ -1280,51 +1390,84 @@ namespace rhi
 
             void setViewport(float x, float y, float width, float height) override
             {
-                m_viewport = {x, y, width, height, 0.0f, 1.0f};
-                m_viewportDirty = true;
+                const D3D12_VIEWPORT vp{x, y, width, height, 0.0f, 1.0f};
+                if (!stateOpt() || m_viewport.TopLeftX != vp.TopLeftX || m_viewport.TopLeftY != vp.TopLeftY ||
+                    m_viewport.Width != vp.Width || m_viewport.Height != vp.Height)
+                {
+                    m_viewport = vp;
+                    m_viewportDirty = true;
+                }
             }
 
             void setScissor(int x, int y, int width, int height) override
             {
-                m_scissor = {x, y, x + std::max(width, 0), y + std::max(height, 0)};
-                m_scissorDirty = true;
+                const D3D12_RECT sc{x, y, x + std::max(width, 0), y + std::max(height, 0)};
+                if (!stateOpt() || m_scissor.left != sc.left || m_scissor.top != sc.top ||
+                    m_scissor.right != sc.right || m_scissor.bottom != sc.bottom)
+                {
+                    m_scissor = sc;
+                    m_scissorDirty = true;
+                }
             }
 
             void setBlendConstant(const float rgba[4]) override
             {
-                std::memcpy(m_blend, rgba, sizeof(m_blend));
-                m_blendDirty = true;
+                if (!stateOpt() || std::memcmp(m_blend, rgba, sizeof(m_blend)) != 0)
+                {
+                    std::memcpy(m_blend, rgba, sizeof(m_blend));
+                    m_blendDirty = true;
+                }
             }
 
             void setPipeline(Pipeline &pipeline) override { m_pipeline = static_cast<DxPipeline *>(&pipeline); }
 
             void setVertexBuffer(Buffer &buffer, uint32_t offset) override
             {
-                m_vertexBuffer = static_cast<DxBuffer *>(&buffer);
-                m_vertexOffset = offset;
-                m_buffersDirty = true;
+                auto *b = static_cast<DxBuffer *>(&buffer);
+                if (!stateOpt() || b != m_vertexBuffer || offset != m_vertexOffset)
+                {
+                    m_vertexBuffer = b;
+                    m_vertexOffset = offset;
+                    m_buffersDirty = true;
+                }
             }
 
             void setIndexBuffer(Buffer &buffer, bool uint32Indices) override
             {
-                m_indexBuffer = static_cast<DxBuffer *>(&buffer);
-                m_index32 = uint32Indices;
-                m_buffersDirty = true;
+                auto *b = static_cast<DxBuffer *>(&buffer);
+                if (!stateOpt() || b != m_indexBuffer || uint32Indices != m_index32)
+                {
+                    m_indexBuffer = b;
+                    m_index32 = uint32Indices;
+                    m_buffersDirty = true;
+                }
             }
 
             void setTexture(uint32_t slot, Texture *texture, Sampler *sampler) override
             {
                 if (slot >= kTextureSlots)
                     return;
-                m_textures[slot] = static_cast<DxTexture *>(texture);
-                m_samplers[slot] = static_cast<DxSampler *>(sampler);
-                m_texturesDirty = true;
+                auto *t = static_cast<DxTexture *>(texture);
+                auto *s = static_cast<DxSampler *>(sampler);
+                if (!stateOpt() || t != m_textures[slot] || s != m_samplers[slot])
+                {
+                    m_textures[slot] = t;
+                    m_samplers[slot] = s;
+                    m_texturesDirty = true;
+                }
             }
 
             void setConstants(uint32_t slot, Buffer &buffer) override
             {
                 if (slot < kUniformSlots)
-                    m_uniforms[slot] = static_cast<DxBuffer *>(&buffer);
+                {
+                    auto *b = static_cast<DxBuffer *>(&buffer);
+                    if (!stateOpt() || m_uniforms[slot] != b || (b->desc().dynamic && b->sliceFrame != m_frameSerial))
+                    {
+                        m_uniforms[slot] = b;
+                        m_uniformDirtyMask |= static_cast<uint8_t>(1u << slot);
+                    }
+                }
             }
 
             void draw(uint32_t vertexCount, uint32_t firstVertex) override
@@ -1435,6 +1578,11 @@ namespace rhi
             // after the frame's beginFrame (its fence wait counted)
             void reportSpike()
             {
+                if (spikeMs() <= 0.0)
+                {
+                    t_spans = {};
+                    return;
+                }
                 const auto now = std::chrono::steady_clock::now();
                 const double span = std::chrono::duration<double, std::milli>(now - m_spikeFrameEnd).count();
                 const Spans f = t_spans;
@@ -1557,7 +1705,7 @@ namespace rhi
 
             // The resource and its views, no contents yet. Thread-safe: only device calls and the descriptor pools.
             // `copied`: first contents come by a copy (made in COPY_DEST), else made in the state it rests in.
-            std::unique_ptr<DxTexture> makeTexture(const TextureDesc &desc, bool copied)
+            std::unique_ptr<DxTexture> makeTexture(const TextureDesc &desc, bool copied, bool fromLevels = false)
             {
                 TextureDesc sized = desc;
                 sized.width = std::max(1u, desc.width);
@@ -1576,8 +1724,15 @@ namespace rhi
                 }
                 t->format = resourceFormat(desc.format);
                 const bool sampled = (desc.usage & UsageSampled) || t->mips > 1u;
+                // [gta-recomp] Pre-built mip chains (createTextureLevels) never run generateMips(); setting
+                // ALLOW_RENDER_TARGET on them previously defeated TextureHeaps placed allocation and forced ~440 us
+                // CreateCommittedResource per texture (#113). PS2X_D3D12_PLACED_TEXTURES=0 restores the old flag.
+                static const bool placedPrebuiltMips = [] {
+                    const char *e = std::getenv("PS2X_D3D12_PLACED_TEXTURES");
+                    return !(e && *e == '0');
+                }();
                 // a chain generateMips may draw: its levels are targets (never block-compressed: those come as data)
-                const bool drawnChain = t->mips > 1u && !blockCompressed(desc.format);
+                const bool drawnChain = t->mips > 1u && !blockCompressed(desc.format) && (!fromLevels || !placedPrebuiltMips);
                 D3D12_RESOURCE_DESC rd{};
                 rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
                 rd.Width = w;
@@ -1756,7 +1911,9 @@ namespace rhi
                 m_emittedTextures = m_emittedSamplers = ~0ull;
                 m_emittedVb = {};
                 m_emittedIb = {};
+                m_emittedViewportValid = m_emittedScissorValid = m_emittedBlendValid = false;
                 m_texturesDirty = m_buffersDirty = m_viewportDirty = m_scissorDirty = m_blendDirty = true;
+                m_uniformDirtyMask = static_cast<uint8_t>((1u << kUniformSlots) - 1u);
                 m_markerDepth = 0;
             }
 
@@ -1854,9 +2011,12 @@ namespace rhi
                     m_vertexBuffer = nullptr;
                 if (object == m_indexBuffer)
                     m_indexBuffer = nullptr;
-                for (DxBuffer *&u : m_uniforms)
-                    if (u == object)
-                        u = nullptr;
+                for (uint32_t i = 0; i < kUniformSlots; ++i)
+                    if (m_uniforms[i] == object)
+                    {
+                        m_uniforms[i] = nullptr;
+                        m_uniformDirtyMask |= static_cast<uint8_t>(1u << i);
+                    }
                 for (uint32_t i = 0; i < kTextureSlots; ++i)
                 {
                     if (m_textures[i] == object)
@@ -1866,6 +2026,11 @@ namespace rhi
                 }
                 if (object == m_pipeline)
                     m_pipeline = nullptr;
+                if (object == m_lastVariantPipe)
+                {
+                    m_lastVariantPipe = nullptr;
+                    m_lastVariantPso = nullptr;
+                }
                 if (m_inPass && (object == m_passColor || object == m_passDepth))
                 {
                     // a target destroyed inside its pass: no target of it any more (its resource lives to the frame's end)
@@ -2165,19 +2330,31 @@ namespace rhi
                     m_cmd->IASetPrimitiveTopology(m_pipeline->topology);
                     m_emittedTopology = m_pipeline->topology;
                 }
-                for (uint32_t i = 0; i < kUniformSlots; ++i)
+                if (m_uniformDirtyMask || !stateOpt())
                 {
-                    UINT size = 0;
-                    const D3D12_GPU_VIRTUAL_ADDRESS va = m_uniforms[i] ? addressOf(*m_uniforms[i], size) : m_zeroBuffer->GetGPUVirtualAddress();
-                    if (va != m_emittedCbv[i])
+                    const uint8_t mask = stateOpt() ? m_uniformDirtyMask : static_cast<uint8_t>((1u << kUniformSlots) - 1u);
+                    for (uint32_t i = 0; i < kUniformSlots; ++i)
                     {
-                        m_cmd->SetGraphicsRootConstantBufferView(i, va);
-                        m_emittedCbv[i] = va;
+                        if (!(mask & (1u << i)))
+                            continue;
+                        UINT size = 0;
+                        const D3D12_GPU_VIRTUAL_ADDRESS va = m_uniforms[i] ? addressOf(*m_uniforms[i], size) : m_zeroVa;
+                        if (va != m_emittedCbv[i])
+                        {
+                            m_cmd->SetGraphicsRootConstantBufferView(i, va);
+                            m_emittedCbv[i] = va;
+                        }
                     }
+                    m_uniformDirtyMask = 0;
                 }
                 if (m_viewportDirty)
                 {
-                    m_cmd->RSSetViewports(1, &m_viewport);
+                    if (!stateOpt() || !m_emittedViewportValid || std::memcmp(&m_emittedViewport, &m_viewport, sizeof(m_viewport)) != 0)
+                    {
+                        m_cmd->RSSetViewports(1, &m_viewport);
+                        m_emittedViewport = m_viewport;
+                        m_emittedViewportValid = true;
+                    }
                     m_viewportDirty = false;
                 }
                 if (m_scissorDirty)
@@ -2187,12 +2364,22 @@ namespace rhi
                     r.top = std::clamp<LONG>(r.top, 0, static_cast<LONG>(m_passHeight));
                     r.right = std::clamp<LONG>(r.right, r.left, static_cast<LONG>(m_passWidth));
                     r.bottom = std::clamp<LONG>(r.bottom, r.top, static_cast<LONG>(m_passHeight));
-                    m_cmd->RSSetScissorRects(1, &r);
+                    if (!stateOpt() || !m_emittedScissorValid || std::memcmp(&m_emittedScissor, &r, sizeof(r)) != 0)
+                    {
+                        m_cmd->RSSetScissorRects(1, &r);
+                        m_emittedScissor = r;
+                        m_emittedScissorValid = true;
+                    }
                     m_scissorDirty = false;
                 }
                 if (m_blendDirty)
                 {
-                    m_cmd->OMSetBlendFactor(m_blend);
+                    if (!stateOpt() || !m_emittedBlendValid || std::memcmp(m_emittedBlend, m_blend, sizeof(m_blend)) != 0)
+                    {
+                        m_cmd->OMSetBlendFactor(m_blend);
+                        std::memcpy(m_emittedBlend, m_blend, sizeof(m_blend));
+                        m_emittedBlendValid = true;
+                    }
                     m_blendDirty = false;
                 }
                 // a dynamic buffer updated since its slice was made gets a new one (its address moves)
@@ -2232,9 +2419,16 @@ namespace rhi
             ID3D12PipelineState *variant(DxPipeline &p, DXGI_FORMAT color, DXGI_FORMAT depth, uint32_t samples)
             {
                 const uint64_t key = (uint64_t(color) << 32) | (uint64_t(depth) << 8) | samples;
+                if (stateOpt() && &p == m_lastVariantPipe && key == m_lastVariantKey && m_lastVariantPso)
+                    return m_lastVariantPso;
                 auto it = p.variants.find(key);
                 if (it != p.variants.end())
-                    return it->second.Get();
+                {
+                    m_lastVariantPipe = &p;
+                    m_lastVariantKey = key;
+                    m_lastVariantPso = it->second.Get();
+                    return m_lastVariantPso;
+                }
                 const PipelineDesc &d = p.desc;
                 std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
                 for (const VertexAttribute &a : d.attributes)
@@ -2355,7 +2549,7 @@ namespace rhi
                 UINT rows[16];
                 UINT64 rowSizes[16], total = 0;
                 const D3D12_RESOURCE_DESC rd = t.resource->GetDesc();
-                m_core->device->GetCopyableFootprints(&rd, 0, st.count, st.offset, st.fp, rows, rowSizes, &total);
+                m_core->device->GetCopyableFootprints(&rd, 0, st.count, 0, st.fp, rows, rowSizes, &total);
                 st.chunk = m_core->staging.alloc(m_core->device.Get(), total, st.offset);
                 if (!st.chunk)
                 {
@@ -2363,8 +2557,8 @@ namespace rhi
                     return false;
                 }
                 st.size = total;
-                // the footprints at the range's offset
-                m_core->device->GetCopyableFootprints(&rd, 0, st.count, st.offset, st.fp, rows, rowSizes, &total);
+                for (uint32_t i = 0; i < st.count; ++i)
+                    st.fp[i].Offset += st.offset;
                 fillLevels(st.chunk->data, t, st.fp, rows, levels, pitches, st.count);
                 t.state = t.resting;
                 std::lock_guard<std::mutex> lock(m_stagedMutex);
@@ -2383,6 +2577,12 @@ namespace rhi
                 if (!staged.empty())
                 {
                     ID3D12GraphicsCommandList *cmd = initCmd();
+                    std::vector<D3D12_RESOURCE_BARRIER> barriers;
+                    barriers.reserve(staged.size());
+                    std::vector<ComPtr<ID3D12Resource>> keepTextures;
+                    keepTextures.reserve(staged.size());
+                    std::vector<StagingPool::ReleaseRange> ranges;
+                    ranges.reserve(staged.size());
                     for (Staged &st : staged)
                     {
                         for (uint32_t i = 0; i < st.count; ++i)
@@ -2398,17 +2598,18 @@ namespace rhi
                             D3D12_RESOURCE_BARRIER b{};
                             b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                             b.Transition = {st.texture.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COPY_DEST, st.resting};
-                            cmd->ResourceBarrier(1, &b);
+                            barriers.push_back(b);
                         }
-                        Core *c = m_core.get();
-                        ComPtr<ID3D12Resource> texture = st.texture;
-                        StagingPool::Chunk *chunk = st.chunk;
-                        const UINT64 offset = st.offset, size = st.size;
-                        m_core->garbage[m_core->frame].push_back([c, texture, chunk, offset, size]() mutable {
-                            texture.Reset();
-                            c->staging.release(chunk, offset, size);
-                        });
+                        keepTextures.push_back(std::move(st.texture));
+                        ranges.push_back({st.chunk, st.offset, st.size});
                     }
+                    if (!barriers.empty())
+                        cmd->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+                    Core *c = m_core.get();
+                    m_core->garbage[m_core->frame].push_back([c, keepTextures = std::move(keepTextures), ranges = std::move(ranges)]() mutable {
+                        keepTextures.clear();
+                        c->staging.releaseBatch(ranges);
+                    });
                 }
                 for (auto &f : orphans)
                     m_core->garbage[m_core->frame].push_back(std::move(f));
@@ -2554,6 +2755,7 @@ namespace rhi
             D3D12_CPU_DESCRIPTOR_HANDLE m_nullSrv{};
             std::unique_ptr<Sampler> m_defaultSampler, m_linearSampler;
             ComPtr<ID3D12Resource> m_zeroBuffer;
+            D3D12_GPU_VIRTUAL_ADDRESS m_zeroVa = 0;
             ComPtr<ID3D12Resource> m_readback; // readTexture's
             UINT64 m_readbackSize = 0;
 
@@ -2577,14 +2779,22 @@ namespace rhi
             D3D12_RECT m_scissor{};
             float m_blend[4] = {0, 0, 0, 0};
             bool m_texturesDirty = true, m_buffersDirty = true, m_viewportDirty = true, m_scissorDirty = true, m_blendDirty = true;
+            uint8_t m_uniformDirtyMask = static_cast<uint8_t>((1u << kUniformSlots) - 1u);
             // what the current list has
             ID3D12PipelineState *m_boundPso = nullptr;
+            DxPipeline *m_lastVariantPipe = nullptr;
+            uint64_t m_lastVariantKey = 0;
+            ID3D12PipelineState *m_lastVariantPso = nullptr;
             D3D_PRIMITIVE_TOPOLOGY m_emittedTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
             D3D12_GPU_VIRTUAL_ADDRESS m_emittedCbv[kUniformSlots]{};
             UINT64 m_emittedTextures = ~0ull, m_emittedSamplers = ~0ull;
             Table m_lastViews, m_lastSamplers; // what those tables hold
             D3D12_VERTEX_BUFFER_VIEW m_emittedVb{};
             D3D12_INDEX_BUFFER_VIEW m_emittedIb{};
+            D3D12_VIEWPORT m_emittedViewport{};
+            D3D12_RECT m_emittedScissor{};
+            float m_emittedBlend[4] = {};
+            bool m_emittedViewportValid = false, m_emittedScissorValid = false, m_emittedBlendValid = false;
 
             // the pass
             PassDesc m_pass;

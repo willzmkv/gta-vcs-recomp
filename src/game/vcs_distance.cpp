@@ -2330,10 +2330,17 @@ constexpr uint32_t kProcess2dEffects = 0x003C35A8u;
             runtime.replaceFunction(kSetupEntityVisibility, &setupEntityVisibility);
         if ((g_origScanFrustumTriangle = runtime.lookupFunction(kScanFrustumTriangle)))
             runtime.replaceFunction(kScanFrustumTriangle, &scanFrustumTriangleHook);
-        if ((g_storeCarLightShadow = runtime.lookupFunction(kStoreCarLightShadow)))
-            runtime.replaceFunction(kStoreCarLightShadow, &storeCarLightShadow);
-        if ((g_renderHeadLightBeams = runtime.lookupFunction(kRenderHeadLightBeams)))
-            runtime.replaceFunction(kRenderHeadLightBeams, &renderHeadLightBeams);
+        // Diagnostic legacy opt-in only: 0x002E1140/0x002E23A0 were misidentified as shadow/headlight beam hooks
+        // but are actually CExplosion::AddExplosion/Update; CEntity::Process2dEffects (0x003C35A8) handles parked coronas.
+        static const bool legacyExplosionHooks =
+            std::getenv("VCS_LEGACY_EXPLOSION_SUPPRESSION") && *std::getenv("VCS_LEGACY_EXPLOSION_SUPPRESSION") == '1';
+        if (legacyExplosionHooks)
+        {
+            if ((g_storeCarLightShadow = runtime.lookupFunction(kStoreCarLightShadow)))
+                runtime.replaceFunction(kStoreCarLightShadow, &storeCarLightShadow);
+            if ((g_renderHeadLightBeams = runtime.lookupFunction(kRenderHeadLightBeams)))
+                runtime.replaceFunction(kRenderHeadLightBeams, &renderHeadLightBeams);
+        }
         if ((g_process2dEffects = runtime.lookupFunction(kProcess2dEffects)))
             runtime.replaceFunction(kProcess2dEffects, &process2dEffects);
         if ((g_pedPoolCtor = runtime.lookupFunction(kPedPoolCtor)))

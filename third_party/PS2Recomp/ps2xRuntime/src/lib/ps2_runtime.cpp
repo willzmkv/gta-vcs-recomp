@@ -1248,6 +1248,16 @@ bool PS2Runtime::initialize(const char *title)
             std::cerr << "Failed to bind runtime core subsystems" << std::endl;
             return false;
         }
+        // [gta-recomp] Main RDRAM is 128 MB (PS2_RAM_SIZE), no special registers reside below PS2_IO_BASE (0x10000000);
+        // keep fast inline reads/writes up to PS2_RAM_SIZE - 16u unless a watchpoint is armed or PS2X_FAST_RAM_32MB=1.
+        {
+            const char *fast32 = std::getenv("PS2X_FAST_RAM_32MB");
+            const uint32_t fullLimit = (fast32 && fast32[0] == '1') ? PS2_FAST_RAM_LIMIT : (PS2_RAM_SIZE - 16u);
+            if (g_ps2ReadWatch.span == 0u)
+                g_ps2FastReadLimit = fullLimit;
+            if (g_ps2WriteWatch.span == 0u)
+                g_ps2FastWriteLimit = fullLimit;
+        }
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
@@ -3226,11 +3236,17 @@ void PS2Runtime::run()
         double spikeCpuFrames = 0.0;
         SpikeClock::time_point spikeT[6];
         const bool spikeLead = platform::frameLeadRan();
+        static const bool prePresentTickOn = [] {
+            const char *e = std::getenv("PS2X_PRE_PRESENT_TICK");
+            return !(e && e[0] == '0');
+        }();
+        static bool prePresentTicked = false;
         platform::pumpEvents(); // [gta-recomp]
-        // [gta-recomp] host-paced game frames start on fresh input (ps2_present.h): here, unless the frame lead started
-        // this one already, early enough to be ready now (below)
-        if (!platform::frameLeadRan())
+        // [gta-recomp] host-paced game frames start on fresh input (ps2_present.h): here, unless the frame lead or the
+        // pre-present tick (VSync/uncap overlap) started this one already
+        if (!platform::frameLeadRan() && !prePresentTicked)
             ps2HostTick(false, platform::frameSlept());
+        prePresentTicked = false;
         spikeT[0] = SpikeClock::now();
         present::beginFrame();
         platform::beginFrame();
@@ -3384,6 +3400,12 @@ void PS2Runtime::run()
         }
         ps2control::pump(capturePng, shootPng, [this] { requestStop(); });
         present::setFrameInputTime(gsHwShownInputNs()); // [gta-recomp] input-to-screen delay (PS2X_RHI_STATS)
+        if (prePresentTickOn && g_hostPaced.load(std::memory_order_relaxed) && !platform::frameLeadRan())
+        {
+            platform::pumpEvents(false);
+            ps2HostTick(false, false);
+            prePresentTicked = true;
+        }
         present::present();
         spikeT[5] = SpikeClock::now();
         if (spikeMs > 0.0)
@@ -3415,7 +3437,7 @@ void PS2Runtime::run()
                 return (e && *e ? std::atoll(e) : 1500ll) * 1000ll;
             }();
             const int64_t build = gsHwFrameBuildNs();
-            const bool lead = leadOn && g_hostPaced.load(std::memory_order_relaxed) && build > 0;
+            const bool lead = leadOn && g_hostPaced.load(std::memory_order_relaxed) && build > 0 && !prePresentTicked;
             platform::setFrameLead(lead ? static_cast<uint64_t>(build + marginNs) : 0u, [] {
                 platform::pumpEvents(false);
                 ps2HostTick(true);

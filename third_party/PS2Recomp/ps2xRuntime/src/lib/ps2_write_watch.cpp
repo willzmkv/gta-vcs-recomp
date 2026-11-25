@@ -142,10 +142,14 @@ namespace ps2writewatch
         auto g_reportAt = ps2x::hostNow();
 
         // PS2X_WRITE_WATCH_LOG=1: pages per fold and its cost, every 5 s
-        void noteFold(uint64_t count, std::chrono::steady_clock::time_point start)
+        bool logFolds()
         {
             static const bool log = std::getenv("PS2X_WRITE_WATCH_LOG") != nullptr;
-            if (!log)
+            return log;
+        }
+        void noteFold(uint64_t count, std::chrono::steady_clock::time_point start)
+        {
+            if (!logFolds())
                 return;
             const auto now = ps2x::hostNow();
             ++g_stats.folds;
@@ -252,7 +256,7 @@ namespace ps2writewatch
 #if defined(_WIN32)
         if (!g_base)
             return 0u;
-        const auto start = ps2x::hostNow();
+        const auto start = logFolds() ? ps2x::hostNow() : std::chrono::steady_clock::time_point{}; // [gta-recomp]
         ULONG_PTR count = static_cast<ULONG_PTR>(g_written.size());
         DWORD granularity = 0;
         if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, g_base, g_bytes, g_written.data(), &count, &granularity) != 0)
@@ -263,12 +267,13 @@ namespace ps2writewatch
             if (page < g_generation.size())
                 ++g_generation[page];
         }
-        noteFold(count, start);
+        if (logFolds())
+            noteFold(count, start);
         return static_cast<uint32_t>(count);
 #elif defined(PS2X_LINUX_WRITE_WATCH)
         if (!g_base)
             return 0u;
-        const auto start = ps2x::hostNow();
+        const auto start = logFolds() ? ps2x::hostNow() : std::chrono::steady_clock::time_point{}; // [gta-recomp]
         const long count = scanLinux();
         if (count < 0)
         {
@@ -284,7 +289,8 @@ namespace ps2writewatch
             g_base = nullptr; // enabled() false; the memory stays (release() frees it as plain memory below)
             return 0u;
         }
-        noteFold(static_cast<uint64_t>(count), start);
+        if (logFolds())
+            noteFold(static_cast<uint64_t>(count), start);
         return static_cast<uint32_t>(count);
 #else
         return 0u;

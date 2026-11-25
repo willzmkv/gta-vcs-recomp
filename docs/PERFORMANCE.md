@@ -1324,6 +1324,22 @@ become the default (CROWD_BANDS_PLAN.md step 5).
 At a fixed spot (Little Havana, the free camera 12 m up looking north, 4K) the frame stays ~18-22 ms whatever the crowd:
 there the GPU at 4K is the limit (the game's own population: 18 ms; the full one at 1080p: 17 ms).
 
+### 49. Issue #113: Little Havana, RHI & streaming optimization pass (`2026-11-25`)
+
+Dense 4K Little Havana driving and Fort Baxter -> Airport -> Washington Bridge streaming exposed CPU/RHI/texture bottlenecks in both D3D12 (~41 fps, p99 ~88 ms, max 217 ms on user capture; 193 ms D3D12 texture bursts before placed allocation) and Vulkan (~45 fps, p99 ~106 ms, max 137 ms). Three optimization rounds (all Rule 1 toggleable, verified on ThinLTO `--opt lto`):
+
+- **GameThread / EE & RSL (`ps2_runtime.cpp`, `ps2_write_watch.cpp`, `vcs_overrides.cpp`, `vcs_hle_world.cpp`, `vcs_world_hd.cpp`, `vcs_rsl_world.cpp`):**
+  - 128 MB fast inline RDRAM bounds (`PS2X_FAST_RAM_32MB=1` fallback), native `RwMatrixMultiply` (`0x002C0A40`) + `RwFrameUpdateObjects` (`0x001B4FB8`) (`VCS_NATIVE_RWFRAME=0`), 4-lane SSE `setupMatrices` (`VCS_SSE_SETUP=0`), flat `kFlatGids` mirrors in `vcs_world_hd.cpp` (`VCS_HD_FLAT_MAP=0`), RSL `FlatMap` `g_flatOk`, 4-page inline `PageSnapshot`, `closeBlock` snapshot handoff, O(1) `taken()` suffix trim, `settleIm2D` fast skip (`VCS_RSL_FAST_SKIP=0`), and guarded `hostNow()` reads.
+- **GS Stage & Helper Threads (`ps2_gs_memory.{h,cpp}`, `gs_cpu_backend.{h,cpp}`, `gs_hw.cpp`):**
+  - Whole-rect page-strided `GSMem::ReadRectRGBA` (`PS2X_HW_FAST_DECODE=0`), helper-thread VRAM snapshot decoding `makeDecodeEarly` (`PS2X_HW_EARLY_DECODE=0`, verified exact with `PS2X_HW_DECODE_VERIFY`), helper-thread PNG & stochastic surface classification (`PS2X_HW_EARLY_PNG=0`, `PS2X_HW_EARLY_STOCHASTIC=0`), 2-way `MeshSlot`/`TexSlot` + `PipeSlot` + target & fixed `ConstShadow` caches (`PS2X_HW_EXEC_CACHE=0`), redundant merged `MeshCreate` pruning (`PS2X_HW_MERGE_PRUNE=0`), and raised LRU caps (`maxTextures=6000`, `maxMeshes=32768`).
+- **D3D12 / Vulkan RHI & Frame Overlaps (`rhi_d3d12.cpp`, `rhi_vulkan.cpp`, `ps2_runtime.cpp`):**
+  - Placed D3D12 allocation for prebuilt mipmapped textures without `ALLOW_RENDER_TARGET` + `prewarm()` + `releaseBatch()` (`PS2X_D3D12_PLACED_TEXTURES=0`), direct-to-ring dynamic buffer writes (`PS2X_RHI_DIRECT_RING=0`), 256B-aligned CB slices (`PS2X_RHI_FULL_COPY=1` fallback), redundant state/CB/PSO dirty guards (`PS2X_D3D12_STATE_OPT=0`, `PS2X_VK_STATE_OPT=0`), guarded `Span` clocks, and overlapped pre-present tick (`PS2X_PRE_PRESENT_TICK=0`).
+- **Measured `--opt lto` results:**
+  - `bench_avenue.py` (4K, full population): **Vulkan `11.75 ms` (`85.1 fps`)**, `game 9.75 ms`, `host 8.63 ms`, `p99 24.1 ms`, `70` >25 ms, `4` >33 ms (`90` peds); **D3D12 `14.79 ms` (`67.6 fps`)**, `game 9.53 ms`, `host 14.05 ms`, `p99 46.1 ms`, `306` >25 ms, `195` >33 ms (`82` peds).
+  - `repro_113_stutter.py` (100 fps cap, Fort Baxter -> Airport -> Washington Bridge): **D3D12 `92.6 fps`** (`p50 10.3`, `p99 18.3`, `max 37.7 ms`, `0` >50 ms, `131 tex/s`); **Vulkan `86.0 fps`** (`p50 10.8`, `p99 21.5`, `max 107.0 ms`); **D3D11 `83.9 fps`** (`p50 11.2`, `p99 25.4`, `max 145.6 ms`).
+  - `havana_exact` (stationary Little Havana): `parked_vulkan_uncap 115.9 fps` (`8.63 ms`, `host 212.7 fps`), `parked_d3d12_uncap 102.1 fps` (`9.80 ms`, `host 185.0 fps`). `r3_profile` uncapped: `r3_prof_game 138.8 fps` (`game 5.75 ms`), `r3_prof_main_d3d12 138.4 fps`, `r3_prof_main_vk 133.0 fps`.
+  - Parity verified (`0` differences in `rsl_skip_verify`, `rsl_items_verify`, `scenes compare` 8/8 `ok`).
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker

@@ -1026,6 +1026,10 @@ namespace
             }
             return o;
         };
+        static const bool useSse = [] {
+            const char *e = std::getenv("VCS_SSE_SETUP");
+            return !(e && e[0] == '0');
+        }();
         Vec4 ar[4], br[4], pr[4], o1[4];
         for (uint32_t i = 0; i < 4; ++i)
         {
@@ -1033,12 +1037,74 @@ namespace
             br[i] = loadF(vu, b + i);
             pr[i] = loadF(vu, p + i);
         }
-        for (uint32_t i = 0; i < 4; ++i)
-            o1[i] = mul(br, ar[i]);
-        for (uint32_t i = 0; i < 4; ++i)
-            storeF(vu, out + i, o1[i]);
-        for (uint32_t i = 0; i < 4; ++i)
-            storeF(vu, out + 4 + i, mul(pr, o1[i]));
+        bool sseDone = false;
+        if (useSse)
+        {
+            // Fast 4-lane SSE path (under FE_TOWARDZERO / no-FMA): falls back cleanly to exact scalar `mul` if any
+            // input, product, or sum is denormal or has exponent 255 (Inf/NaN/overflow).
+            const __m128i absMask = _mm_set1_epi32(0x7FFFFFFF);
+            const __m128i minNorm = _mm_set1_epi32(0x00800000);
+            const __m128i maxFin = _mm_set1_epi32(0x7F7FFFFF);
+            const __m128i zero = _mm_setzero_si128();
+            __m128i bad = zero;
+            auto check = [&](__m128 v) {
+                const __m128i av = _mm_and_si128(_mm_castps_si128(v), absMask);
+                const __m128i isDenorm = _mm_and_si128(_mm_cmplt_epi32(av, minNorm), _mm_cmpgt_epi32(av, zero));
+                const __m128i isInfNan = _mm_cmpgt_epi32(av, maxFin);
+                bad = _mm_or_si128(bad, _mm_or_si128(isDenorm, isInfNan));
+            };
+            __m128 am[4], bm[4], pm[4], o1m[4], o2m[4];
+            for (int i = 0; i < 4; ++i)
+            {
+                am[i] = _mm_loadu_ps(ar[i].v);
+                bm[i] = _mm_loadu_ps(br[i].v);
+                pm[i] = _mm_loadu_ps(pr[i].v);
+                check(am[i]);
+                check(bm[i]);
+                check(pm[i]);
+            }
+            if (_mm_testz_si128(bad, bad))
+            {
+                auto mulRow = [&](const __m128 m[4], __m128 r) -> __m128 {
+                    const __m128 r0 = _mm_shuffle_ps(r, r, _MM_SHUFFLE(0, 0, 0, 0));
+                    const __m128 r1 = _mm_shuffle_ps(r, r, _MM_SHUFFLE(1, 1, 1, 1));
+                    const __m128 r2 = _mm_shuffle_ps(r, r, _MM_SHUFFLE(2, 2, 2, 2));
+                    const __m128 r3 = _mm_shuffle_ps(r, r, _MM_SHUFFLE(3, 3, 3, 3));
+                    const __m128 p0 = _mm_mul_ps(m[0], r0);
+                    const __m128 p1 = _mm_mul_ps(m[1], r1);
+                    const __m128 p2 = _mm_mul_ps(m[2], r2);
+                    const __m128 p3 = _mm_mul_ps(m[3], r3);
+                    const __m128 s1 = _mm_add_ps(p0, p1);
+                    const __m128 s2 = _mm_add_ps(s1, p2);
+                    const __m128 s3 = _mm_add_ps(s2, p3);
+                    check(p0); check(p1); check(p2); check(p3);
+                    check(s1); check(s2); check(s3);
+                    return s3;
+                };
+                for (int i = 0; i < 4; ++i)
+                    o1m[i] = mulRow(bm, am[i]);
+                for (int i = 0; i < 4; ++i)
+                    o2m[i] = mulRow(pm, o1m[i]);
+                if (_mm_testz_si128(bad, bad))
+                {
+                    for (uint32_t i = 0; i < 4; ++i)
+                    {
+                        _mm_storeu_ps(reinterpret_cast<float *>(vu + ((out + i) & (kQwords - 1u)) * 16u), o1m[i]);
+                        _mm_storeu_ps(reinterpret_cast<float *>(vu + ((out + 4u + i) & (kQwords - 1u)) * 16u), o2m[i]);
+                    }
+                    sseDone = true;
+                }
+            }
+        }
+        if (!sseDone)
+        {
+            for (uint32_t i = 0; i < 4; ++i)
+                o1[i] = mul(br, ar[i]);
+            for (uint32_t i = 0; i < 4; ++i)
+                storeF(vu, out + i, o1[i]);
+            for (uint32_t i = 0; i < 4; ++i)
+                storeF(vu, out + 4 + i, mul(pr, o1[i]));
+        }
     }
 
     // slot routine 0xc8 (byte 0x0640): the camera (32) in object space - the rotation (0-2) transposed (ADDx from vf00:

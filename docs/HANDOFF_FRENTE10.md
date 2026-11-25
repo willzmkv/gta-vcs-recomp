@@ -81,9 +81,11 @@ All behind existing switches (`=0` restores original path; bit-exact at 30 fps `
 
 ## 4. Status & Next Priorities
 
-1. **Frente 10 (`agent/framerate-vigilante-audit`):** all fixes, ThinLTO build, LTO verification, `docs/game-internals.md`, `docs/PROGRESS.md`, and `docs/HANDOFF_FRENTE10.md` complete; ready to commit, PR to `hd-world-merge`, and merge.
-2. **Next queued work:**
-   - **Issue `#113` (`willzmkv/gta-vcs-recomp#113`):** missing explosion/car-blast audio & severe FPS drops/stuttering near Fort Baxter military base gate, airport entrance, and Washington Bridge (DXVK/Vulkan workaround clue).
+1. **Frente 10 (`agent/framerate-vigilante-audit` -> `hd-world-merge` `e676a68`):** merged cleanly into `hd-world-merge`.
+2. **Issue `#113` (`agent/issue-113` in `D:\Games\vcs-agent`, built to `D:\Games\vcs-agent-build\vcs.exe`):**
+   - Explosion audio fix (`CExplosion` `0x002E1140`/`0x002E23A0` ungated from parked-car suppression) + CPU/GS/RHI/D3D12/Vulkan Rounds 1–3 fixes implemented, compiled with `--opt lto`, and verified across `bench_avenue`, `repro_113_stutter`, `run_r3_verify`, `scenes`, `fire_check`, `soundcheck`, `VCS_SELFTEST=1`, and `VCSLauncher.exe --self-test`.
+   - Docs updated and committed on `agent/issue-113`; **held from merging per user request until visual/in-game review completes**.
+3. **Next queued work (after `#113` review):**
    - **Moon bug + HD option:** fix moon not always appearing at night & stretched aspect ratio on original moon, plus add LCS HD moon texture from `D:\Games\LibertyStories-ipad-test\assets` as an official toggleable mod option.
 
 ## 5. Traps found on the way

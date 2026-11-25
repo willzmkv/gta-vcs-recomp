@@ -546,6 +546,45 @@ namespace vcs::world_hd
         std::unordered_map<uint32_t, uint32_t> g_registered; // gid -> the geometry of ours its table entry holds
         uint32_t g_maxGid = 0; // the highest gid any piece names (the table's used part)
 
+        // Flat mirrors indexed directly by gid for hot per-record visibility/texture checks in entryOk()/good();
+        // g_registered/g_game/g_gameCopies stay in sync for logging and VCS_HD_FLAT_MAP=0 fallback.
+        constexpr uint32_t kFlatGids = 0x10000u;
+        bool flatMapEnabled()
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("VCS_HD_FLAT_MAP");
+                return !(e && e[0] == '0');
+            }();
+            return on;
+        }
+        std::array<uint32_t, kFlatGids> g_registeredFlat{};
+        std::array<uint32_t, kFlatGids> g_gameCopyA{};
+        std::array<uint32_t, kFlatGids> g_gameCopyB{};
+        std::array<uint8_t, kFlatGids> g_gameCopyCount{};
+
+        void clearGameFlat() { g_gameCopyCount.fill(0u); }
+        void recordGameFlat(uint32_t gid, uint32_t val)
+        {
+            if (gid >= kFlatGids)
+                return;
+            const uint8_t n = g_gameCopyCount[gid];
+            if (n == 0u)
+            {
+                g_gameCopyA[gid] = val;
+                g_gameCopyCount[gid] = 1u;
+            }
+            else if (n == 1u)
+            {
+                if (g_gameCopyA[gid] != val)
+                {
+                    g_gameCopyB[gid] = val;
+                    g_gameCopyCount[gid] = 2u;
+                }
+            }
+            else if (n == 2u && g_gameCopyA[gid] != val && g_gameCopyB[gid] != val)
+                g_gameCopyCount[gid] = 3u;
+        }
+
         // What the game's slots hold now: gid -> geometry, from the pairs of every piece of its three cell slots and its
         // three area slots. An entry is good when it is ours or this; anything else is stale - the game never clears an
         // area's entries (geometry and textures alike) when it unloads it, and reads the next area into that buffer.
@@ -562,6 +601,7 @@ namespace vcs::world_hd
         {
             g_game.clear();
             g_gameCopies.clear();
+            clearGameFlat();
             // the current and the next slots only: the third (level + 0x258 / 0x25C) is the one being read into - its piece
             // pointers are recorded before the asynchronous read lands, over what the buffer held before
             for (uint32_t k = 0; k < 2; ++k)
@@ -581,8 +621,10 @@ namespace vcs::world_hd
                         if (gid == 0 || gid >= tableCount())
                             continue;
                         g_maxGid = std::max(g_maxGid, gid);
-                        g_game.try_emplace(gid, rd32(pairs + j * 8u + 4u));
-                        g_gameCopies.insert(uint64_t(gid) << 32 | rd32(pairs + j * 8u + 4u));
+                        const uint32_t geom = rd32(pairs + j * 8u + 4u);
+                        g_game.try_emplace(gid, geom);
+                        g_gameCopies.insert(uint64_t(gid) << 32 | geom);
+                        recordGameFlat(gid, geom);
                     }
                 }
                 const uint32_t as = rd32(g_level + (k ? 0x254u : 0x24Cu));
@@ -596,8 +638,10 @@ namespace vcs::world_hd
                     continue;
                 for (uint32_t j = 0; j < count; ++j)
                 {
-                    g_game.try_emplace(rd16(pairs + j * 8u), rd32(pairs + j * 8u + 4u));
-                    g_gameCopies.insert(uint64_t(rd16(pairs + j * 8u)) << 32 | rd32(pairs + j * 8u + 4u));
+                    const uint32_t gid = rd16(pairs + j * 8u), geom = rd32(pairs + j * 8u + 4u);
+                    g_game.try_emplace(gid, geom);
+                    g_gameCopies.insert(uint64_t(gid) << 32 | geom);
+                    recordGameFlat(gid, geom);
                 }
             }
             g_gameState = slotState();
@@ -614,6 +658,19 @@ namespace vcs::world_hd
         {
             if (!now)
                 return false;
+            if (flatMapEnabled() && gid < kFlatGids)
+            {
+                if (g_registeredFlat[gid] == now)
+                    return true;
+                const uint8_t n = g_gameCopyCount[gid];
+                if (n == 0u)
+                    return false;
+                if (g_gameCopyA[gid] == now || (n >= 2u && g_gameCopyB[gid] == now))
+                    return true;
+                if (n <= 2u)
+                    return false;
+                return g_gameCopies.count(uint64_t(gid) << 32 | now) != 0;
+            }
             const auto mine = g_registered.find(gid);
             if (mine != g_registered.end() && mine->second == now)
                 return true;
@@ -638,6 +695,8 @@ namespace vcs::world_hd
                 if (now)
                     ++g_reclaimed;
                 g_registered[gid] = geometry;
+                if (gid < kFlatGids)
+                    g_registeredFlat[gid] = geometry;
                 if (const uint32_t packet = rd32(e + 4u))
                 {
                     freePacket(packet, 1u);
@@ -656,7 +715,11 @@ namespace vcs::world_hd
                 const uint32_t e = tableEntry(gid);
                 const auto mine = g_registered.find(gid);
                 if (mine != g_registered.end() && mine->second == geometry)
+                {
                     g_registered.erase(mine);
+                    if (gid < kFlatGids)
+                        g_registeredFlat[gid] = 0u;
+                }
                 if (rd32(e) != geometry)
                     continue; // the game took the entry over
                 const auto game = g_game.find(gid);
@@ -1119,6 +1182,7 @@ namespace vcs::world_hd
             g_empty.clear();
             g_retry.clear();
             g_registered.clear();
+            g_registeredFlat.fill(0u);
             ++g_version;
         }
 
@@ -1433,6 +1497,8 @@ namespace vcs::world_hd
                     wr32(e, mine->second);
                     wr32(e + 8u, c->owner);
                     g_registered[gid] = mine->second;
+                    if (gid < kFlatGids)
+                        g_registeredFlat[gid] = mine->second;
                     ++g_reclaimed;
                     return true;
                 }
@@ -2122,6 +2188,12 @@ namespace vcs::world_hd
         {
             if (!now)
                 return true; // nothing drawn from it
+            if (flatMapEnabled() && gid < kFlatGids)
+            {
+                if (!g_registeredFlat[gid] && g_gameCopyCount[gid] == 0u && !inSlotBuffers(now) && !inArena(now))
+                    return now >= 0x00100000u && now < PS2_GUEST_RAM_SIZE;
+                return good(gid, now);
+            }
             if (!g_registered.count(gid) && !g_game.count(gid) && !inSlotBuffers(now) && !inArena(now))
                 return now >= 0x00100000u && now < PS2_GUEST_RAM_SIZE;
             return good(gid, now);
@@ -2530,6 +2602,7 @@ namespace vcs::world_hd
                     // the level's data is read again: our entries emptied, not handed back to the slots being torn down
                     g_game.clear();
                     g_gameCopies.clear();
+                    clearGameFlat();
                     g_gameState = slotState();
                     dropAll(true);
                 }

@@ -1027,9 +1027,17 @@ namespace vcs::rslworld
         // Step 4 (docs/FULLY_NATIVE.md): the guest pages a marked block is made of - a world REF's payload, a CALLed
         // packet's tags and payloads - with their write-watch generations when it was last copied. Unchanged pages: the
         // block holds the bytes it held then (runtime/ps2_write_watch.h).
+        struct PageGen
+        {
+            uint32_t page = 0;
+            uint32_t gen = 0;
+        };
         struct PageSnapshot
         {
-            std::vector<std::pair<uint32_t, uint32_t>> pages; // page, generation
+            static constexpr uint32_t kInlinePages = 4u;
+            PageGen inlinePages[kInlinePages]{};
+            std::vector<PageGen> extraPages; // overflow when a block spans > 4 pages
+            uint16_t inlineCount = 0;
             bool usable = false;                                // only RAM pages, all seen
             uint32_t units = 0;                                 // its length as copied (8-byte units)
             uint64_t stableSince = 0;                           // the copy (g_chainSeq) since which its pages are unchanged
@@ -1147,9 +1155,16 @@ namespace vcs::rslworld
 
         bool unchanged(const PageSnapshot &snap);
 
+        bool fastSkip() // [gta-recomp] VCS_RSL_FAST_SKIP=0: re-probe g_snapshots and re-check unchanged() in closeBlock
+        {
+            static const bool on = !(std::getenv("VCS_RSL_FAST_SKIP") && *std::getenv("VCS_RSL_FAST_SKIP") == '0');
+            return on;
+        }
+
         // step 4: may this block go uncopied? Its pages unchanged since a copy the worker confirmed its recording for.
         // The fill-in for snapshotKey's Draw: its length as last copied.
-        bool skippable(uint64_t snapshotKey, Kind kind, uint32_t addr, uint32_t &units)
+        bool skippable(uint64_t snapshotKey, Kind kind, uint32_t addr, uint32_t &units, PageSnapshot **snapOut = nullptr,
+                       bool *dirtyOut = nullptr)
         {
             // VCS_RSL_SKIP_KINDS: a bit per Kind (default all)
             static const unsigned kinds = std::getenv("VCS_RSL_SKIP_KINDS") ? unsigned(std::strtoul(std::getenv("VCS_RSL_SKIP_KINDS"), nullptr, 0)) : 0xFu;
@@ -1159,7 +1174,13 @@ namespace vcs::rslworld
             if (!snap)
                 return false;
             snap->seen = g_chainSeq;
-            if (!unchanged(*snap))
+            const bool dirty = !unchanged(*snap);
+            if (fastSkip() && snapOut && dirtyOut)
+            {
+                *snapOut = snap;
+                *dirtyOut = dirty;
+            }
+            if (dirty)
                 return false;
             const uint64_t *c = g_confirmed.find(recordingKey(kind, addr, snap->units));
             if (!c || *c < snap->stableSince)
@@ -1180,9 +1201,30 @@ namespace vcs::rslworld
                 usable = false;
                 return;
             }
+            if (!bytes)
+                return;
             addr &= kRamMask;
-            for (uint32_t p = addr >> ps2writewatch::kPageShift; bytes && p <= (addr + bytes - 1u) >> ps2writewatch::kPageShift; ++p)
-                pages.push_back(p);
+            const uint32_t p0 = addr >> ps2writewatch::kPageShift;
+            const uint32_t p1 = (addr + bytes - 1u) >> ps2writewatch::kPageShift;
+            for (uint32_t p = p0; p <= p1; ++p)
+            {
+                if (pages.size() < 16u)
+                {
+                    bool have = false;
+                    for (uint32_t existing : pages)
+                    {
+                        if (existing == p)
+                        {
+                            have = true;
+                            break;
+                        }
+                    }
+                    if (!have)
+                        pages.push_back(p);
+                }
+                else if (pages.back() != p)
+                    pages.push_back(p);
+            }
         }
 
         // a marked block's page set complete: was it unchanged since its last copy? then remember this copy's
@@ -1190,17 +1232,21 @@ namespace vcs::rslworld
         {
             if (!snap.usable)
                 return false;
-            for (const auto &[page, gen] : snap.pages)
-                if (!ps2writewatch::unchangedSince(page, gen))
+            for (uint32_t i = 0; i < snap.inlineCount; ++i)
+                if (!ps2writewatch::unchangedSince(snap.inlinePages[i].page, snap.inlinePages[i].gen))
+                    return false;
+            for (const PageGen &pg : snap.extraPages)
+                if (!ps2writewatch::unchangedSince(pg.page, pg.gen))
                     return false;
             return true;
         }
 
-        void closeBlock(uint64_t key, std::vector<uint32_t> &pages, bool usable, uint32_t units)
+        void closeBlock(uint64_t key, std::vector<uint32_t> &pages, bool usable, uint32_t units, PageSnapshot *hint = nullptr,
+                        bool hintDirty = false)
         {
             ++g_cleanStats.blocks;
-            PageSnapshot &snap = g_snapshots[key];
-            const bool clean = unchanged(snap) && snap.units == units;
+            PageSnapshot &snap = hint ? *hint : g_snapshots[key];
+            const bool clean = hint ? (!hintDirty && snap.usable && snap.units == units) : (unchanged(snap) && snap.units == units);
             if (snap.usable)
                 g_cleanStats.clean += clean ? 1u : 0u;
             else
@@ -1209,11 +1255,19 @@ namespace vcs::rslworld
                 snap.stableSince = g_chainSeq; // this copy is the first of the bytes it holds now
             snap.seen = g_chainSeq;
             snap.units = units;
-            std::sort(pages.begin(), pages.end());
-            pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
-            snap.pages.clear();
-            for (uint32_t page : pages)
-                snap.pages.push_back({page, ps2writewatch::generation(page)});
+            if (pages.size() >= 16u)
+            {
+                std::sort(pages.begin(), pages.end());
+                pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+            }
+            const uint32_t n = static_cast<uint32_t>(pages.size());
+            const uint32_t inl = std::min(n, PageSnapshot::kInlinePages);
+            snap.inlineCount = static_cast<uint16_t>(inl);
+            for (uint32_t i = 0; i < inl; ++i)
+                snap.inlinePages[i] = {pages[i], ps2writewatch::generation(pages[i])};
+            snap.extraPages.clear();
+            for (uint32_t i = inl; i < n; ++i)
+                snap.extraPages.push_back({pages[i], ps2writewatch::generation(pages[i])});
             snap.usable = usable && ps2writewatch::enabled();
         }
 
@@ -1264,7 +1318,7 @@ namespace vcs::rslworld
                 into.clear();
             }
         }
-        std::unordered_map<uint64_t, bool> g_flatOk;           // model blocks (blockKey): flattenBlock copies them as the walker does
+        FlatMap<uint8_t> g_flatOk;                              // model blocks (blockKey): flattenBlock copies them as the walker does
         uint32_t g_itemFrame = 1, g_itemFrameKicked = 0;       // frames counted at the kick: whose items an item tag names
         bool g_caching = false; // FUN_00240ED8 is caching a sector's packets (they are copied and sent again): no items
         PS2Runtime::RecompiledFunction g_sectorOriginal = nullptr;
@@ -1685,6 +1739,9 @@ namespace vcs::rslworld
         uint32_t g_gapFn = 0, g_gapRa = 0; // (VCS_RSL_GAP_LOG)
         size_t g_currentAtSettle = 0; // g_current's size after the last settle (draws made since: their tags in the gap)
 
+        // VCS_RSL_GAPS=0: no gap captures
+        bool g_gaps = false;
+
         void settleIm2D(uint8_t *rdram, uint32_t sp, uint32_t ra, uint32_t fn)
         {
             if (censusOrigins() && sp != ~0u)
@@ -1692,6 +1749,21 @@ namespace vcs::rslworld
             g_inCapture = g_im2dPending && sp < g_captureSp && (!g_captureDraw || insideDraw(ra)) && (!g_captureBind || insideBind(ra));
             if (g_inCapture)
                 return;
+            if (!g_im2dPending)
+            {
+                const uint32_t cur = rd32(rdram, kPacketCursor);
+                if (!g_gaps || (!g_log && (g_caching || g_materialCaching || cur == g_lastCursor)))
+                {
+                    if (g_materialCacheEnds)
+                    {
+                        g_materialCaching = false;
+                        g_materialCacheEnds = false;
+                    }
+                    g_lastCursor = cur;
+                    g_currentAtSettle = g_current.size();
+                    return;
+                }
+            }
             g_gapFn = fn;
             g_gapRa = ra;
             if (g_im2dPending)
@@ -1706,9 +1778,6 @@ namespace vcs::rslworld
             g_lastCursor = rd32(rdram, kPacketCursor);
             g_currentAtSettle = g_current.size();
         }
-
-        // VCS_RSL_GAPS=0: no gap captures
-        bool g_gaps = false;
 
         // step 5h: what any code wrote since the last hook point - a region like an emitter's (not while a cache is being
         // filled: those bytes are copied and sent again; not from a cursor outside this frame's half)
@@ -1870,7 +1939,7 @@ namespace vcs::rslworld
                         stopOwn = own;
                         if (!calls && !own)
                             why = "call"; // VCS_RSL_CAPTURE_CALLS=0: other CALLs end the region (as before step 5f's end)
-                        else if ((addr & 0xF0000000u) != 0u || !g_flatOk.count(blockKey(d.kind, d.addr, 0u)))
+                        else if ((addr & 0xF0000000u) != 0u || !g_flatOk.find(blockKey(d.kind, d.addr, 0u)))
                             why = "call"; // not known to be copied as flattenBlock copies it
                         else if (at + 16u + qwc * 16u > cursor)
                             why = "shape";
@@ -1943,6 +2012,21 @@ namespace vcs::rslworld
                 run = next;
             }
             const auto taken = [&] { // the draws whose tags went into items: the walker will not see them
+                if (erase.empty())
+                    return;
+                if (erase.size() == 1u)
+                {
+                    if (erase[0] + 1u == g_current.size())
+                        g_current.pop_back();
+                    else if (erase[0] < g_current.size())
+                        g_current.erase(g_current.begin() + static_cast<ptrdiff_t>(erase[0]));
+                    return;
+                }
+                if (erase.back() + 1u == g_current.size() && erase.back() - erase.front() + 1u == erase.size())
+                {
+                    g_current.resize(erase.front());
+                    return;
+                }
                 std::sort(erase.begin(), erase.end());
                 for (size_t k = erase.size(); k-- > 0;)
                     if (erase[k] < g_current.size())
@@ -2020,7 +2104,7 @@ namespace vcs::rslworld
                 ++st.caching; // the packets are copied into the sector's cache: the packet path
                 return false;
             }
-            if (kind != World && !g_flatOk.count(blockKey(kind, addr, 0u)))
+            if (kind != World && !g_flatOk.find(blockKey(kind, addr, 0u)))
             {
                 ++st.unknown; // not yet seen copied by the walker as flattenBlock copies it
                 return false;
@@ -2217,7 +2301,9 @@ namespace vcs::rslworld
                 Draw &d = it.d;
                 const uint64_t snapshotKey = d.kind == World ? blockKey(World, d.addr, d.qwc) : blockKey(d.kind, d.addr, 0u);
                 uint32_t units = 0;
-                if (skippable(snapshotKey, d.kind, d.addr, units))
+                PageSnapshot *snap = nullptr;
+                bool snapDirty = false;
+                if (skippable(snapshotKey, d.kind, d.addr, units, &snap, &snapDirty))
                 {
                     d.units = units;
                     if (!g_skipVerify)
@@ -2249,7 +2335,7 @@ namespace vcs::rslworld
                 }
                 it.blockBytes = static_cast<uint32_t>(table.arena.size()) - it.blockAt;
                 it.rasterCount = static_cast<uint32_t>(table.itemRasters.size()) - it.rastersAt;
-                closeBlock(snapshotKey, pages, usable, it.blockBytes / 8u);
+                closeBlock(snapshotKey, pages, usable, it.blockBytes / 8u, snap, snapDirty);
                 ++g_itemStats.copied;
             }
         }
@@ -2288,7 +2374,7 @@ namespace vcs::rslworld
         void noteFlattenable(uint64_t key, uint32_t units)
         {
             const Kind kind = static_cast<Kind>(key >> 56);
-            if (!g_items || (kind != Model && kind != ModelB && kind != OtherCall) || g_flatOk.count(key))
+            if (!g_items || (kind != Model && kind != ModelB && kind != OtherCall) || g_flatOk.find(key))
                 return; // (step 5f: other calls too - captured regions take them as blocks)
             thread_local std::vector<uint8_t> flat;
             thread_local std::vector<uint32_t> pages;
@@ -2297,7 +2383,7 @@ namespace vcs::rslworld
             bool usable = true;
             const uint32_t addr = static_cast<uint32_t>(key >> 24) & kRamMask;
             if (flattenBlock(g_rdram, addr, flat, pages, usable, nullptr) && flat.size() == size_t(units) * 8u && usable)
-                g_flatOk[key] = true;
+                g_flatOk[key] = 1u;
         }
 
         // VCS_RSL_WORLD_LOG: the game thread's time per chain from its first tag to its hand-over (walk, copy, the items'
@@ -2769,6 +2855,12 @@ namespace vcs::rslworld
             r.qwords += qwc;
         }
 
+        bool slowLogEnabled()
+        {
+            static const bool on = std::getenv("VCS_RSL_SLOW_LOG") != nullptr;
+            return on;
+        }
+
         uint32_t observe(uint32_t tagAddr, uint32_t id, uint32_t tagTarget, uint32_t dataAddr, uint32_t qwc, uint64_t vifCodes,
                          uint32_t flatOffset, bool chainStart)
         {
@@ -2799,7 +2891,8 @@ namespace vcs::rslworld
             }
             if (chainStart)
             {
-                g_chainStartAt = ps2x::hostNow();
+                const bool timeChain = g_log || slowLogEnabled();
+                g_chainStartAt = timeChain ? ps2x::hostNow() : std::chrono::steady_clock::time_point{};
                 g_chainResolveMs = 0.0;
                 g_building = ChainTable{};
                 g_building.seq = ++g_chainSeq;
@@ -2829,12 +2922,11 @@ namespace vcs::rslworld
                     g_building.itemFrame = g_itemFrameKicked;
                     g_itemsKicked.clear();
                     g_arenaKicked.clear();
-                    const auto t0 = ps2x::hostNow();
+                    const auto t0 = timeChain ? ps2x::hostNow() : std::chrono::steady_clock::time_point{};
                     resolveItems(g_building);
-                    const double ms = std::chrono::duration<double, std::milli>(ps2x::hostNow() - t0).count();
+                    const double ms = timeChain ? std::chrono::duration<double, std::milli>(ps2x::hostNow() - t0).count() : 0.0;
                     g_chainResolveMs = ms;
-                    static const bool slowLog = std::getenv("VCS_RSL_SLOW_LOG") != nullptr;
-                    if (slowLog && ms > 3.0)
+                    if (slowLogEnabled() && ms > 3.0)
                     {
                         uint64_t refBytes = 0;
                         uint32_t maxQwc = 0, maxRefs = 0;
@@ -2877,7 +2969,9 @@ namespace vcs::rslworld
                     ++g_next;
                     const uint64_t snapshotKey = blockKey(World, want->addr, qwc);
                     uint32_t units = 0;
-                    if (!g_openBlock.open && skippable(snapshotKey, World, want->addr, units))
+                    PageSnapshot *snap = nullptr;
+                    bool snapDirty = false;
+                    if (!g_openBlock.open && skippable(snapshotKey, World, want->addr, units, &snap, &snapDirty))
                     {
                         Draw d = *want;
                         d.units = units;
@@ -2893,10 +2987,11 @@ namespace vcs::rslworld
                             const uint32_t m = mark(d);
                             if (m)
                             {
-                                std::vector<uint32_t> pages;
+                                thread_local std::vector<uint32_t> pages;
+                                pages.clear();
                                 bool usable = true;
                                 addPages(pages, usable, dataAddr, qwc * 16u);
-                                closeBlock(snapshotKey, pages, usable, qwc * 2u);
+                                closeBlock(snapshotKey, pages, usable, qwc * 2u, snap, snapDirty);
                             }
                             return m;
                         }
@@ -2904,10 +2999,11 @@ namespace vcs::rslworld
                     const uint32_t m = mark(*want);
                     if (m && !g_openBlock.open)
                     {
-                        std::vector<uint32_t> pages;
+                        thread_local std::vector<uint32_t> pages;
+                        pages.clear();
                         bool usable = true;
                         addPages(pages, usable, dataAddr, qwc * 16u);
-                        closeBlock(snapshotKey, pages, usable, qwc * 2u);
+                        closeBlock(snapshotKey, pages, usable, qwc * 2u, snap, snapDirty);
                     }
                     return m;
                 }
@@ -2983,7 +3079,7 @@ namespace vcs::rslworld
         thread_local std::chrono::steady_clock::time_point t_chainStart;
         void processing(const void *key, bool begin)
         {
-            static const bool slowLog = std::getenv("VCS_RSL_SLOW_LOG") != nullptr;
+            const bool slowLog = slowLogEnabled();
             if (slowLog && !begin)
             {
                 const double ms = std::chrono::duration<double, std::milli>(ps2x::hostNow() - t_chainStart).count();
@@ -3019,7 +3115,8 @@ namespace vcs::rslworld
             }
             t_chain = static_cast<const uint8_t *>(key);
             t_seen.clear();
-            t_chainStart = ps2x::hostNow();
+            if (slowLog)
+                t_chainStart = ps2x::hostNow();
             ++g_measure.chains;
             g_measure.chainBytes += g_lastChainBytes.load(std::memory_order_relaxed);
             std::lock_guard<std::mutex> lock(g_tablesMutex);

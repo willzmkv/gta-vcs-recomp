@@ -621,6 +621,112 @@ namespace GSMem
         return writeRect<P4>(PageTableP4, data, bp, bw, x, y, w, h, [src](u32 i) { return static_cast<u8>((src[i >> 1] >> ((i & 1u) * 4u)) & 0x0Fu); });
     }
 
+    namespace
+    {
+        inline u32 applyTexaRect(u8 psm, u32 texel, u8 ta0, u8 ta1, u8 aem)
+        {
+            if (psm == 0x00u /* GS_PSM_CT32 */ || psm == 0x30u /* GS_PSM_Z32 */)
+                return texel;
+            const bool rgbZero = (texel & 0x00FFFFFFu) == 0u;
+            u8 a = static_cast<u8>((texel >> 24) & 0xFFu);
+            if (psm == 0x01u /* GS_PSM_CT24 */)
+                a = (aem && rgbZero) ? 0u : ta0;
+            else if (psm == 0x02u /* GS_PSM_CT16 */ || psm == 0x0Au /* GS_PSM_CT16S */)
+                a = (a & 0x80u) ? ta1 : ((aem && rgbZero) ? 0u : ta0);
+            return (texel & 0x00FFFFFFu) | (static_cast<u32>(a) << 24);
+        }
+
+        template <PixelStorageMode psm>
+        bool readRectFast(const typename PixelStorageTraits<psm>::PageLookupTableT& table, u32 rawPsm, const u8* data, size_t dataBytes,
+                          bool wrapVram, u32 bp, u32 bw, u32 w, u32 h, const u32* palette, u8 ta0, u8 ta1, u8 aem, u32* out)
+        {
+            static const bool ok = sliceMatches<psm>(table);
+            if (!ok || w == 0u || h == 0u)
+                return ok;
+            using T = PixelStorageTraits<psm>;
+            constexpr auto pe = T::PageExtent();
+            constexpr u32 ppp = static_cast<u32>(T::PixelsPerPage());
+            const u32 blockMod = bp % static_cast<u32>(T::BlocksPerPage());
+            const u32 blockBase = blockMod * static_cast<u32>(T::PixelsPerBlock());
+            constexpr size_t elemSize = sizeof(typename T::PackedT);
+            constexpr u32 wrapMask = static_cast<u32>(MEMORY_SIZE - elemSize);
+            if (!wrapVram)
+            {
+                const u32 maxPage = static_cast<u32>(T::PageId(bp, bw, w - 1u, h - 1u));
+                const u32 pagesNeeded = maxPage + (blockMod ? 2u : 1u);
+                if (static_cast<uint64_t>(pagesNeeded) * GS_PAGE_SIZE > dataBytes)
+                    return false;
+            }
+            else if (dataBytes < MEMORY_SIZE)
+                return false;
+
+            const u32 pageStride = static_cast<u32>(T::PageId(0u, bw, 0u, pe.y));
+            const u32 rowBase0 = static_cast<u32>(T::PageId(bp, bw, 0u, 0u)) * ppp + blockBase;
+            u32 dst = 0u;
+            for (u32 y = 0u; y < h; ++y)
+            {
+                const auto& row = table[0][y % pe.y];
+                const u32 rowBase = rowBase0 + (y / pe.y) * pageStride * ppp;
+                for (u32 x = 0u; x < w;)
+                {
+                    const u32 pageEnd = std::min(w, (x / static_cast<u32>(pe.x) + 1u) * static_cast<u32>(pe.x));
+                    const u32 base = rowBase + (x / static_cast<u32>(pe.x)) * ppp;
+                    for (; x < pageEnd; ++x, ++dst)
+                    {
+                        const u32 pixelAddr = base + row[x % pe.x];
+                        const u32 bits = pixelAddr * static_cast<u32>(UnpackedBitWidth(psm)) + static_cast<u32>(T::BitOffset());
+                        const u32 byteAddr = wrapVram ? ((bits >> 3) & wrapMask) : (bits >> 3);
+                        const u32 shift = bits & 7u;
+                        typename T::PackedT v;
+                        std::memcpy(&v, data + byteAddr, elemSize);
+                        if constexpr (psm == C32 || psm == Z32)
+                            out[dst] = v;
+                        else if constexpr (psm == C24 || psm == Z24)
+                            out[dst] = applyTexaRect(rawPsm, v & 0x00FFFFFFu, ta0, ta1, aem);
+                        else if constexpr (psm == C16 || psm == C16S || psm == Z16 || psm == Z16S)
+                        {
+                            const u32 r = ((v >> 0) & 0x1Fu) << 3;
+                            const u32 g = ((v >> 5) & 0x1Fu) << 3;
+                            const u32 b = ((v >> 10) & 0x1Fu) << 3;
+                            const u32 a = ((v >> 15) & 0x01u) << 7;
+                            out[dst] = applyTexaRect(rawPsm, r | (g << 8) | (b << 16) | (a << 24), ta0, ta1, aem);
+                        }
+                        else if constexpr (psm == P8 || psm == P8H)
+                            out[dst] = palette[v & 0xFFu];
+                        else
+                            out[dst] = palette[(v >> shift) & 0x0Fu];
+                    }
+                }
+            }
+            return true;
+        }
+    }
+
+    bool ReadRectRGBA(u32 psm, u32 bp, u32 bw, u32 w, u32 h, const u8* data, size_t dataBytes,
+                      bool wrapVram, const u32* palette, u8 ta0, u8 ta1, u8 aem, u32* out)
+    {
+        if (!data || !out)
+            return false;
+        const u32 rawPsm = psm & 0x3Fu;
+        switch (static_cast<PixelStorageMode>(rawPsm))
+        {
+        case C32: return readRectFast<C32>(PageTableC32, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case C24: return readRectFast<C24>(PageTableC32, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case C16: return readRectFast<C16>(PageTableC16, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case C16S: return readRectFast<C16S>(PageTableC16S, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case P8: return palette && readRectFast<P8>(PageTableP8, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case P4: return palette && readRectFast<P4>(PageTableP4, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case P8H: return palette && readRectFast<P8H>(PageTableC32, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case P4HL: return palette && readRectFast<P4HL>(PageTableC32, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case P4HH: return palette && readRectFast<P4HH>(PageTableC32, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case Z32: return readRectFast<Z32>(PageTableZ32, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case Z24: return readRectFast<Z24>(PageTableZ32, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case Z16: return readRectFast<Z16>(PageTableZ16, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        case Z16S: return readRectFast<Z16S>(PageTableZ16S, rawPsm, data, dataBytes, wrapVram, bp, bw, w, h, palette, ta0, ta1, aem, out);
+        default: return false;
+        }
+    }
+
     u32 ReadCT32(u8* data, u32 bp, u32 bw, u32 x, u32 y)
     {
         return PixelStorageTraits<C32>::Read(PageTableC32, data, bp, bw, x, y);

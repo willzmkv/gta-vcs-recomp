@@ -560,10 +560,18 @@ namespace
         uint32_t w = 0, h = 0;
         bool mipChain = false; // anisotropic filtering: buildMipChain there
         std::vector<uint32_t> pixels, mips;
-        // [gta-recomp] a pack DDS made from its stored levels (levels: how many - 1 without anisotropic filtering)
+        // [gta-recomp] deferred VRAM decode on helper thread (PS2X_HW_EARLY_DECODE)
+        bool deferredDecode = false;
+        GSDrawState decodeState{};
+        bool hasPalette = false;
+        uint32_t palette[256]{};
+        std::vector<uint8_t> vramSlice;
+        // [gta-recomp] a pack DDS/PNG made from its stored levels or pixels (levels: 1 without anisotropic filtering)
         std::shared_ptr<const render::ReplacementImage> replacement;
         uint32_t levels = 1;
         size_t bytes = 0;
+        bool stochastic = false; // [gta-recomp] preserved across deferredDecode / helper jobs
+        bool checkStochastic = false; // [gta-recomp] run isStochasticSurface on helper thread
         std::unique_ptr<rhi::Texture> made;
         std::atomic<bool> done{false};
     };
@@ -900,6 +908,15 @@ namespace
         static const bool on = std::getenv("PS2X_GPU_TIMING") != nullptr;
         return on;
     }
+    // [gta-recomp] PS2X_HW_EXEC_CACHE=0: disable RhiExecutor per-draw direct-mapped lookup caches and constant shadow buffers
+    bool execCache()
+    {
+        static const bool on = [] {
+            const char *e = std::getenv("PS2X_HW_EXEC_CACHE");
+            return !(e && e[0] == '0');
+        }();
+        return on;
+    }
 
     void pageSize(uint32_t psm, uint32_t &w, uint32_t &h)
     {
@@ -1097,6 +1114,13 @@ namespace
 
     class RhiExecutor
     {
+        struct ConstShadow // [gta-recomp] fixed shadow for updateConstants (no vector alloc/copy)
+        {
+            alignas(16) uint8_t data[512]{};
+            size_t size = 0;
+            bool valid = false;
+        };
+
     public:
         RhiExecutor(rhi::Device &device, uint32_t scale, uint32_t msaa, uint32_t anisotropy)
             : m_dev(device), m_scale(scale), m_msaa(msaa), m_anisotropy(anisotropy > 1u ? anisotropy : 0u)
@@ -1174,6 +1198,29 @@ namespace
         void execute(const Frame &f, bool logDraws)
         {
             m_execWide = f.shown != 0; // [gta-recomp] the shape the frame's drawing is for (shapeOf)
+            resetExecStateCache();
+            static const bool uploadLog = std::getenv("PS2X_HW_UPLOAD_LOG") != nullptr;
+            if (uploadLog)
+            {
+                static uint64_t frames = 0, vbBytes = 0, natBytes = 0, meshN = 0, meshBytes = 0, instN = 0, instBytes = 0;
+                static auto since = ps2x::hostNow();
+                ++frames;
+                vbBytes += f.vertices.size() * sizeof(HwVertex);
+                natBytes += f.nativeBytes.size();
+                for (const MeshCreate &m : f.meshes)
+                    if (!m.bytes.empty()) { ++meshN; meshBytes += m.bytes.size(); }
+                for (const NativeDrawCmd &nd : f.nativeDraws)
+                    if (nd.instanceCount) { ++instN; instBytes += size_t(nd.instanceCount) * GSNativeDraw::kInstanceFloats * sizeof(float); }
+                if (ps2x::hostNow() - since >= std::chrono::seconds(5))
+                {
+                    const double d = static_cast<double>(std::max<uint64_t>(1, frames));
+                    std::fprintf(stderr, "[gs-upload] per frame: vb=%.0fKB nat=%.0fKB mesh=%.1f(%.0fKB) inst=%.1f(%.0fKB)\n",
+                                 vbBytes / 1024.0 / d, natBytes / 1024.0 / d, meshN / d, meshBytes / 1024.0 / d,
+                                 instN / d, instBytes / 1024.0 / d);
+                    frames = vbBytes = natBytes = meshN = meshBytes = instN = instBytes = 0;
+                    since = ps2x::hostNow();
+                }
+            }
             m_dev.pushMarker("gs frame");
             const size_t bytes = f.vertices.size() * sizeof(HwVertex);
             if (bytes)
@@ -1222,10 +1269,10 @@ namespace
                     d.name = t.replacement ? "replacement texture" : "gs texture"; // [gta-recomp]
                     d.mipLevels = m_anisotropy ? 0u : 1u; // [gta-recomp] anisotropic filtering samples a mip chain
                     const auto createStart = ps2x::hostNow(); // [gta-recomp] tex_create_us / tex_kb
-                    if (t.early) // [gta-recomp] made on a helper thread (makeTextureEarly / makeReplacementEarly)
+                    if (t.early) // [gta-recomp] made on a helper thread (makeTextureEarly / makeReplacementEarly / makeDecodeEarly)
                     {
                         t.early->done.wait(false);
-                        m_textures[t.key] = {std::move(t.early->made), t.stochastic};
+                        m_textures[t.key] = {std::move(t.early->made), t.early->stochastic};
                     }
                     else if (t.replacement && t.replacement->dds()) // [gta-recomp] a pack DDS: its levels as stored (level 0
                     {                                          // alone without anisotropic filtering, which reads mips)
@@ -1250,6 +1297,10 @@ namespace
                     }
                     else
                         m_textures[t.key] = {m_dev.createTexture(d, t.pixels.data(), t.w * 4u), t.stochastic};
+                    {
+                        const TexEntry &e = m_textures[t.key];
+                        m_texCache.put({t.key, e.tex.get(), e.stochastic, true});
+                    }
                     ps2perf::add(ps2perf::Counter::TexCreateUs, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                                                     ps2x::hostNow() - createStart).count()));
                     ps2perf::add(ps2perf::Counter::TexKBytes,
@@ -1275,7 +1326,9 @@ namespace
                 case CmdType::TexDelete:
                 {
                     const auto deleteStart = ps2x::hostNow(); // [gta-recomp] tex_create_us: releases too
-                    m_textures.erase(f.texDeletes[c.index]);
+                    const uint64_t k = f.texDeletes[c.index];
+                    m_textures.erase(k);
+                    m_texCache.erase(k);
                     ps2perf::add(ps2perf::Counter::TexCreateUs, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                                                     ps2x::hostNow() - deleteStart).count()));
                     break;
@@ -1284,6 +1337,7 @@ namespace
                     endPass();
                     dropRt(f.rtDrops[c.index]);
                     m_hud.erase(f.rtDrops[c.index]);
+                    m_lastHudSceneFbp = ~0u;
                     break;
                 case CmdType::RtUpload:
                     hudSceneDraw(f.rtUploads[c.index].fbp);
@@ -1303,6 +1357,7 @@ namespace
                         logDraw(f, d);
                     }
                     m_shapeOf[d.s.fbp] = m_execWide; // [gta-recomp] the pause menu draws only into the layer
+                    m_lastHudSceneFbp = ~0u;
                     HudLayer &layer = m_hud[d.s.fbp];
                     if (layer.stale || layer.closed)
                     {
@@ -1371,12 +1426,18 @@ namespace
                     const MeshCreate &m = f.meshes[c.index];
                     if (m.bytes.empty()) // [gta-recomp] a merged native group's mesh that was cached (nativeMerge)
                         break;
-                    m_meshes[m.key] = m_dev.createBuffer({m.bytes.size(), rhi::BufferUsage::Vertex, false, "gs native mesh"}, m.bytes.data());
+                    auto buf = m_dev.createBuffer({m.bytes.size(), rhi::BufferUsage::Vertex, false, "gs native mesh"}, m.bytes.data());
+                    m_meshCache.put({m.key, buf.get(), true});
+                    m_meshes[m.key] = std::move(buf);
                     break;
                 }
                 case CmdType::MeshDelete:
-                    m_meshes.erase(f.meshDeletes[c.index]);
+                {
+                    const uint64_t k = f.meshDeletes[c.index];
+                    m_meshes.erase(k);
+                    m_meshCache.erase(k);
                     break;
+                }
                 case CmdType::NativeDraw:
                 {
                     const NativeDrawCmd &n = f.nativeDraws[c.index];
@@ -1836,6 +1897,7 @@ namespace
         {
             if (rt.color && rt.w >= w && rt.h >= h && rt.scale == s && rt.samples == samples)
                 return;
+            invalidateTargetCache();
             Rt grown;
             grown.w = std::max(rt.w, w);
             grown.h = std::max(rt.h, h);
@@ -1886,6 +1948,7 @@ namespace
         // [gta-recomp] a dropped target: its texture kept for reuse, its size remembered for its re-creation
         void dropRt(uint32_t fbp)
         {
+            invalidateTargetCache();
             auto it = m_rts.find(fbp);
             if (it == m_rts.end())
                 return;
@@ -1903,6 +1966,7 @@ namespace
             Depth &d = m_depth[zbp | (frame ? 0x80000000u : 0u) | (samples > 1u ? 0x40000000u : 0u)];
             if (d.tex && d.w >= w && d.h >= h && d.scale == s)
                 return d;
+            invalidateTargetCache();
             d.w = std::max(d.w, w);
             d.h = std::max(d.h, h);
             d.scale = s;
@@ -2002,6 +2066,9 @@ namespace
                                  (static_cast<uint32_t>(b.op) << 9) | (uint32_t(mask & 0xF) << 12) | ((depthTest ? 1u : 0u) << 16) |
                                  ((ztst & 3u) << 17) | ((zwrite ? 1u : 0u) << 19) | (uint32_t(mode & 7u) << 20) | ((dual ? 1u : 0u) << 23) |
                                  (uint32_t(sample & 7u) << 24);
+            PipeSlot &ps = m_pipeCache[(key ^ (key >> 12)) & 255u];
+            if (execCache() && ps.valid && ps.key == key)
+                return *ps.pipe;
             std::unique_ptr<rhi::Pipeline> &p = m_drawPipelines[key];
             if (!p)
             {
@@ -2070,6 +2137,7 @@ namespace
                                  std::chrono::duration<double, std::milli>(ps2x::hostNow() - made).count(),
                                  m_drawPipelines.size());
             }
+            ps = {key, p.get(), true};
             return *p;
         }
 
@@ -2678,6 +2746,10 @@ namespace
 
         void hudSceneDraw(uint32_t fbp)
         {
+            if (execCache() && fbp == m_lastHudSceneFbp && m_execWide == m_lastHudSceneWide)
+                return;
+            m_lastHudSceneFbp = fbp;
+            m_lastHudSceneWide = m_execWide;
             m_shapeOf[fbp] = m_execWide; // [gta-recomp] drawn for the executing frame's shape
             if (!m_hud.empty())
                 if (auto it = m_hud.find(fbp); it != m_hud.end())
@@ -2690,6 +2762,7 @@ namespace
             const size_t bytes = layer.vertices.size() * sizeof(HwVertex);
             if (!bytes || !m_display)
                 return;
+            resetExecStateCache();
             const std::vector<HwVertex> *vertices = &layer.vertices;
             if (displayX || displayY)
             {
@@ -2742,14 +2815,14 @@ namespace
         // push per draw on Vulkan and a Map(DISCARD) on D3D11, and on the GPU a constant reload (PERFORMANCE.md 26).
         // `last` holds what the buffer has now. PS2X_HW_CB_DEDUPE=0: every draw writes, as before; PS2X_HW_CB_LOG=1:
         // writes and skips every 5 s.
-        void updateConstants(rhi::Buffer &buffer, const void *data, size_t size, std::vector<uint8_t> &last, int which)
+        void updateConstants(rhi::Buffer &buffer, const void *data, size_t size, ConstShadow &last, int which)
         {
             static const bool dedupe = [] {
                 const char *e = std::getenv("PS2X_HW_CB_DEDUPE");
                 return !(e && *e == '0');
             }();
             static const bool log = std::getenv("PS2X_HW_CB_LOG") != nullptr;
-            const bool same = dedupe && last.size() == size && std::memcmp(last.data(), data, size) == 0;
+            const bool same = dedupe && last.valid && last.size == size && std::memcmp(last.data, data, size) == 0;
             if (log)
             {
                 static uint64_t n[2][2] = {};
@@ -2767,7 +2840,14 @@ namespace
             if (same)
                 return;
             m_dev.updateBuffer(buffer, data, size);
-            last.assign(static_cast<const uint8_t *>(data), static_cast<const uint8_t *>(data) + size);
+            if (size <= sizeof(last.data))
+            {
+                std::memcpy(last.data, data, size);
+                last.size = size;
+                last.valid = true;
+            }
+            else
+                last.valid = false;
         }
 
         void draw(const HwState &s, uint32_t first, uint32_t count, const NativeDrawCmd *native, const LayerTarget *layer = nullptr)
@@ -2783,8 +2863,14 @@ namespace
             }
             else if (native)
             {
-                auto mesh = m_meshes.find(native->meshKey);
-                vertices = mesh != m_meshes.end() ? mesh->second.get() : nullptr;
+                if (const MeshSlot *ms = execCache() ? m_meshCache.find(native->meshKey) : nullptr)
+                    vertices = ms->buf;
+                else
+                {
+                    auto mesh = m_meshes.find(native->meshKey);
+                    vertices = mesh != m_meshes.end() ? mesh->second.get() : nullptr;
+                    m_meshCache.put({native->meshKey, vertices, true});
+                }
                 if (vertices)
                     updateConstants(*m_worldCb, native->constants, sizeof(native->constants), m_worldCbLast, 1);
             }
@@ -2803,6 +2889,16 @@ namespace
                 targetW = static_cast<float>(target->color->desc().width) / target->scaleX;
                 targetH = static_cast<float>(target->color->desc().height) / target->scaleY;
             }
+            else if (execCache() && m_cachedRt && m_cachedRtFbp == s.fbp && m_cachedRtFbw == s.fbw &&
+                     (s.scy1 + 1u) <= m_cachedRt->h && m_cachedDepthOn == depthOn && (!depthOn || m_cachedZbp == s.zbp))
+            {
+                m_cachedRt->dirty = true;
+                colorTarget = m_cachedRt->color.get();
+                depthTarget = m_cachedDepth ? m_cachedDepth->tex.get() : nullptr;
+                targetW = static_cast<float>(m_cachedRt->w);
+                targetH = static_cast<float>(m_cachedRt->h);
+                targetScale = m_cachedRt->scale;
+            }
             else
             {
                 Rt &rt = rtFor(s.fbp, s.fbw, s.scy1 + 1u);
@@ -2819,6 +2915,12 @@ namespace
                 targetW = static_cast<float>(rt.w);
                 targetH = static_cast<float>(rt.h);
                 targetScale = rt.scale;
+                m_cachedRtFbp = s.fbp;
+                m_cachedRtFbw = s.fbw;
+                m_cachedZbp = s.zbp;
+                m_cachedDepthOn = depthOn;
+                m_cachedRt = &rt;
+                m_cachedDepth = depth;
             }
 
             // texture: decoded VRAM, another render target, or this target itself (sampled from a copy)
@@ -2848,11 +2950,20 @@ namespace
                 }
                 else
                 {
-                    auto it = m_textures.find(s.texKey);
-                    if (it != m_textures.end())
+                    if (const TexSlot *ts = execCache() ? m_texCache.find(s.texKey) : nullptr)
                     {
-                        tex = it->second.tex.get();
-                        texStochastic = it->second.stochastic;
+                        tex = ts->tex;
+                        texStochastic = ts->stochastic;
+                    }
+                    else
+                    {
+                        auto it = m_textures.find(s.texKey);
+                        if (it != m_textures.end())
+                        {
+                            tex = it->second.tex.get();
+                            texStochastic = it->second.stochastic;
+                        }
+                        m_texCache.put({s.texKey, tex, texStochastic, true});
                     }
                 }
             }
@@ -3090,7 +3201,85 @@ namespace
         bool m_ready = false;
         std::unique_ptr<rhi::Buffer> m_vb, m_drawCb, m_quadCb, m_worldCb;
         std::unique_ptr<rhi::Buffer> m_instanceCb; // [gta-recomp] an instanced native draw's rows (gs_draw.hlsl b2)
-        std::vector<uint8_t> m_drawCbLast, m_worldCbLast; // [gta-recomp] updateConstants: what the two buffers hold
+        ConstShadow m_drawCbLast, m_worldCbLast; // [gta-recomp] updateConstants: what the two buffers hold
+        struct PipeSlot
+        {
+            uint32_t key = 0;
+            rhi::Pipeline *pipe = nullptr;
+            bool valid = false;
+        };
+        PipeSlot m_pipeCache[256]{};
+        template <typename Slot, uint32_t Sets>
+        struct Cache2Way // [gta-recomp] 2-way set-associative hot-path lookup (PS2X_HW_EXEC_CACHE=0 disables)
+        {
+            Slot sets[Sets][2]{};
+            static uint32_t bucket(uint64_t k)
+            {
+                k ^= k >> 33;
+                k *= 0xFF51AFD7ED558CCDull;
+                return static_cast<uint32_t>(k >> 33) & (Sets - 1u);
+            }
+            const Slot *find(uint64_t k)
+            {
+                Slot *s = sets[bucket(k)];
+                if (s[0].valid && s[0].key == k)
+                    return &s[0];
+                if (s[1].valid && s[1].key == k)
+                {
+                    std::swap(s[0], s[1]);
+                    return &s[0];
+                }
+                return nullptr;
+            }
+            void put(const Slot &v)
+            {
+                Slot *s = sets[bucket(v.key)];
+                if (!(s[0].valid && s[0].key == v.key))
+                    s[1] = s[0];
+                s[0] = v;
+            }
+            void erase(uint64_t k)
+            {
+                Slot *s = sets[bucket(k)];
+                if (s[0].valid && s[0].key == k)
+                    s[0].valid = false;
+                if (s[1].valid && s[1].key == k)
+                    s[1].valid = false;
+            }
+        };
+        struct MeshSlot
+        {
+            uint64_t key = 0;
+            rhi::Buffer *buf = nullptr;
+            bool valid = false;
+        };
+        Cache2Way<MeshSlot, 8192u> m_meshCache;
+        struct TexSlot
+        {
+            uint64_t key = 0;
+            rhi::Texture *tex = nullptr;
+            bool stochastic = false;
+            bool valid = false;
+        };
+        Cache2Way<TexSlot, 4096u> m_texCache;
+        uint32_t m_lastHudSceneFbp = ~0u;
+        bool m_lastHudSceneWide = false;
+        uint32_t m_cachedRtFbp = ~0u, m_cachedRtFbw = 0, m_cachedZbp = ~0u;
+        bool m_cachedDepthOn = false;
+        Rt *m_cachedRt = nullptr;
+        Depth *m_cachedDepth = nullptr;
+        void invalidateTargetCache()
+        {
+            m_cachedRt = nullptr;
+            m_cachedDepth = nullptr;
+        }
+        void resetExecStateCache()
+        {
+            m_drawCbLast.valid = false;
+            m_worldCbLast.valid = false;
+            m_lastHudSceneFbp = ~0u;
+            invalidateTargetCache();
+        }
         std::unordered_map<uint64_t, std::unique_ptr<rhi::Buffer>> m_meshes; // native draws' vertex data
         std::unique_ptr<rhi::Buffer> m_nativeVb; // transient native vertices of the frame
         size_t m_nativeVbCapacity = 0;
@@ -4893,6 +5082,7 @@ namespace
             m_replacementAliases.clear();
             m_replacementSizes.clear();
             m_replacementStochastic.clear();
+            m_pendingReplacementStochastic.clear();
             m_replacementBytes = 0;
             ++m_texStateVersion;
             ++m_texEvictions;
@@ -4923,11 +5113,19 @@ namespace
                         t.stochastic = isStochasticSurface(image->pixels, t.w, t.h);
                     else if (auto sit = m_replacementStochastic.find(image->id); sit != m_replacementStochastic.end())
                         t.stochastic = sit->second;
+                    else if (auto pit = m_pendingReplacementStochastic.find(image->id); pit != m_pendingReplacementStochastic.end())
+                    {
+                        pit->second->done.wait(false);
+                        t.stochastic = pit->second->stochastic;
+                        m_replacementStochastic[image->id] = t.stochastic;
+                        m_pendingReplacementStochastic.erase(pit);
+                    }
                     const size_t bytes = image->gpuBytes(m_anisotropy != 0); // [gta-recomp] a DDS's own size (block-compressed)
-                    // [gta-recomp] a DDS is made by the helper threads (makeTextureEarly's): a burst of pack textures - large
-                    // BC7 chains with anisotropic filtering - held the main thread for 4-12 ms (the stutter rig, T10). A PNG
-                    // still gets its chain from the GPU there (GenerateMips: the immediate context).
-                    if (image->dds())
+                    static const bool earlyPng = [] {
+                        const char *e = std::getenv("PS2X_HW_EARLY_PNG");
+                        return !(e && *e == '0');
+                    }();
+                    if (image->dds() || earlyPng)
                         makeReplacementEarly(t, image);
                     t.replacement = std::move(image);
                     m_frame->cmds.push_back({CmdType::TexCreate, uint32_t(m_frame->textures.size())});
@@ -5181,7 +5379,7 @@ namespace
             else
                 f.meshes[slot] = std::move(mc);
             m_meshLru[key] = m_frameIndex;
-            if (m_meshLru.size() > kMaxMeshes)
+            if (m_meshLru.size() > maxMeshes())
                 evictMeshes();
         }
 
@@ -5235,7 +5433,21 @@ namespace
             {
                 NativeDrawCmd &d = f.nativeDraws[f.cmds[g.cmd].index];
                 d.meshKey = g.key;
-                useMesh(f, g.key, g.stride, g.bytes.data(), static_cast<uint32_t>(g.bytes.size() / g.stride), g.mesh);
+                static const bool pruneMerge = !(std::getenv("PS2X_HW_MERGE_PRUNE") && *std::getenv("PS2X_HW_MERGE_PRUNE") == '0');
+                auto lru = pruneMerge ? m_meshLru.find(g.key) : m_meshLru.end();
+                if (pruneMerge && lru != m_meshLru.end())
+                {
+                    lru->second = m_frameIndex;
+                    if (g.mesh + 1u == f.meshes.size() && g.cmd >= 1u && g.cmd + 1u == f.cmds.size() &&
+                        f.cmds[g.cmd - 1u].type == CmdType::MeshCreate && f.cmds[g.cmd - 1u].index == g.mesh)
+                    {
+                        f.cmds[g.cmd - 1u] = f.cmds[g.cmd];
+                        f.cmds.pop_back();
+                        f.meshes.pop_back();
+                    }
+                }
+                else
+                    useMesh(f, g.key, g.stride, g.bytes.data(), static_cast<uint32_t>(g.bytes.size() / g.stride), g.mesh);
             }
             g.frame = nullptr;
         }
@@ -5925,44 +6137,69 @@ namespace
             tc.w = d.textureWidth;
             tc.h = d.textureHeight;
             const auto decodeStart = ps2x::hostNow(); // [gta-recomp] tex_decode_us
-            if (!decodeFromQueuedUpload(d, tc.pixels)) // [gta-recomp] step 3c
-            {
-                if (materializeRectKeepTransfer(t.psm, t.tbp0, t.tbw, 0u, 0u, d.textureWidth, d.textureHeight))
-                    ++m_lazyWhy[1];
-                m_cpu.DecodeTexture(d, tc.pixels);
-                ++m_decodeFromVram;
-                static const bool stats = std::getenv("PS2X_HW_UPSTATS") != nullptr;
-                static int logged = 0;
-                if (stats && logged++ < 12)
-                    std::fprintf(stderr, "[upload] texture from VRAM: tbp %u tbw %u psm %u %ux%u (%s)\n", t.tbp0, t.tbw, t.psm, d.textureWidth,
-                                 d.textureHeight, m_pendingUploads.empty() ? "nothing queued" : "not one queued upload's");
-
-            }
             static const bool dump = std::getenv("VCS_TEXTURE_DUMP") && *std::getenv("VCS_TEXTURE_DUMP") == '1'; // [gta-recomp]
-            if (dump)
-                dumpTexture(d, tc.pixels);
-            // [gta-recomp] anisotropic filtering samples a mip chain: built here, on the GS stage, not on the main thread's
-            // GPU queue (PS2X_HW_CPU_MIPS=0: a render-target texture and GenerateMips each, as before)
+            static const bool dumpingTex = std::getenv("PS2X_HW_DUMP_TEX") != nullptr;
             static const bool cpuMips = [] {
                 const char *e = std::getenv("PS2X_HW_CPU_MIPS");
                 return !(e && *e == '0');
             }();
-            const bool mipChain = m_anisotropy > 1u && cpuMips && tc.w <= 4096u && tc.h <= 4096u &&
-                                  tc.pixels.size() == size_t(tc.w) * tc.h;
-            // Compute stochastic surface suitability BEFORE makeTextureEarly moves tc.pixels to the worker thread.
-            tc.stochastic = isStochasticSurface(tc.pixels, tc.w, tc.h);
-            if (tc.stochastic)
-                g_stochasticTextures.fetch_add(1, std::memory_order_relaxed);
-            if (repId)
-                m_replacementStochastic[repId] = tc.stochastic;
-            if (!makeTextureEarly(tc, mipChain) && mipChain)
-                buildMipChain(tc.pixels, tc.w, tc.h, tc.mips);
+            const bool wantMipChain = m_anisotropy > 1u && cpuMips && tc.w <= 4096u && tc.h <= 4096u;
+            bool queuedDecode = false;
+            if (!decodeFromQueuedUpload(d, tc.pixels)) // [gta-recomp] step 3c
+            {
+                if (materializeRectKeepTransfer(t.psm, t.tbp0, t.tbw, 0u, 0u, d.textureWidth, d.textureHeight))
+                    ++m_lazyWhy[1];
+                if (!dump && !dumpingTex && (m_anisotropy <= 1u || cpuMips) && makeDecodeEarly(tc, d, wantMipChain))
+                {
+                    queuedDecode = true;
+                    if (repId)
+                        m_pendingReplacementStochastic[repId] = tc.early;
+                }
+                else
+                {
+                    m_cpu.DecodeTexture(d, tc.pixels);
+                    ++m_decodeFromVram;
+                    static const bool stats = std::getenv("PS2X_HW_UPSTATS") != nullptr;
+                    static int logged = 0;
+                    if (stats && logged++ < 12)
+                        std::fprintf(stderr, "[upload] texture from VRAM: tbp %u tbw %u psm %u %ux%u (%s)\n", t.tbp0, t.tbw, t.psm, d.textureWidth,
+                                     d.textureHeight, m_pendingUploads.empty() ? "nothing queued" : "not one queued upload's");
+                }
+            }
+            if (!queuedDecode)
+            {
+                if (dump)
+                    dumpTexture(d, tc.pixels);
+                // [gta-recomp] anisotropic filtering samples a mip chain: built here, on the GS stage, not on the main thread's
+                // GPU queue (PS2X_HW_CPU_MIPS=0: a render-target texture and GenerateMips each, as before)
+                const bool mipChain = wantMipChain && tc.pixels.size() == size_t(tc.w) * tc.h;
+                static const bool earlyStochastic = [] {
+                    const char *e = std::getenv("PS2X_HW_EARLY_STOCHASTIC");
+                    return !(e && *e == '0');
+                }();
+                if (earlyStochastic && makeTextureEarly(tc, mipChain, true))
+                {
+                    if (repId)
+                        m_pendingReplacementStochastic[repId] = tc.early;
+                }
+                else
+                {
+                    // Compute stochastic surface suitability BEFORE makeTextureEarly moves tc.pixels to the worker thread.
+                    tc.stochastic = isStochasticSurface(tc.pixels, tc.w, tc.h);
+                    if (tc.stochastic)
+                        g_stochasticTextures.fetch_add(1, std::memory_order_relaxed);
+                    if (repId)
+                        m_replacementStochastic[repId] = tc.stochastic;
+                    if (!makeTextureEarly(tc, mipChain, false) && mipChain)
+                        buildMipChain(tc.pixels, tc.w, tc.h, tc.mips);
+                }
+            }
             ps2perf::add(ps2perf::Counter::TexDecodeUs, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                                             ps2x::hostNow() - decodeStart).count()));
             f.cmds.push_back({CmdType::TexCreate, static_cast<uint32_t>(f.textures.size())});
             f.textures.push_back(std::move(tc));
             m_texLru[key] = m_frameIndex;
-            if (m_texLru.size() - m_replacementSizes.size() > kMaxTextures) // [gta-recomp] the game's own, by count (a pack's: by bytes)
+            if (m_texLru.size() - m_replacementSizes.size() > maxTextures()) // [gta-recomp] the game's own, by count (a pack's: by bytes)
                 evictTextures();
             return true;
         }
@@ -5981,7 +6218,7 @@ namespace
         // chain for anisotropic filtering - while the GS stage goes on; the main thread takes it when it executes the
         // TexCreate (waiting only if it is not done yet). True when handed off (tc.pixels moved there).
         // Configurable via PS2X_HW_TEXTURE_HELPERS=N or PS2X_HW_EARLY_TEXTURES.
-        bool makeTextureEarly(TexCreate &tc, bool mipChain)
+        bool makeTextureEarly(TexCreate &tc, bool mipChain, bool deferStochastic = false)
         {
             rhi::Device *dev = m_earlyDevice.load(std::memory_order_acquire);
             if (!dev || tc.pixels.size() != size_t(tc.w) * tc.h)
@@ -5995,6 +6232,8 @@ namespace
             job->w = tc.w;
             job->h = tc.h;
             job->mipChain = mipChain;
+            job->stochastic = tc.stochastic;
+            job->checkStochastic = deferStochastic;
             job->pixels = std::move(tc.pixels);
             tc.pixels.clear();
             tc.early = job;
@@ -6007,7 +6246,80 @@ namespace
             return true;
         }
 
-        // [gta-recomp] a pack DDS's creation handed to the helpers (makeTextureEarly); false when they do not run
+        // [gta-recomp] Snapshot touched VRAM pages + CLUT so helper threads decode VRAM textures in parallel (#113).
+        bool makeDecodeEarly(TexCreate &tc, const GSDrawState &d, bool mipChain)
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("PS2X_HW_EARLY_DECODE");
+                return !(e && *e == '0');
+            }();
+            rhi::Device *dev = m_earlyDevice.load(std::memory_order_acquire);
+            if (!on || !dev || !m_textureVram || (m_anisotropy > 1u && !mipChain))
+                return false;
+            static const bool dumping = std::getenv("PS2X_HW_DUMP_TEX") != nullptr;
+            if (dumping)
+                return false;
+            const GSTex0Reg &t = d.context.tex0;
+            uint32_t pw = 64u, ph = 32u;
+            pageSize(t.psm, pw, ph);
+            const uint32_t w = std::max<uint32_t>(d.textureWidth, 1u), h = std::max<uint32_t>(d.textureHeight, 1u);
+            const uint32_t basePage = t.tbp0 / 32u;
+            const uint32_t colPages = (w - 1u) / pw;
+            const uint32_t rowPages = ((h - 1u) / ph) * ((uint32_t(t.tbw) * 64u) / pw);
+            const uint32_t nominalPerRow = std::max<uint32_t>(1u, (std::max<uint32_t>(t.tbw, 1u) * 64u + pw - 1u) / pw);
+            const uint32_t extra = (t.tbp0 % 32u) ? 2u : 1u;
+            const uint32_t snapFirst = basePage;
+            const uint32_t snapLast = std::max(basePage + rowPages + colPages + extra,
+                                               basePage + ((h - 1u) / ph + 1u) * nominalPerRow + ((t.tbp0 % 32u) ? 1u : 0u));
+            if (snapFirst >= snapLast || snapLast > kPages || (snapLast - snapFirst) > 64u)
+                return false;
+
+            auto job = std::make_shared<EarlyTexture>();
+            job->w = tc.w;
+            job->h = tc.h;
+            job->mipChain = mipChain;
+            job->deferredDecode = true;
+            job->decodeState = d;
+            job->decodeState.context.tex0.tbp0 = t.tbp0 - snapFirst * 32u;
+            job->hasPalette = m_cpu.ComputePaletteTable(d, job->palette);
+            job->vramSlice.assign(m_textureVram + snapFirst * 8192u, m_textureVram + snapLast * 8192u);
+
+            // Check that ReadRectRGBA supports this format & bounds before handing off asynchronously.
+            std::vector<uint32_t> dummy;
+            static const bool verify = std::getenv("PS2X_HW_DECODE_VERIFY") != nullptr;
+            if (verify)
+            {
+                if (!GSCpuBackend::DecodeTextureBuffer(job->decodeState, job->vramSlice.data(), job->vramSlice.size(), false,
+                                                       job->hasPalette, job->palette, dummy))
+                    return false;
+                std::vector<uint32_t> ref;
+                m_cpu.DecodeTexture(d, ref);
+                ++(dummy == ref ? m_decodeVerifySame : m_decodeVerifyDiffer);
+                if (dummy != ref && m_decodeVerifyDiffer <= 8u)
+                    std::fprintf(stderr, "[gs-hw] early decode differs: tbp %u tbw %u psm %u %ux%u\n",
+                                 t.tbp0, t.tbw, t.psm, tc.w, tc.h);
+                if ((m_decodeVerifySame + m_decodeVerifyDiffer) % 500u == 0u)
+                    std::fprintf(stderr, "[gs-hw] early decode checked: %llu same, %llu differ\n",
+                                 (unsigned long long)m_decodeVerifySame, (unsigned long long)m_decodeVerifyDiffer);
+            }
+            else if (t.psm != GS_PSM_CT32 && t.psm != GS_PSM_CT24 && t.psm != GS_PSM_CT16 && t.psm != GS_PSM_CT16S &&
+                     t.psm != GS_PSM_T8 && t.psm != GS_PSM_T8H && t.psm != GS_PSM_T4 && t.psm != GS_PSM_T4HL &&
+                     t.psm != GS_PSM_T4HH && t.psm != GS_PSM_Z32 && t.psm != GS_PSM_Z24 && t.psm != GS_PSM_Z16 &&
+                     t.psm != GS_PSM_Z16S)
+                return false;
+
+            ++m_decodeFromVram;
+            tc.early = job;
+            {
+                std::lock_guard<std::mutex> lock(m_makeMutex);
+                ensureMakersLocked(*dev);
+                m_makeQueue.push_back(std::move(job));
+            }
+            m_makeCv.notify_one();
+            return true;
+        }
+
+        // [gta-recomp] a pack DDS or PNG's creation handed to the helpers (makeTextureEarly); false when they do not run
         bool makeReplacementEarly(TexCreate &tc, const std::shared_ptr<const render::ReplacementImage> &image)
         {
             rhi::Device *dev = m_earlyDevice.load(std::memory_order_acquire);
@@ -6017,6 +6329,7 @@ namespace
             job->w = tc.w;
             job->h = tc.h;
             job->replacement = image;
+            job->stochastic = tc.stochastic;
             job->levels = m_anisotropy ? 16u : 1u; // level 0 alone without anisotropic filtering, which reads mips
             tc.early = job;
             {
@@ -6046,25 +6359,57 @@ namespace
                 d.height = job->h;
                 d.usage = rhi::UsageSampled;
                 d.name = "gs texture";
-                if (job->replacement) // [gta-recomp] a pack DDS: its stored levels, as the main thread made it before
+                if (job->replacement) // [gta-recomp] a pack DDS (stored levels) or PNG (optional CPU mips -> createTextureLevels)
                 {
                     const render::ReplacementImage &r = *job->replacement;
-                    const void *levels[16];
-                    const uint32_t n = std::min<uint32_t>(job->levels, std::min<uint32_t>(uint32_t(r.levelOffsets.size()), 16u));
-                    for (uint32_t i = 0; i < n; ++i)
-                        levels[i] = r.levels.data() + r.levelOffsets[i];
                     d.name = "replacement texture";
-                    d.format = r.format;
-                    job->made = dev.createTextureLevels(d, levels, n);
+                    if (r.dds())
+                    {
+                        const void *levels[16];
+                        const uint32_t n = std::min<uint32_t>(job->levels, std::min<uint32_t>(uint32_t(r.levelOffsets.size()), 16u));
+                        for (uint32_t i = 0; i < n; ++i)
+                            levels[i] = r.levels.data() + r.levelOffsets[i];
+                        d.format = r.format;
+                        job->made = dev.createTextureLevels(d, levels, n);
+                        job->bytes = r.gpuBytes(n > 1u);
+                    }
+                    else if (job->levels > 1u && r.pixels.size() == size_t(job->w) * job->h)
+                    {
+                        buildMipChain(r.pixels, job->w, job->h, job->mips);
+                        const void *levels[16];
+                        const uint32_t n = mipLevels(r.pixels, job->mips, job->w, job->h, levels);
+                        job->made = dev.createTextureLevels(d, levels, n);
+                        job->bytes = r.gpuBytes(true);
+                        std::vector<uint32_t>().swap(job->mips);
+                    }
+                    else
+                    {
+                        d.mipLevels = 1;
+                        job->made = dev.createTexture(d, r.pixels.data(), job->w * 4u);
+                        job->bytes = r.gpuBytes(false);
+                    }
                     if (!job->made)
-                        std::fprintf(stderr, "[textures] texture %ux%u (format %u) not made\n", job->w, job->h, unsigned(r.format));
-                    job->bytes = r.gpuBytes(n > 1u);
+                        std::fprintf(stderr, "[textures] texture %ux%u (format %u) not made\n", job->w, job->h, unsigned(d.format));
                     job->replacement.reset();
                     job->done.store(true, std::memory_order_release);
                     job->done.notify_all();
                     continue;
                 }
-                if (job->mipChain)
+                if (job->deferredDecode)
+                {
+                    if (!GSCpuBackend::DecodeTextureBuffer(job->decodeState, job->vramSlice.data(), job->vramSlice.size(), false,
+                                                           job->hasPalette, job->palette, job->pixels))
+                        std::fprintf(stderr, "[gs-hw] deferred texture decode failed %ux%u psm=%u\n",
+                                     job->w, job->h, job->decodeState.context.tex0.psm);
+                    std::vector<uint8_t>().swap(job->vramSlice);
+                }
+                if (job->deferredDecode || job->checkStochastic)
+                {
+                    job->stochastic = isStochasticSurface(job->pixels, job->w, job->h);
+                    if (job->stochastic)
+                        g_stochasticTextures.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (job->mipChain && job->pixels.size() == size_t(job->w) * job->h)
                 {
                     buildMipChain(job->pixels, job->w, job->h, job->mips);
                     const void *levels[16];
@@ -6418,6 +6763,28 @@ namespace
         static constexpr uint32_t kPages = 512u; // 4 MiB / 8 KiB
         static constexpr size_t kMaxTextures = 3000u;
         static constexpr size_t kMaxMeshes = 12000u; // [gta-recomp] native draws' vertex data (~3-10 KB each)
+        // [gta-recomp] HD World dense city views (radius 2-3) exceed 12k cached meshes & 3k textures; PS2X_HW_MAX_MESHES /
+        // PS2X_HW_MAX_TEXTURES override the caps (#113, Rule 1 fallback: =12000 / =3000).
+        static size_t maxTextures()
+        {
+            static const size_t limit = [] {
+                if (const char *e = std::getenv("PS2X_HW_MAX_TEXTURES"))
+                    if (const long v = std::atol(e); v > 0)
+                        return static_cast<size_t>(v);
+                return size_t(6000u);
+            }();
+            return limit;
+        }
+        static size_t maxMeshes()
+        {
+            static const size_t limit = [] {
+                if (const char *e = std::getenv("PS2X_HW_MAX_MESHES"))
+                    if (const long v = std::atol(e); v > 0)
+                        return static_cast<size_t>(v);
+                return size_t(32768u);
+            }();
+            return limit;
+        }
 
         uint32_t m_scale;
         bool m_nativeFrame = false; // [gta-recomp] GSHwOptions::nativeFrame
@@ -6445,6 +6812,7 @@ namespace
         std::unordered_map<uint64_t, uint32_t> m_replacementAliases;
         std::unordered_map<uint64_t, size_t> m_replacementSizes;
         std::unordered_map<uint32_t, bool> m_replacementStochastic;
+        std::unordered_map<uint32_t, std::shared_ptr<EarlyTexture>> m_pendingReplacementStochastic;
         size_t m_replacementBytes = 0;
         GSTransferCommand m_transfer{};
         std::unique_ptr<Frame> m_frame;
