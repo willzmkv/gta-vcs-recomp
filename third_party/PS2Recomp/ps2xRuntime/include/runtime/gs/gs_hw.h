@@ -174,3 +174,7 @@ struct GSHwDroplet
     float tint;     // 0..1 catchlight/caustic strength
 };
 void gsHwSetDroplets(const GSHwDroplet *drops, uint32_t count);
+// [gta-recomp] Procedural stochastic texture tiling on stationary world terrain textures (gs_draw.hlsl SAMPLE_MODE 7).
+void gsHwSetStochastic(bool on);
+uint64_t gsHwStochasticDraws();
+uint64_t gsHwStochasticTextures();

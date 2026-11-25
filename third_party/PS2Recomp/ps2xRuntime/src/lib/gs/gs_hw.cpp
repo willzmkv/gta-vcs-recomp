@@ -266,6 +266,208 @@ void gsHwSetDroplets(const GSHwDroplet *drops, uint32_t count) // [gta-recomp]
         g_droplets.assign(drops, drops + count);
 }
 
+static std::atomic<bool> g_stochastic{false}; // [gta-recomp] Shader Stochastic (gs_draw.hlsl SAMPLE_MODE 7)
+static std::atomic<uint64_t> g_stochasticDraws{0};
+static std::atomic<uint64_t> g_stochasticTextures{0};
+void gsHwSetStochastic(bool on) { g_stochastic.store(on, std::memory_order_relaxed); }
+uint64_t gsHwStochasticDraws() { return g_stochasticDraws.load(std::memory_order_relaxed); }
+uint64_t gsHwStochasticTextures() { return g_stochasticTextures.load(std::memory_order_relaxed); }
+
+// [gta-recomp] Classify decoded RGBA8 texture suitability for Deliot & Heitz stochastic tiling: must be opaque
+// (>= 32x32, aspect <= 2:1, minA >= 110), textured (3 <= rgbStd < 50), seamlessly wrapping in U/V, and stationary
+// across 8x8 blocks / 1D profiles / edge gradients (rejects signs, window grids, road stripes, and HUD icons).
+static bool isStochasticSurface(const std::vector<uint32_t> &pixels, uint32_t w, uint32_t h)
+{
+    if (w < 32u || h < 32u || std::max(w, h) > 2u * std::min(w, h) || pixels.size() != size_t(w) * h)
+        return false;
+    const size_t n = size_t(w) * h;
+    const uint8_t *rgba = reinterpret_cast<const uint8_t *>(pixels.data());
+    uint8_t minA = 255u;
+    double sumR = 0.0, sumG = 0.0, sumB = 0.0, sumL = 0.0;
+    std::vector<float> lum(n);
+    for (size_t i = 0; i < n; ++i)
+    {
+        const uint8_t r = rgba[i * 4u + 0u], g = rgba[i * 4u + 1u], b = rgba[i * 4u + 2u], a = rgba[i * 4u + 3u];
+        minA = std::min(minA, a);
+        const float l = 0.299f * r + 0.587f * g + 0.114f * b;
+        lum[i] = l;
+        sumR += r;
+        sumG += g;
+        sumB += b;
+        sumL += l;
+    }
+    if (minA < 110u) // PS2 opaque alpha is 128; PNG replacements are 255
+        return false;
+    const double meanR = sumR / n, meanG = sumG / n, meanB = sumB / n, meanL = sumL / n;
+    double varRgb = 0.0, varL = 0.0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double dr = rgba[i * 4u + 0u] - meanR, dg = rgba[i * 4u + 1u] - meanG, db = rgba[i * 4u + 2u] - meanB;
+        const double dl = lum[i] - meanL;
+        varRgb += dr * dr + dg * dg + db * db;
+        varL += dl * dl;
+    }
+    const float rgbStd = std::sqrt(static_cast<float>(varRgb / (3.0 * n)));
+    const float stdL = std::sqrt(static_cast<float>(varL / n));
+    if (rgbStd < 3.0f || rgbStd >= 50.0f)
+        return false;
+    auto diffPx = [&](size_t i, size_t j) -> float {
+        return (std::abs(int(rgba[i * 4u + 0u]) - int(rgba[j * 4u + 0u])) +
+                std::abs(int(rgba[i * 4u + 1u]) - int(rgba[j * 4u + 1u])) +
+                std::abs(int(rgba[i * 4u + 2u]) - int(rgba[j * 4u + 2u]))) *
+               (1.0f / 3.0f);
+    };
+    double seamU = 0.0, seamV = 0.0;
+    for (uint32_t y = 0; y < h; ++y)
+        seamU += diffPx(size_t(y) * w, size_t(y) * w + (w - 1u));
+    for (uint32_t x = 0; x < w; ++x)
+        seamV += diffPx(x, size_t(h - 1u) * w + x);
+    seamU /= h;
+    seamV /= w;
+    double iuSum = 0.0, ivSum = 0.0;
+    uint32_t iCnt = 0u;
+    for (uint32_t y = 0; y < h; y += 2u)
+    {
+        const uint32_t ny = (y + 1u) % h;
+        for (uint32_t x = 0; x + 1u < w; x += 2u)
+        {
+            iuSum += diffPx(size_t(y) * w + x, size_t(y) * w + x + 1u);
+            ivSum += diffPx(size_t(y) * w + x, size_t(ny) * w + x);
+            ++iCnt;
+        }
+    }
+    const float wu = static_cast<float>(seamU / std::max(iuSum / std::max(iCnt, 1u), 2.5));
+    const float wv = static_cast<float>(seamV / std::max(ivSum / std::max(iCnt, 1u), 2.5));
+    const float seamRel = static_cast<float>(std::max(seamU, seamV) / std::max(rgbStd, 1.0f));
+    if (wu >= 1.70f || wv >= 1.70f || seamRel >= 1.55f)
+        return false;
+
+    std::vector<float> grads;
+    grads.reserve(n);
+    size_t flatCnt = 0u;
+    for (uint32_t y = 0; y < h; ++y)
+    {
+        const uint32_t ny = (y + 1u) % h;
+        for (uint32_t x = 0; x < w; ++x)
+        {
+            const uint32_t nx = (x + 1u) % w;
+            const float d = 0.5f * (diffPx(size_t(y) * w + x, size_t(y) * w + nx) +
+                                    diffPx(size_t(y) * w + x, size_t(ny) * w + x));
+            grads.push_back(d);
+            if (d < 2.0f)
+                ++flatCnt;
+        }
+    }
+    const size_t midIdx = grads.size() / 2u, p95Idx = grads.size() * 95u / 100u;
+    std::nth_element(grads.begin(), grads.begin() + p95Idx, grads.end());
+    const float gP95 = grads[p95Idx];
+    std::nth_element(grads.begin(), grads.begin() + midIdx, grads.begin() + p95Idx);
+    const float gMed = grads[midIdx];
+    const float spike = gP95 / std::max(gMed, 0.5f);
+    const float flatFrac = static_cast<float>(flatCnt) / static_cast<float>(grads.size());
+    if (spike >= 4.5f || flatFrac >= 0.30f)
+        return false;
+
+    double ringSum = 0.0, ringSq = 0.0;
+    size_t ringN = 0u;
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x)
+            if (x < 2u || x + 2u >= w || y < 2u || y + 2u >= h)
+            {
+                const float v = lum[size_t(y) * w + x];
+                ringSum += v;
+                ringSq += double(v) * v;
+                ++ringN;
+            }
+    const double ringMean = ringSum / ringN;
+    const float ringStd = std::sqrt(static_cast<float>(std::max(0.0, ringSq / ringN - ringMean * ringMean)));
+    if (ringStd / std::max(stdL, 1.0f) <= 0.48f)
+        return false;
+
+    const uint32_t bw = w / 8u, bh = h / 8u;
+    float bMean[64], bStd[64];
+    int k = 0, quietCnt = 0;
+    double macroVar = 0.0;
+    for (uint32_t by = 0; by < 8u; ++by)
+        for (uint32_t bx = 0; bx < 8u; ++bx)
+        {
+            double s1 = 0.0, s2 = 0.0;
+            const size_t cnt = size_t(bw) * bh;
+            for (uint32_t y = by * bh; y < (by + 1u) * bh; ++y)
+                for (uint32_t x = bx * bw; x < (bx + 1u) * bw; ++x)
+                {
+                    const float v = lum[size_t(y) * w + x];
+                    s1 += v;
+                    s2 += double(v) * v;
+                }
+            const float bm = static_cast<float>(s1 / cnt);
+            const float bs = std::sqrt(static_cast<float>(std::max(0.0, s2 / cnt - double(bm) * bm)));
+            bMean[k] = bm;
+            bStd[k] = bs;
+            macroVar += double(bm - meanL) * double(bm - meanL);
+            if (bs < 1.2f)
+                ++quietCnt;
+            ++k;
+        }
+    std::sort(bStd, bStd + 64);
+    const float m8 = std::sqrt(static_cast<float>(macroVar / 64.0)) / std::max(stdL, 1.0f);
+    const float unif = bStd[57] / std::max((bStd[31] + bStd[32]) * 0.5f, 0.5f);
+    const float quiet = quietCnt / 64.0f;
+    if (m8 >= 0.72f || unif >= 2.00f || quiet >= 0.25f)
+        return false;
+    if (m8 >= 0.56f && spike >= 3.2f)
+        return false;
+
+    std::vector<float> colL(w, 0.0f), rowL(h, 0.0f);
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x)
+        {
+            const float v = lum[size_t(y) * w + x];
+            colL[x] += v;
+            rowL[y] += v;
+        }
+    for (uint32_t x = 0; x < w; ++x)
+        colL[x] /= h;
+    for (uint32_t y = 0; y < h; ++y)
+        rowL[y] /= w;
+    double colVar = 0.0, rowVar = 0.0;
+    float maxStep = 0.0f;
+    for (uint32_t x = 0; x < w; ++x)
+    {
+        colVar += double(colL[x] - meanL) * double(colL[x] - meanL);
+        maxStep = std::max(maxStep, std::abs(colL[x] - colL[(x + 1u) % w]));
+    }
+    for (uint32_t y = 0; y < h; ++y)
+    {
+        rowVar += double(rowL[y] - meanL) * double(rowL[y] - meanL);
+        maxStep = std::max(maxStep, std::abs(rowL[y] - rowL[(y + 1u) % h]));
+    }
+    const float axisRatio = std::max(std::sqrt(static_cast<float>(colVar / w)), std::sqrt(static_cast<float>(rowVar / h))) /
+                            std::max(stdL, 1.0f);
+    if (axisRatio >= 0.55f || (maxStep / std::max(stdL, 1.0f)) >= 1.35f)
+        return false;
+
+    auto acPeak = [&](const std::vector<float> &arr) -> float {
+        const uint32_t len = static_cast<uint32_t>(arr.size());
+        double norm = 0.0;
+        for (uint32_t idx = 0; idx < len; ++idx)
+            norm += double(arr[idx] - meanL) * double(arr[idx] - meanL);
+        if (norm < 1e-3)
+            return 0.0f;
+        float best = 0.0f;
+        for (uint32_t lag = 5u; lag <= len / 2u; ++lag)
+        {
+            double dot = 0.0;
+            for (uint32_t idx = 0; idx < len; ++idx)
+                dot += double(arr[idx] - meanL) * double(arr[(idx + lag) % len] - meanL);
+            best = std::max(best, static_cast<float>(dot / norm));
+        }
+        return best;
+    };
+    const float acC = acPeak(colL), acR = acPeak(rowL);
+    return std::min(acC, acR) < 0.52f && std::max(acC, acR) < 0.85f;
+}
+
 GSHwOptions GSHwOptions::fromEnvironment()
 {
     GSHwOptions o;
@@ -374,6 +576,7 @@ namespace
         std::vector<uint32_t> mips; // [gta-recomp] anisotropic filtering: levels 1.. after each other (buildMipChain)
         std::shared_ptr<EarlyTexture> early; // [gta-recomp] being made on a helper thread (pixels moved there)
         std::shared_ptr<const render::ReplacementImage> replacement; // [gta-recomp] decoded asynchronously
+        bool stochastic = false; // [gta-recomp] eligible for procedural stochastic tiling (isStochasticSurface)
     };
 
     // [gta-recomp] The levels of a texture: level 0 (pixels) then its mips, as createTextureLevels takes them.
@@ -906,6 +1109,7 @@ namespace
                                                rhi::BufferUsage::Constant, true, "gs native instances"});
             m_point = m_dev.createSampler({rhi::Filter::Nearest, rhi::Wrap::Clamp, rhi::Wrap::Clamp});
             m_linear = m_dev.createSampler({rhi::Filter::Linear, rhi::Wrap::Clamp, rhi::Wrap::Clamp});
+            m_linearRepeat = m_dev.createSampler({rhi::Filter::Linear, rhi::Wrap::Repeat, rhi::Wrap::Repeat});
             for (int u = 0; u < 2; ++u) // [gta-recomp] the GS bilinear's texels by Gather, per wrap mode (U, V: repeat / clamp)
                 for (int v = 0; v < 2; ++v)
                     m_gatherSampler[u][v] = m_dev.createSampler({rhi::Filter::Nearest, u ? rhi::Wrap::Repeat : rhi::Wrap::Clamp,
@@ -951,7 +1155,8 @@ namespace
                 dp.name = "gs droplets";
                 m_droplets = m_dev.createPipeline(dp);
             }
-            m_ready = m_drawCb && m_quadCb && m_worldCb && m_point && m_linear && m_blit && m_fillColor && m_fillDepth;
+            m_ready = m_drawCb && m_quadCb && m_worldCb && m_point && m_linear && m_linearRepeat && m_blit && m_fillColor &&
+                      m_fillDepth;
         }
 
         bool ready() const { return m_ready; }
@@ -1020,7 +1225,7 @@ namespace
                     if (t.early) // [gta-recomp] made on a helper thread (makeTextureEarly / makeReplacementEarly)
                     {
                         t.early->done.wait(false);
-                        m_textures[t.key] = std::move(t.early->made);
+                        m_textures[t.key] = {std::move(t.early->made), t.stochastic};
                     }
                     else if (t.replacement && t.replacement->dds()) // [gta-recomp] a pack DDS: its levels as stored (level 0
                     {                                          // alone without anisotropic filtering, which reads mips)
@@ -1030,19 +1235,21 @@ namespace
                         for (uint32_t i = 0; i < n; ++i)
                             levels[i] = r.levels.data() + r.levelOffsets[i];
                         d.format = r.format;
-                        m_textures[t.key] = m_dev.createTextureLevels(d, levels, n);
-                        if (!m_textures[t.key])
+                        auto created = m_dev.createTextureLevels(d, levels, n);
+                        if (!created)
                             std::fprintf(stderr, "[textures] texture %ux%u (format %u) not made\n", t.w, t.h, unsigned(r.format));
+                        m_textures[t.key] = {std::move(created), t.stochastic};
                     }
                     else if (t.replacement) // [gta-recomp] a pack PNG (decoded on the loader thread); mips by the GPU (d.mipLevels)
-                        m_textures[t.key] = m_dev.createTexture(d, t.replacement->pixels.data(), t.w * 4u);
+                        m_textures[t.key] = {m_dev.createTexture(d, t.replacement->pixels.data(), t.w * 4u), t.stochastic};
                     else if (!t.mips.empty()) // [gta-recomp] the chain built on the GS stage: one plain creation (buildMipChain)
                     {
                         const void *levels[16];
-                        m_textures[t.key] = m_dev.createTextureLevels(d, levels, mipLevels(t.pixels, t.mips, t.w, t.h, levels));
+                        m_textures[t.key] = {m_dev.createTextureLevels(d, levels, mipLevels(t.pixels, t.mips, t.w, t.h, levels)),
+                                             t.stochastic};
                     }
                     else
-                        m_textures[t.key] = m_dev.createTexture(d, t.pixels.data(), t.w * 4u);
+                        m_textures[t.key] = {m_dev.createTexture(d, t.pixels.data(), t.w * 4u), t.stochastic};
                     ps2perf::add(ps2perf::Counter::TexCreateUs, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                                                     ps2x::hostNow() - createStart).count()));
                     ps2perf::add(ps2perf::Counter::TexKBytes,
@@ -1755,6 +1962,8 @@ namespace
                 return 5;                   // Gather
             if (!specialise || linear == 4) // PS2X_HW_GATHER=verify needs the full shader
                 return 0;
+            if (linear == 5)
+                return 7;                   // procedural stochastic hardware sampler
             if (c.tmeTfxTccFst[0] != 1)
                 return 1;                   // no texture
             if (c.atstArefAfailRt[3] == 2)
@@ -2614,6 +2823,7 @@ namespace
 
             // texture: decoded VRAM, another render target, or this target itself (sampled from a copy)
             rhi::Texture *tex = nullptr;
+            bool texStochastic = false;
             Scale rtScale; // the render target read: its pixels per PS2 pixel
             const bool plainTexture = layer && layer->texture; // a native buffer, read like decoded VRAM
             if (s.tme && plainTexture)
@@ -2639,7 +2849,11 @@ namespace
                 else
                 {
                     auto it = m_textures.find(s.texKey);
-                    tex = it != m_textures.end() ? it->second.get() : nullptr;
+                    if (it != m_textures.end())
+                    {
+                        tex = it->second.tex.get();
+                        texStochastic = it->second.stochastic;
+                    }
                 }
             }
 
@@ -2707,6 +2921,45 @@ namespace
                 hwSampler = m_gatherSampler[s.wms == 0u ? 1 : 0][s.wmt == 0u ? 1 : 0].get();
                 if (hwSampler)
                     c.linearIipFgeAte[0] = gather;
+            }
+            // [gta-recomp] Procedural stochastic texturing (Deliot & Heitz / SkyGfx): stationary repeating world terrain
+            // draws (`s.mode == 3`, `VcsWorld`, REPEAT U/V, >= 32x32, opaque, ALWAYS/GEQUAL/GREATER alpha test) use `SAMPLE_MODE 7`.
+            // Note: RenderWare PS2 leaves `ate=1 atst=5 (GEQUAL) aref=8` active globally on world draws; `isStochasticSurface`
+            // already requires min alpha >= 110 so only solid repeating surfaces qualify.
+            static const bool stochasticEnvOff = [] {
+                const char *e = std::getenv("PS2X_HW_STOCHASTIC");
+                const char *v = std::getenv("VCS_STOCHASTIC");
+                return (e && e[0] == '0') || (v && v[0] == '0');
+            }();
+            static const bool stochasticLog = std::getenv("PS2X_HW_STOCHASTIC_LOG") != nullptr;
+            if (stochasticLog && g_stochastic.load(std::memory_order_relaxed) && s.tme && !s.texIsRt && !plainTexture && tex &&
+                (s.mode == 3u || s.mode == 4u || s.mode == 5u))
+            {
+                static std::unordered_set<uint64_t> seenLog;
+                const uint64_t sig = s.texKey ^ (uint64_t(s.mode) << 40) ^ (uint64_t(s.wms) << 44) ^ (uint64_t(s.wmt) << 46) ^
+                                     (uint64_t(s.ate) << 48) ^ (uint64_t(s.atst) << 49) ^ (uint64_t(s.linear) << 52) ^
+                                     (uint64_t(texStochastic) << 53) ^ (uint64_t(s.abe) << 54) ^ (uint64_t(s.ba) << 55) ^
+                                     (uint64_t(s.bb) << 57) ^ (uint64_t(s.bd) << 59);
+                if (seenLog.size() < 80u && seenLog.insert(sig).second)
+                    std::fprintf(stderr,
+                                 "[stoch-log] mode=%u tex=%llx %ux%u mips=%u lin=%u abe=%u(%u,%u,%u,%u) wrap=%u,%u ate=%u atst=%u aref=%u stochTex=%u\n",
+                                 s.mode, (unsigned long long)s.texKey, s.tw, s.th, tex->desc().mipLevels, s.linear, s.abe,
+                                 s.ba, s.bb, s.bc, s.bd, s.wms, s.wmt, s.ate, s.atst, s.aref, texStochastic ? 1u : 0u);
+            }
+            if (!stochasticEnvOff && g_stochastic.load(std::memory_order_relaxed) && s.mode == 3u && s.tme && s.linear &&
+                (!s.abe || (s.ba == 0u && s.bb == 1u && s.bd == 1u)) && !s.texIsRt && !plainTexture && tex &&
+                s.wms == 0u && s.wmt == 0u && s.tw >= 32u && s.th >= 32u &&
+                (!s.ate || s.atst <= 1u || s.atst == 5u || s.atst == 6u) && texStochastic)
+            {
+                rhi::Sampler *stSampler = (m_anisoSampler[1][1] && tex->desc().mipLevels != 1u)
+                                              ? m_anisoSampler[1][1].get()
+                                              : m_linearRepeat.get();
+                if (stSampler)
+                {
+                    hwSampler = stSampler;
+                    c.linearIipFgeAte[0] = 5;
+                    g_stochasticDraws.fetch_add(1, std::memory_order_relaxed);
+                }
             }
             static const bool afLog = std::getenv("PS2X_HW_ANISO_LOG") != nullptr; // which textured draws take it
             if (afLog && s.tme && !s.texIsRt)
@@ -2842,7 +3095,7 @@ namespace
         std::unique_ptr<rhi::Buffer> m_nativeVb; // transient native vertices of the frame
         size_t m_nativeVbCapacity = 0;
         size_t m_vbCapacity = 0;
-        std::unique_ptr<rhi::Sampler> m_point, m_linear;
+        std::unique_ptr<rhi::Sampler> m_point, m_linear, m_linearRepeat;
         uint32_t m_msaa = 1, m_anisotropy = 0;           // [gta-recomp] GSHwOptions
         std::unique_ptr<rhi::Sampler> m_anisoSampler[2][2]; // [gta-recomp] [U repeat][V repeat]
         std::unique_ptr<rhi::Sampler> m_gatherSampler[2][2]; // [gta-recomp] nearest, [U repeat][V repeat]: gs_draw.hlsl mode 3
@@ -2857,7 +3110,12 @@ namespace
         };
         std::unordered_map<uint32_t, DroppedSize> m_droppedSize; // [gta-recomp] dropRt / rtFor
         std::unordered_map<uint32_t, Depth> m_depth;
-        std::unordered_map<uint64_t, std::unique_ptr<rhi::Texture>> m_textures;
+        struct TexEntry
+        {
+            std::unique_ptr<rhi::Texture> tex;
+            bool stochastic = false;
+        };
+        std::unordered_map<uint64_t, TexEntry> m_textures;
         std::unique_ptr<rhi::Texture> m_display, m_feedback;
         std::unordered_map<uint32_t, HudLayer> m_hud; // [gta-recomp] native HUD layer per frame buffer
         // [gta-recomp] Per frame buffer, the shape (wide or 4:3) of the frame that last drew into it; a plain copy carries
@@ -4634,6 +4892,7 @@ namespace
                 it = render::TextureReplacements::isKey(it->second) ? g_rasterTextures.erase(it) : std::next(it);
             m_replacementAliases.clear();
             m_replacementSizes.clear();
+            m_replacementStochastic.clear();
             m_replacementBytes = 0;
             ++m_texStateVersion;
             ++m_texEvictions;
@@ -4660,6 +4919,10 @@ namespace
                     const uint64_t key = render::TextureReplacements::key(image->id);
                     TexCreate t;
                     t.key = key; t.w = image->width; t.h = image->height;
+                    if (!image->dds() && !image->pixels.empty())
+                        t.stochastic = isStochasticSurface(image->pixels, t.w, t.h);
+                    else if (auto sit = m_replacementStochastic.find(image->id); sit != m_replacementStochastic.end())
+                        t.stochastic = sit->second;
                     const size_t bytes = image->gpuBytes(m_anisotropy != 0); // [gta-recomp] a DDS's own size (block-compressed)
                     // [gta-recomp] a DDS is made by the helper threads (makeTextureEarly's): a burst of pack textures - large
                     // BC7 chains with anisotropic filtering - held the main thread for 4-12 ms (the stutter rig, T10). A PNG
@@ -5607,14 +5870,16 @@ namespace
             s.texKey = key;
             // [gta-recomp] Cache both matches and misses under the existing content/invalidation key. All aliases of
             // one pack image share a single GPU texture. A streamed-out replacement is requested again on demand.
+            uint32_t repId = 0u;
             if (m_replacements->candidate(t.psm | (uint32_t(t.tw) << 6) | (uint32_t(t.th) << 10)))
             {
                 if (m_replacementAliases.size() >= 32768u) m_replacementAliases.clear();
                 auto [alias, added] = m_replacementAliases.try_emplace(key, 0);
                 if (added) alias->second = findReplacement(d);
-                if (alias->second)
+                repId = alias->second;
+                if (repId)
                 {
-                    const uint64_t replacementKey = render::TextureReplacements::key(alias->second);
+                    const uint64_t replacementKey = render::TextureReplacements::key(repId);
                     if (auto cached = m_texLru.find(replacementKey); cached != m_texLru.end())
                     {
                         cached->second = m_frameIndex;
@@ -5622,7 +5887,7 @@ namespace
                         if (raster) g_rasterTextures[raster] = replacementKey;
                         return true;
                     }
-                    m_replacements->request(alias->second);
+                    m_replacements->request(repId);
                 }
             }
             if (raster) // [gta-recomp] step 3d: the texture by the raster it came from
@@ -5684,6 +5949,12 @@ namespace
             }();
             const bool mipChain = m_anisotropy > 1u && cpuMips && tc.w <= 4096u && tc.h <= 4096u &&
                                   tc.pixels.size() == size_t(tc.w) * tc.h;
+            // Compute stochastic surface suitability BEFORE makeTextureEarly moves tc.pixels to the worker thread.
+            tc.stochastic = isStochasticSurface(tc.pixels, tc.w, tc.h);
+            if (tc.stochastic)
+                g_stochasticTextures.fetch_add(1, std::memory_order_relaxed);
+            if (repId)
+                m_replacementStochastic[repId] = tc.stochastic;
             if (!makeTextureEarly(tc, mipChain) && mipChain)
                 buildMipChain(tc.pixels, tc.w, tc.h, tc.mips);
             ps2perf::add(ps2perf::Counter::TexDecodeUs, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -6173,6 +6444,7 @@ namespace
         std::unordered_set<std::string> m_texturesDumped; // [gta-recomp] VCS_TEXTURE_DUMP: names written this run
         std::unordered_map<uint64_t, uint32_t> m_replacementAliases;
         std::unordered_map<uint64_t, size_t> m_replacementSizes;
+        std::unordered_map<uint32_t, bool> m_replacementStochastic;
         size_t m_replacementBytes = 0;
         GSTransferCommand m_transfer{};
         std::unique_ptr<Frame> m_frame;

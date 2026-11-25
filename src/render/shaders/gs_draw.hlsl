@@ -7,6 +7,7 @@
 //   0 every way, chosen per draw from the constants (PS2X_HW_SPECIALISE=0; PS2X_HW_GATHER=verify)
 //   1 no texture   2 nearest (fetchTexel)   3 the GS's bilinear by four loads   4 the hardware sampler (anisotropic option)
 //   5 the GS's bilinear by Gather   6 a render target read 1:1 at full resolution (sampleRtFull)
+//   7 procedural stochastic tiling via the hardware sampler (sampleStochastic)
 #ifndef SAMPLE_MODE
 #define SAMPLE_MODE 0
 #endif
@@ -334,6 +335,48 @@ float4 sampleRtFiltered(float2 uv)
     return weights > 0.0 ? sum * (255.0 / weights) : fetchTexel(int2(floor(uv)));
 }
 
+// Procedural stochastic texture tiling (Deliot & Heitz 2019 / SkyGfx Extended): eliminates repeating grid patterns on
+// stationary repeating terrain surfaces (grass, sand, dirt, concrete, asphalt) via an equilateral simplex triangle grid
+// with per-vertex pseudo-random UV offsets and pre-offset screen gradients to keep mipmap selection seamless.
+float2 stochasticHash2(float2 p)
+{
+    return frac(sin(float2(dot(p, float2(127.1, 311.7)), dot(p, float2(269.5, 183.3)))) * 43758.5453);
+}
+
+float4 sampleStochastic(float2 uv)
+{
+    const float2 texUV = uv / float2(texSizeWrap.xy);
+    const float2 duvDx = ddx(texUV);
+    const float2 duvDy = ddy(texUV);
+    // 3.464101615 = 2 * sqrt(3): ~3.46 simplex cells per texture repeat, skewed to unit triangles split along fx + fy = 1.
+    const float2 scaled = texUV * 3.464101615;
+    const float2 s = float2(scaled.x - 0.577350269 * scaled.y, 1.154700538 * scaled.y);
+    const float2 i = floor(s);
+    const float2 f = frac(s);
+    float2 v1, v2, v3;
+    float3 w;
+    if (f.x + f.y >= 1.0)
+    {
+        v1 = i + float2(1.0, 1.0);
+        v2 = i + float2(1.0, 0.0);
+        v3 = i + float2(0.0, 1.0);
+        w = float3(f.x + f.y - 1.0, 1.0 - f.y, 1.0 - f.x);
+    }
+    else
+    {
+        v1 = i;
+        v2 = i + float2(1.0, 0.0);
+        v3 = i + float2(0.0, 1.0);
+        w = float3(1.0 - f.x - f.y, f.x, f.y);
+    }
+    w = w * w;
+    w /= (w.x + w.y + w.z);
+    const float4 c1 = tex.SampleGrad(hwSampler, texUV + stochasticHash2(v1), duvDx, duvDy);
+    const float4 c2 = tex.SampleGrad(hwSampler, texUV + stochasticHash2(v2), duvDx, duvDy);
+    const float4 c3 = tex.SampleGrad(hwSampler, texUV + stochasticHash2(v3), duvDx, duvDy);
+    return (c1 * w.x + c2 * w.y + c3 * w.z) * 255.0;
+}
+
 float4 sampleTex(float2 uv)
 {
 #if SAMPLE_MODE == 2
@@ -346,6 +389,8 @@ float4 sampleTex(float2 uv)
     return sampleGather(uv);
 #elif SAMPLE_MODE == 6
     return sampleRtFull(uv);
+#elif SAMPLE_MODE == 7
+    return sampleStochastic(uv);
 #else
     float4 r;
     [branch] if (atstArefAfailRt.w == 2)
@@ -355,6 +400,10 @@ float4 sampleTex(float2 uv)
     else if (atstArefAfailRt.w == 3)
     {
         r = sampleRtFiltered(uv); // only the full shader (SAMPLE_MODE 0) has it: drawSampleMode picks that one
+    }
+    else if (linearIipFgeAte.x == 5)
+    {
+        r = sampleStochastic(uv);
     }
     else if (linearIipFgeAte.x == 2)
     {

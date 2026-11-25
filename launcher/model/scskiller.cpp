@@ -32,6 +32,8 @@ using BYTE = unsigned char;
 #include "dxbc/gs_draw_ps5_dual.h"
 #include "dxbc/gs_draw_ps6.h"
 #include "dxbc/gs_draw_ps6_dual.h"
+#include "dxbc/gs_draw_ps7.h"
+#include "dxbc/gs_draw_ps7_dual.h"
 #include "dxbc/gs_quad_vs.h"
 #include "dxbc/gs_blit_ps.h"
 #include "dxbc/gs_fill_color_ps.h"
@@ -54,6 +56,8 @@ using BYTE = unsigned char;
 #include "dxbc/gs_draw_ps5_dual_noz.h"
 #include "dxbc/gs_draw_ps6_noz.h"
 #include "dxbc/gs_draw_ps6_dual_noz.h"
+#include "dxbc/gs_draw_ps7_noz.h"
+#include "dxbc/gs_draw_ps7_dual_noz.h"
 #endif
 
 #include <algorithm>
@@ -199,7 +203,7 @@ namespace launcher
             {kUiVS, sizeof(kUiVS), "ui_vs"},
         };
 
-        const Bytecode kDrawPS[2][7][2] = {
+        const Bytecode kDrawPS[2][8][2] = {
             // [0] = NoZ (SHADER_DEPTH=0, standard fast path), [1] = Z (SHADER_DEPTH=1)
             {
                 {{kGsDrawPS0NoZ, sizeof(kGsDrawPS0NoZ), "gs_draw_ps0_noz"},
@@ -216,6 +220,8 @@ namespace launcher
                  {kGsDrawPS5DualNoZ, sizeof(kGsDrawPS5DualNoZ), "gs_draw_ps5_dual_noz"}},
                 {{kGsDrawPS6NoZ, sizeof(kGsDrawPS6NoZ), "gs_draw_ps6_noz"},
                  {kGsDrawPS6DualNoZ, sizeof(kGsDrawPS6DualNoZ), "gs_draw_ps6_dual_noz"}},
+                {{kGsDrawPS7NoZ, sizeof(kGsDrawPS7NoZ), "gs_draw_ps7_noz"},
+                 {kGsDrawPS7DualNoZ, sizeof(kGsDrawPS7DualNoZ), "gs_draw_ps7_dual_noz"}},
             },
             {
                 {{kGsDrawPS0, sizeof(kGsDrawPS0), "gs_draw_ps0"},
@@ -232,6 +238,8 @@ namespace launcher
                  {kGsDrawPS5Dual, sizeof(kGsDrawPS5Dual), "gs_draw_ps5_dual"}},
                 {{kGsDrawPS6, sizeof(kGsDrawPS6), "gs_draw_ps6"},
                  {kGsDrawPS6Dual, sizeof(kGsDrawPS6Dual), "gs_draw_ps6_dual"}},
+                {{kGsDrawPS7, sizeof(kGsDrawPS7), "gs_draw_ps7"},
+                 {kGsDrawPS7Dual, sizeof(kGsDrawPS7Dual), "gs_draw_ps7_dual"}},
             },
         };
 
@@ -430,7 +438,7 @@ namespace launcher
                     uint64_t nextKey = 0x2000ull;
                     for (UINT sc : sampleCounts)
                     {
-                        for (int sampleMode = 0; sampleMode < 7; ++sampleMode)
+                        for (int sampleMode = 0; sampleMode < 8; ++sampleMode)
                         {
                             for (int bIdx = 0; bIdx < 5; ++bIdx)
                             {

@@ -22,6 +22,8 @@ using BYTE = unsigned char; // fxc's /Fh headers declare `const BYTE name[]`
 #include "dxbc/gs_draw_ps5_dual.h"
 #include "dxbc/gs_draw_ps6.h"
 #include "dxbc/gs_draw_ps6_dual.h"
+#include "dxbc/gs_draw_ps7.h"
+#include "dxbc/gs_draw_ps7_dual.h"
 #include "dxbc/gs_quad_vs.h"
 #include "dxbc/gs_blit_ps.h"
 #include "dxbc/gs_fill_color_ps.h"
@@ -46,6 +48,8 @@ using BYTE = unsigned char; // fxc's /Fh headers declare `const BYTE name[]`
 #include "dxbc/gs_draw_ps5_dual_noz.h"
 #include "dxbc/gs_draw_ps6_noz.h"
 #include "dxbc/gs_draw_ps6_dual_noz.h"
+#include "dxbc/gs_draw_ps7_noz.h"
+#include "dxbc/gs_draw_ps7_dual_noz.h"
 #endif
 #if defined(VCS_HAVE_VULKAN)
 #include "spirv/gs_draw_vs.h"
@@ -66,6 +70,8 @@ using BYTE = unsigned char; // fxc's /Fh headers declare `const BYTE name[]`
 #include "spirv/gs_draw_ps5_dual.h"
 #include "spirv/gs_draw_ps6.h"
 #include "spirv/gs_draw_ps6_dual.h"
+#include "spirv/gs_draw_ps7.h"
+#include "spirv/gs_draw_ps7_dual.h"
 #include "spirv/gs_quad_vs.h"
 #include "spirv/gs_blit_ps.h"
 #include "spirv/gs_fill_color_ps.h"
@@ -90,6 +96,8 @@ using BYTE = unsigned char; // fxc's /Fh headers declare `const BYTE name[]`
 #include "spirv/gs_draw_ps5_dual_noz.h"
 #include "spirv/gs_draw_ps6_noz.h"
 #include "spirv/gs_draw_ps6_dual_noz.h"
+#include "spirv/gs_draw_ps7_noz.h"
+#include "spirv/gs_draw_ps7_dual_noz.h"
 #endif
 
 namespace render
@@ -109,6 +117,7 @@ namespace render
                 {{kGsDrawPS4, sizeof(kGsDrawPS4)}, {kGsDrawPS4Dual, sizeof(kGsDrawPS4Dual)}},
                 {{kGsDrawPS5, sizeof(kGsDrawPS5)}, {kGsDrawPS5Dual, sizeof(kGsDrawPS5Dual)}},
                 {{kGsDrawPS6, sizeof(kGsDrawPS6)}, {kGsDrawPS6Dual, sizeof(kGsDrawPS6Dual)}},
+                {{kGsDrawPS7, sizeof(kGsDrawPS7)}, {kGsDrawPS7Dual, sizeof(kGsDrawPS7Dual)}},
             },
             {kGsQuadVS, sizeof(kGsQuadVS)},
             {kGsBlitPS, sizeof(kGsBlitPS)},
@@ -126,6 +135,7 @@ namespace render
                 {{kGsDrawPS4NoZ, sizeof(kGsDrawPS4NoZ)}, {kGsDrawPS4DualNoZ, sizeof(kGsDrawPS4DualNoZ)}},
                 {{kGsDrawPS5NoZ, sizeof(kGsDrawPS5NoZ)}, {kGsDrawPS5DualNoZ, sizeof(kGsDrawPS5DualNoZ)}},
                 {{kGsDrawPS6NoZ, sizeof(kGsDrawPS6NoZ)}, {kGsDrawPS6DualNoZ, sizeof(kGsDrawPS6DualNoZ)}},
+                {{kGsDrawPS7NoZ, sizeof(kGsDrawPS7NoZ)}, {kGsDrawPS7DualNoZ, sizeof(kGsDrawPS7DualNoZ)}},
             },
             {kGsLitInstVS, sizeof(kGsLitInstVS)},
             {kDropletsVS, sizeof(kDropletsVS)},
@@ -147,6 +157,7 @@ namespace render
                 {{kGsDrawPS4_spv, sizeof(kGsDrawPS4_spv)}, {kGsDrawPS4Dual_spv, sizeof(kGsDrawPS4Dual_spv)}},
                 {{kGsDrawPS5_spv, sizeof(kGsDrawPS5_spv)}, {kGsDrawPS5Dual_spv, sizeof(kGsDrawPS5Dual_spv)}},
                 {{kGsDrawPS6_spv, sizeof(kGsDrawPS6_spv)}, {kGsDrawPS6Dual_spv, sizeof(kGsDrawPS6Dual_spv)}},
+                {{kGsDrawPS7_spv, sizeof(kGsDrawPS7_spv)}, {kGsDrawPS7Dual_spv, sizeof(kGsDrawPS7Dual_spv)}},
             },
             {kGsQuadVS_spv, sizeof(kGsQuadVS_spv)},
             {kGsBlitPS_spv, sizeof(kGsBlitPS_spv)},
@@ -164,6 +175,7 @@ namespace render
                 {{kGsDrawPS4NoZ_spv, sizeof(kGsDrawPS4NoZ_spv)}, {kGsDrawPS4DualNoZ_spv, sizeof(kGsDrawPS4DualNoZ_spv)}},
                 {{kGsDrawPS5NoZ_spv, sizeof(kGsDrawPS5NoZ_spv)}, {kGsDrawPS5DualNoZ_spv, sizeof(kGsDrawPS5DualNoZ_spv)}},
                 {{kGsDrawPS6NoZ_spv, sizeof(kGsDrawPS6NoZ_spv)}, {kGsDrawPS6DualNoZ_spv, sizeof(kGsDrawPS6DualNoZ_spv)}},
+                {{kGsDrawPS7NoZ_spv, sizeof(kGsDrawPS7NoZ_spv)}, {kGsDrawPS7DualNoZ_spv, sizeof(kGsDrawPS7DualNoZ_spv)}},
             },
             {kGsLitInstVS_spv, sizeof(kGsLitInstVS_spv)},
             {kDropletsVS_spv, sizeof(kDropletsVS_spv)},

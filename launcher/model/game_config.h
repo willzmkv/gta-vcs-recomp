@@ -67,6 +67,7 @@ namespace launcher
         int graphicsPostProcess = 1;    // 0 = Off, 1 = Trails + Bloom
         int graphicsExposure = 100;     // 0..200
         int graphicsRainDroplets = 0;   // 0 = Off (PS2), 1 = On (Xbox Rain Droplets)
+        int graphicsStochastic = 0;     // 0 = Off (PS2), 1 = On (Shader Stochastic terrain tiling)
 
         // World, Draw Distance & Fog
         int worldHdRadius = 0;          // 0 = ~260m, 1 = ~450m, 2 = ~580m, 3 = ~720m

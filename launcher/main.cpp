@@ -313,18 +313,19 @@ namespace
 
                 {
                     std::ofstream out(tmpIni, std::ios::binary | std::ios::trunc);
-                    out << "graphics.rain_droplets=1\n";
+                    out << "graphics.rain_droplets=1\ngraphics.stochastic=1\n";
                 }
                 GameConfig fx;
                 fx.loadIni(tmpIni);
                 fx.saveIni(tmpIni);
                 std::ifstream fxIn(tmpIni);
                 const std::string fxText((std::istreambuf_iterator<char>(fxIn)), {});
-                check(fx.graphicsRainDroplets == 1 && fxText.find("graphics.rain_droplets=1") != std::string::npos,
-                      "GameConfig: Rain droplets round trips cleanly");
+                check(fx.graphicsRainDroplets == 1 && fxText.find("graphics.rain_droplets=1") != std::string::npos &&
+                          fx.graphicsStochastic == 1 && fxText.find("graphics.stochastic=1") != std::string::npos,
+                      "GameConfig: Rain droplets and Stochastic texturing round trip cleanly");
                 fx.applyPreset(GraphicsPreset::OriginalPS2);
-                check(fx.graphicsRainDroplets == 0,
-                      "GameConfig: OriginalPS2 preset disables rain droplets");
+                check(fx.graphicsRainDroplets == 0 && fx.graphicsStochastic == 0,
+                      "GameConfig: OriginalPS2 preset disables rain droplets and stochastic texturing");
 
                 const fs::path modGood = tmpDir / "mod_good";
                 const fs::path modPsp = tmpDir / "mod_psp";
