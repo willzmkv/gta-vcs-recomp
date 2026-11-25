@@ -238,10 +238,11 @@ class Check:
             self.t("loadout 1")
             given = [t for t in (9, 12, 20, 22, 29, 30, 32) if self.slot(t)]
             self.ok("loadout", len(given) >= 6, str(given))  # slots shared within a loadout keep the last one
+            before = self.slot(29)
             self.t("toggle ammo 1")
-            time.sleep(1.0)
+            time.sleep(0.5)
             s = self.slot(29)
-            self.ok("unlimited ammo", s and s[2] >= 9000, str(s))
+            self.ok("unlimited ammo preserves count", s and s == before and s[2] < 9000, str(s))
             self.t("toggle reload 1")
             g.scm(S.op(0x010B, S.PLAYER, S.i(29)))
             time.sleep(1.0)
@@ -250,7 +251,31 @@ class Check:
             time.sleep(1.0)
             self.ok("no reload refills the clip", self.slot(29)[1] == full and full > 3, "clip %d (full %d)" % (self.slot(29)[1], full))
             self.t("toggle reload 0")
+            # firing while Unlimited ammo is on consumes the clip but preserves total/reserve ammo
+            g.scm(S.op(0x010B, S.PLAYER, S.i(29)))  # SET_CURRENT_CHAR_WEAPON -> AK
+            time.sleep(0.2)
+            before_fire = self.slot(29)
+            g.cmd("gamepad on")
+            g.cmd("gamepad b 1")
+            time.sleep(0.7)
+            g.cmd("gamepad b 0")
+            time.sleep(0.4)
+            g.cmd("gamepad off")
+            after_fire = self.slot(29)
+            self.ok("unlimited ammo keeps reserve when firing",
+                    after_fire and before_fire and after_fire[1] < before_fire[1] and after_fire[2] == before_fire[2],
+                    "%s -> %s" % (before_fire, after_fire))
             self.t("toggle ammo 0")
+            g.cmd("gamepad on")
+            g.cmd("gamepad b 1")
+            time.sleep(0.4)
+            g.cmd("gamepad b 0")
+            time.sleep(0.4)
+            g.cmd("gamepad off")
+            after_off = self.slot(29)
+            self.ok("ammo decreases once unlimited ammo is off",
+                    after_off and after_fire and after_off[2] < after_fire[2],
+                    "%s -> %s" % (after_fire, after_off))
 
             # vehicles
             self.t("toggle warp 1")

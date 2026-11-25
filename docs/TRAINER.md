@@ -41,7 +41,7 @@ place.
 | | Infinite sprint, Police ignore you, Everyone ignores you | `SET_PLAYER_NEVER_GETS_TIRED`, `SET_POLICE_IGNORE_PLAYER`, `SET_EVERYONE_IGNORE_PLAYER` |
 | Weapons | Give weapon | any of 35 weapons (types 1..39, names from the game's text), with ammunition, and selects it |
 | | Give loadout | Street, Military, Heavy |
-| | Unlimited ammo | every carried weapon's ammunition kept at 9999 |
+| | Unlimited ammo | reserve ammo preserved across `CWeapon::Fire` / `FireFromCar` (`0x002C0F98` / `0x002C1BB0`, like the 100% reward, plus Camera `0x26`; excludes Detonator `0x24`), never overwriting existing counts |
 | | No reload | the clip refilled to the fullest it has been seen (the weapon's clip size) |
 | | Fast reload | `SET_PLAYER_FAST_RELOAD` |
 | | Remove all weapons | `REMOVE_ALL_CHAR_WEAPONS` |
