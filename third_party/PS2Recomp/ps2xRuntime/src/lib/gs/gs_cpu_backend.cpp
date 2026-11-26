@@ -600,6 +600,60 @@ int GSCpuBackend::LoadClutFromRect(const GSTex0Reg &tex0, const GSTexClutReg &te
         return 0;
     const bool sixteenBit = tex0.cpsm == GS_PSM_CT16 || tex0.cpsm == GS_PSM_CT16S;
     const uint32_t bytes = sixteenBit ? 2u : 4u;
+    // [gta-recomp] CSM1 CLUT loads index fixed [0..8)x[0..2) or [0..16)x[0..16) texels: check bounds in O(1) and
+    // copy entries without the two-pass lambda loader. PS2X_HW_UPLOAD_FAST=0 restores the generic path.
+    static const bool fastUpload = [] {
+        const char *e = std::getenv("PS2X_HW_UPLOAD_FAST");
+        return !(e && e[0] == '0');
+    }();
+    if (fastUpload && tex0.csm == 0u)
+    {
+        const bool fourBit = isFourBitIndexedPsm(tex0.psm);
+        const bool thirtyTwoBit = tex0.cpsm == GS_PSM_CT32 || tex0.cpsm == GS_PSM_CT24;
+        if (!sixteenBit && !thirtyTwoBit)
+        {
+            if (clutLoadWanted(tex0))
+            {
+                m_texturePageCache.Invalidate();
+                m_clutHashDirty = true;
+            }
+            return 1;
+        }
+        const uint32_t needW = fourBit ? 8u : 16u;
+        const uint32_t needH = fourBit ? 2u : 16u;
+        if (rectW < needW || rectH < needH)
+            return -1;
+        if (!clutLoadWanted(tex0))
+            return 0;
+        m_texturePageCache.Invalidate();
+        m_clutHashDirty = true;
+        const uint32_t entryCount = fourBit ? 16u : 256u;
+        const uint32_t csaMask = sixteenBit ? 0x1Fu : 0x0Fu;
+        const uint32_t destinationBase = (static_cast<uint32_t>(tex0.csa) & csaMask) << 4u;
+        const bool loadCsm1Suffix = thirtyTwoBit && !fourBit;
+        const uint32_t firstEntry = loadCsm1Suffix ? destinationBase : 0u;
+        const uint32_t destMask = sixteenBit ? 0x1FFu : 0x0FFu;
+        for (uint32_t entry = firstEntry; entry < entryCount; ++entry)
+        {
+            const uint32_t sourceIndex = swizzleClutIndexCSM1(entry);
+            const size_t offset = (static_cast<size_t>(sourceIndex >> 4u) * rectW + (sourceIndex & 0x0Fu)) * bytes;
+            const uint32_t destination = (loadCsm1Suffix ? entry : destinationBase + entry) & destMask;
+            if (sixteenBit)
+            {
+                uint16_t v;
+                std::memcpy(&v, rect + offset, 2);
+                m_clut[destination] = v;
+            }
+            else
+            {
+                uint32_t raw;
+                std::memcpy(&raw, rect + offset, 4);
+                m_clut[destination] = static_cast<uint16_t>(raw & 0xFFFFu);
+                m_clut[destination + 256u] = static_cast<uint16_t>(raw >> 16u);
+            }
+        }
+        return 1;
+    }
     auto inside = [&](uint32_t x, uint32_t y) { return x < rectW && y < rectH && x < 64u && y < 32u; }; // one page, any BW
     // every source pixel first, so a refusal changes nothing (CBP0 / CBP1 included)
     bool all = true;

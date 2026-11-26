@@ -266,6 +266,7 @@ namespace present
     rhi::Device::PresentMode g_presentMode = rhi::Device::PresentMode::Immediate;
 
     void setPresentMode(int mode) { g_presentMode = static_cast<rhi::Device::PresentMode>(mode); }
+    int presentMode() { return static_cast<int>(g_presentMode); }
 
     void present() { g_device->present(g_presentMode); }
 

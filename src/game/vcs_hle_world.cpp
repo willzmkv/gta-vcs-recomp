@@ -268,8 +268,8 @@ namespace
     struct LitPacket
     {
         uint32_t posBase = 0, nrmBase = 0, uvBase = 0, wBase = 0, outBase = 0, count = 0, nloop = 0;
-        float pos[256][3];
-        float nrm[256][3];
+        alignas(16) float pos[256][4];
+        alignas(16) float nrm[256][4];
     };
 
     bool litPacket(const ps2hle::MscalContext &c, LitPacket &lp)
@@ -342,10 +342,11 @@ namespace
     void skin(const uint8_t *vu, LitPacket &lp)
     {
         static const bool verify = std::getenv("VCS_SKIN_VERIFY") != nullptr;
+        static const bool fastSkin = !(std::getenv("VCS_SKIN_FAST") && *std::getenv("VCS_SKIN_FAST") == '0');
         const uint32_t mask = static_cast<uint32_t>(loadI(vu, 0xA8).v[1]);
         auto q = [vu](uint32_t at) { return _mm_loadu_ps(reinterpret_cast<const float *>(vu + (at & (kQwords - 1u)) * 16u)); };
         auto qi = [vu](uint32_t at) { return _mm_loadu_si128(reinterpret_cast<const __m128i *>(vu + (at & (kQwords - 1u)) * 16u)); };
-        const __m128 scale = q(42), offset = q(43), one = _mm_set1_ps(1.0f);
+        const __m128 scale = q(42), offset = q(43), one = _mm_set1_ps(1.0f), zero = _mm_setzero_ps();
         const __m128 inv128 = _mm_set1_ps(bitsToFloat(0x3C000000u));
         const __m128 offsetTimesOne = _mm_mul_ps(offset, one);
         for (uint32_t i = 0; i < lp.count; ++i)
@@ -356,34 +357,30 @@ namespace
             const __m128 p = _mm_add_ps(_mm_mul_ps(pi, scale), offsetTimesOne);
             const __m128 n = _mm_mul_ps(ni, inv128);
             const __m128 p0 = _mm_shuffle_ps(p, p, 0x00), p1 = _mm_shuffle_ps(p, p, 0x55), p2 = _mm_shuffle_ps(p, p, 0xAA);
-            __m128 t[4], b0[3];
-            for (int bone = 0; bone < 4; ++bone)
-            {
-                const uint32_t at = 0xA9u + (static_cast<uint32_t>(wi.v[bone]) & mask);
+            const uint32_t at0 = 0xA9u + (static_cast<uint32_t>(wi.v[0]) & mask);
+            const __m128 b0 = q(at0), b1 = q(at0 + 1), b2 = q(at0 + 2), b3 = q(at0 + 3);
+            __m128 acc0 = _mm_add_ps(_mm_add_ps(_mm_mul_ps(b0, p0), _mm_mul_ps(b1, p1)), _mm_mul_ps(b2, p2));
+            __m128 t0 = _mm_add_ps(acc0, _mm_mul_ps(b3, one));
+            __m128 nr = _mm_mul_ps(b0, _mm_shuffle_ps(n, n, 0x00));
+            nr = _mm_add_ps(nr, _mm_mul_ps(b1, _mm_shuffle_ps(n, n, 0x55)));
+            nr = _mm_add_ps(nr, _mm_mul_ps(b2, _mm_shuffle_ps(n, n, 0xAA)));
+            __m128 ps = _mm_mul_ps(t0, _mm_shuffle_ps(w, w, 0x00));
+            const int nzMask = fastSkin ? (~_mm_movemask_ps(_mm_cmpeq_ps(w, zero)) & 0xF) : 0xF;
+            auto doBone = [&](int idx, __m128 ws) {
+                const uint32_t at = 0xA9u + (static_cast<uint32_t>(wi.v[idx]) & mask);
                 const __m128 r0 = q(at), r1 = q(at + 1), r2 = q(at + 2), r3 = q(at + 3);
-                if (bone == 0)
-                {
-                    b0[0] = r0;
-                    b0[1] = r1;
-                    b0[2] = r2;
-                }
-                __m128 acc = _mm_mul_ps(r0, p0);
-                acc = _mm_add_ps(acc, _mm_mul_ps(r1, p1));
-                acc = _mm_add_ps(acc, _mm_mul_ps(r2, p2));
-                t[bone] = _mm_add_ps(acc, _mm_mul_ps(r3, one));
-            }
-            __m128 nr = _mm_mul_ps(b0[0], _mm_shuffle_ps(n, n, 0x00));
-            nr = _mm_add_ps(nr, _mm_mul_ps(b0[1], _mm_shuffle_ps(n, n, 0x55)));
-            nr = _mm_add_ps(nr, _mm_mul_ps(b0[2], _mm_shuffle_ps(n, n, 0xAA)));
-            __m128 ps = _mm_mul_ps(t[0], _mm_shuffle_ps(w, w, 0x00));
-            ps = _mm_add_ps(ps, _mm_mul_ps(t[1], _mm_shuffle_ps(w, w, 0x55)));
-            ps = _mm_add_ps(ps, _mm_mul_ps(t[2], _mm_shuffle_ps(w, w, 0xAA)));
-            ps = _mm_add_ps(ps, _mm_mul_ps(t[3], _mm_shuffle_ps(w, w, 0xFF)));
-            alignas(16) float nOut[4], pOut[4];
-            _mm_store_ps(nOut, nr);
-            _mm_store_ps(pOut, ps);
-            std::memcpy(lp.nrm[i], nOut, 12);
-            std::memcpy(lp.pos[i], pOut, 12);
+                __m128 acc = _mm_add_ps(_mm_add_ps(_mm_mul_ps(r0, p0), _mm_mul_ps(r1, p1)), _mm_mul_ps(r2, p2));
+                acc = _mm_add_ps(acc, _mm_mul_ps(r3, one));
+                ps = _mm_add_ps(ps, _mm_mul_ps(acc, ws));
+            };
+            if (nzMask & 2)
+                doBone(1, _mm_shuffle_ps(w, w, 0x55));
+            if (nzMask & 4)
+                doBone(2, _mm_shuffle_ps(w, w, 0xAA));
+            if (nzMask & 8)
+                doBone(3, _mm_shuffle_ps(w, w, 0xFF));
+            _mm_store_ps(lp.nrm[i], nr);
+            _mm_store_ps(lp.pos[i], ps);
         }
         if (verify)
         {
@@ -392,8 +389,10 @@ namespace
             ref.posBase = lp.posBase, ref.nrmBase = lp.nrmBase, ref.wBase = lp.wBase, ref.count = lp.count;
             skinScalar(vu, ref);
             ++checked;
-            if (std::memcmp(ref.pos, lp.pos, sizeof(float) * 3u * lp.count) != 0 ||
-                std::memcmp(ref.nrm, lp.nrm, sizeof(float) * 3u * lp.count) != 0)
+            bool bad = false;
+            for (uint32_t i = 0; i < lp.count && !bad; ++i)
+                bad = std::memcmp(ref.pos[i], lp.pos[i], 12) != 0 || std::memcmp(ref.nrm[i], lp.nrm[i], 12) != 0;
+            if (bad)
                 ++wrong;
             if ((checked & 0x3FFFu) == 0u)
                 std::fprintf(stderr, "[skin] verify: %llu packets, %llu differ\n", static_cast<unsigned long long>(checked),
@@ -2001,6 +2000,24 @@ namespace
         return h;
     }
 
+    // [gta-recomp] Hash only xyz/uvq (12 bytes) per qword: VIF UNPACK V3_* leaves stale .w lanes across VU1 TOP
+    // ping-pong buffers, which gave static rigid objects ~150+ phantom new mesh keys per frame (#113).
+    // VCS_RIGID_MASK_W=0 restores hashing all 16 bytes.
+    uint64_t hashQwords3(const uint8_t *vu, uint32_t base, uint32_t count, uint64_t h)
+    {
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            uint64_t lo = 0;
+            uint32_t hi = 0;
+            const uint8_t *p = vu + ((base + i) & (kQwords - 1u)) * 16u;
+            std::memcpy(&lo, p, 8);
+            std::memcpy(&hi, p + 8, 4);
+            h = (h ^ lo) * 0x100000001B3ull;
+            h = (h ^ hi) * 0x100000001B3ull;
+        }
+        return h;
+    }
+
     void putRow(float *out, const Vec4 &r)
     {
         std::memcpy(out, r.v, 16);
@@ -2466,19 +2483,30 @@ namespace
         d.vertexStride = 48;
         d.vertexCount = count;
         d.drawCount = std::min(static_cast<uint32_t>(header.v[3]), count);
+        static const bool maskW = !(std::getenv("VCS_RIGID_MASK_W") && *std::getenv("VCS_RIGID_MASK_W") == '0');
         uint64_t key = 0x52494749ull ^ count;
-        key = hashQwords(vu, posBase, count, key);
-        key = hashQwords(vu, uvBase, count, key);
-        key = hashQwords(vu, nrmBase, count, key);
+        if (maskW)
+        {
+            key = hashQwords3(vu, posBase, count, key);
+            key = hashQwords3(vu, uvBase, count, key);
+            key = hashQwords3(vu, nrmBase, count, key);
+        }
+        else
+        {
+            key = hashQwords(vu, posBase, count, key);
+            key = hashQwords(vu, uvBase, count, key);
+            key = hashQwords(vu, nrmBase, count, key);
+        }
         d.meshKey = key;
         static thread_local std::vector<uint8_t> verts;
-        verts.assign(size_t(count) * 48u, 0);
+        verts.resize(size_t(count) * 48u);
         for (uint32_t i = 0; i < count; ++i)
         {
             uint8_t *v = verts.data() + size_t(i) * 48u;
             std::memcpy(v, itof(loadI(vu, posBase + i)).v, 12);
             std::memcpy(v + 12, itof(loadI(vu, uvBase + i)).v, 12);
             std::memcpy(v + 24, itof(loadI(vu, nrmBase + i)).v, 12);
+            std::memset(v + 36, 0, 12);
         }
         d.vertices = verts.data();
         float *k = d.constants;
@@ -2737,14 +2765,19 @@ namespace
         d.vertexCount = lp.count;
         d.drawCount = lp.nloop;
         static thread_local std::vector<uint8_t> verts;
-        verts.assign(size_t(lp.count) * 48u, 0);
+        verts.resize(size_t(lp.count) * 48u);
         for (uint32_t i = 0; i < lp.count; ++i)
         {
-            uint8_t *v = verts.data() + size_t(i) * 48u;
-            const Vec4 uv = itof(loadI(vu, lp.uvBase + i));
-            std::memcpy(v, lp.pos[i], 12);
-            std::memcpy(v + 12, uv.v, 12);
-            std::memcpy(v + 24, lp.nrm[i], 12);
+            alignas(16) float uvf[4];
+            const __m128i uvi = _mm_loadu_si128(reinterpret_cast<const __m128i *>(vu + ((lp.uvBase + i) & (kQwords - 1u)) * 16u));
+            _mm_store_ps(uvf, _mm_cvtepi32_ps(uvi));
+            float *vf = reinterpret_cast<float *>(verts.data() + size_t(i) * 48u);
+            _mm_storeu_ps(vf, _mm_load_ps(lp.pos[i]));
+            _mm_storeu_ps(vf + 3, _mm_load_ps(uvf));
+            _mm_storeu_ps(vf + 6, _mm_load_ps(lp.nrm[i]));
+            vf[9] = 0.0f;
+            vf[10] = 0.0f;
+            vf[11] = 0.0f;
         }
         d.vertices = verts.data();
         float *k = d.constants;
@@ -3376,16 +3409,20 @@ namespace
             handled = drawNativeShine(c, shineP, shineQ);
         else if (redraw && c.startPc == 0x2C0u && ps2hle::gs() && isRedraw(c))
             handled = drawNativeRedraw(c);
-        else if (redraw && c.startPc == 0x30u && ps2hle::gs() && isPrelitFloat(c))
-            handled = drawNativeRedraw(c); // the same float path, without the setup
-        else if (lit && c.startPc == 0x30u && ps2hle::gs() && isLitPipeline(c.vuCode, c.vuData, c.codeGeneration))
-            handled = drawNativeLit(c);
-        else if (lit && env && c.startPc == 0x30u && ps2hle::gs() && isEnvPipeline(c.vuCode, c.vuData, c.codeGeneration))
-            handled = drawNativeEnv(c);
-        else if (lit && c.startPc == 0x30u && ps2hle::gs() && isRigidPipeline(c.vuCode, c.vuData, c.codeGeneration))
-            handled = drawNativeRigid(c);
-        else
-            handled = drawNative(c);
+        else if (c.startPc == 0x30u && ps2hle::gs())
+        {
+            const uint32_t t38 = static_cast<uint32_t>(loadI(c.vuData, 38).v[0]) & 0xFFFFu;
+            if (redraw && isPrelitFloat(c))
+                handled = drawNativeRedraw(c); // the same float path, without the setup
+            else if (lit && t38 == 0x16u && isLitPipeline(c.vuCode, c.vuData, c.codeGeneration))
+                handled = drawNativeLit(c);
+            else if (lit && env && t38 == 0x13u && isEnvPipeline(c.vuCode, c.vuData, c.codeGeneration))
+                handled = drawNativeEnv(c);
+            else if (lit && t38 == 0x19u && isRigidPipeline(c.vuCode, c.vuData, c.codeGeneration))
+                handled = drawNativeRigid(c);
+            else
+                handled = drawNative(c);
+        }
         setSseRounding(rounding);
         // PS2X_HLE_STATS=1: which stage tables (38-41, entry 52.x) of 0x0030 still run on the VU1, every 10 s
         static const bool stats = std::getenv("PS2X_HLE_STATS") != nullptr;

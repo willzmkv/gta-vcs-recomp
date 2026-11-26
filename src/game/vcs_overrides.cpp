@@ -386,6 +386,61 @@ namespace
 #endif
     void rwMatrixMulDirect(uint8_t *rdram, uint32_t dstPhys, uint32_t m1Phys, uint32_t m2Phys)
     {
+        static const bool useSse = !(std::getenv("VCS_NATIVE_RWFRAME_SSE") && *std::getenv("VCS_NATIVE_RWFRAME_SSE") == '0');
+        if (useSse)
+        {
+            // Fast 4-lane SSE path preserving exact operand order & no-FMA rounding; falls back on denormals or exp==255.
+            const __m128 xyzMask = _mm_castsi128_ps(_mm_setr_epi32(-1, -1, -1, 0));
+            const __m128i absMask = _mm_set1_epi32(0x7FFFFFFF);
+            const __m128i minNorm = _mm_set1_epi32(0x00800000);
+            const __m128i maxFin = _mm_set1_epi32(0x7F7FFFFF);
+            const __m128i zero = _mm_setzero_si128();
+            __m128i bad = zero;
+            auto check = [&](__m128 v) {
+                const __m128i av = _mm_and_si128(_mm_castps_si128(v), absMask);
+                const __m128i den = _mm_and_si128(_mm_cmplt_epi32(av, minNorm), _mm_cmpgt_epi32(av, zero));
+                const __m128i inf = _mm_cmpgt_epi32(av, maxFin);
+                bad = _mm_or_si128(bad, _mm_or_si128(den, inf));
+            };
+            const __m128 b0 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + m2Phys + 0u)), xyzMask);
+            const __m128 b1 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + m2Phys + 16u)), xyzMask);
+            const __m128 b2 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + m2Phys + 32u)), xyzMask);
+            const __m128 b3 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + m2Phys + 48u)), xyzMask);
+            const __m128 a0 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + m1Phys + 0u)), xyzMask);
+            const __m128 a1 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + m1Phys + 16u)), xyzMask);
+            const __m128 a2 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + m1Phys + 32u)), xyzMask);
+            const __m128 a3 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + m1Phys + 48u)), xyzMask);
+            check(b0); check(b1); check(b2); check(b3);
+            check(a0); check(a1); check(a2); check(a3);
+            auto mulRow = [&](__m128 r) -> __m128 {
+                const __m128 p0 = _mm_mul_ps(_mm_shuffle_ps(r, r, _MM_SHUFFLE(0, 0, 0, 0)), b0);
+                const __m128 p1 = _mm_mul_ps(_mm_shuffle_ps(r, r, _MM_SHUFFLE(1, 1, 1, 1)), b1);
+                const __m128 p2 = _mm_mul_ps(_mm_shuffle_ps(r, r, _MM_SHUFFLE(2, 2, 2, 2)), b2);
+                const __m128 s1 = _mm_add_ps(p0, p1);
+                const __m128 s2 = _mm_add_ps(s1, p2);
+                check(p0); check(p1); check(p2); check(s1); check(s2);
+                return s2;
+            };
+            const __m128 o0 = mulRow(a0);
+            const __m128 o1 = mulRow(a1);
+            const __m128 o2 = mulRow(a2);
+            const __m128 t2 = mulRow(a3);
+            const __m128 o3 = _mm_add_ps(t2, b3);
+            check(o3);
+            if (_mm_testz_si128(bad, bad))
+            {
+                auto store3 = [&](uint32_t off, __m128 v) {
+                    _mm_storel_pi(reinterpret_cast<__m64 *>(rdram + dstPhys + off), v);
+                    const __m128 hi = _mm_movehl_ps(v, v);
+                    _mm_store_ss(reinterpret_cast<float *>(rdram + dstPhys + off + 8u), hi);
+                };
+                store3(0u, o0);
+                store3(16u, o1);
+                store3(32u, o2);
+                store3(48u, o3);
+                return;
+            }
+        }
         // Load all operands before writing dst (exact aliasing safety if dst == m1 or dst == m2, and preserves exact PS2 FPU order).
         const float b00 = readF32Fast(rdram, m2Phys + 0u),  b01 = readF32Fast(rdram, m2Phys + 4u),  b02 = readF32Fast(rdram, m2Phys + 8u);
         const float b10 = readF32Fast(rdram, m2Phys + 16u), b11 = readF32Fast(rdram, m2Phys + 20u), b12 = readF32Fast(rdram, m2Phys + 24u);
@@ -397,13 +452,6 @@ namespace
         const float a20 = readF32Fast(rdram, m1Phys + 32u), a21 = readF32Fast(rdram, m1Phys + 36u), a22 = readF32Fast(rdram, m1Phys + 40u);
         const float a30 = readF32Fast(rdram, m1Phys + 48u), a31 = readF32Fast(rdram, m1Phys + 52u), a32 = readF32Fast(rdram, m1Phys + 56u);
 
-        // Order matches FUN_002c0a40 lines 44-81 (z term first via $f5/$f2, wait: row0 adds x + y first then + z, wait check FUN_002c0a40!):
-        // x: ps2_fadd(ps2_fadd(a00*b00, a01*b10), a02*b20)
-        // y: ps2_fadd(ps2_fadd(a00*b01, a01*b11), a02*b21)
-        // z: ps2_fadd(ps2_fadd(a00*b02, a01*b12), a02*b22)
-        // row3 x: ps2_fadd(ps2_fadd(ps2_fadd(a30*b00, a31*b10), a32*b20), b30)
-        // row3 y: ps2_fadd(ps2_fadd(ps2_fadd(a30*b01, a31*b11), a32*b21), b31)
-        // row3 z: ps2_fadd(ps2_fadd(ps2_fadd(a30*b02, a31*b12), a32*b22), b32)
         auto row = [&](float rx, float ry, float rz, uint32_t outOff) {
             const float ox = ps2_fadd(ps2_fadd(ps2_fmul(rx, b00), ps2_fmul(ry, b10)), ps2_fmul(rz, b20));
             const float oy = ps2_fadd(ps2_fadd(ps2_fmul(rx, b01), ps2_fmul(ry, b11)), ps2_fmul(rz, b21));
@@ -472,16 +520,17 @@ namespace
             if (root == 0u)
                 return true;
             struct Item { uint32_t node, dirty; };
-            std::array<Item, 64> localBuf{};
-            std::vector<Item> heapStack;
+            Item localBuf[64];
+            static thread_local std::vector<Item> heapStack;
+            heapStack.clear();
             size_t sp = 0;
             auto push = [&](uint32_t n, uint32_t d) {
-                if (heapStack.empty() && sp < localBuf.size())
+                if (heapStack.empty() && sp < 64u)
                     localBuf[sp++] = {n, d};
                 else
                 {
                     if (heapStack.empty())
-                        heapStack.assign(localBuf.begin(), localBuf.begin() + sp);
+                        heapStack.assign(localBuf, localBuf + sp);
                     heapStack.push_back({n, d});
                 }
             };
@@ -593,6 +642,83 @@ namespace
             g_origRwFrameUpdate(rdram, ctx, runtime);
             return;
         }
+        ctx->pc = GPR_U32(ctx, 31);
+    }
+
+    // FUN_003C4170(entity, point, $f12 extraRadius): CEntity sphere-distance test used inside CPhysical collision sector
+    // lists (FUN_0034FD60). Pure leaf function (~106 scalar MIPS insns, ~1.3-1.5% of GameThread in Little Havana).
+    // VCS_NATIVE_SPHERE_TEST=0 disables; VCS_NATIVE_SPHERE_TEST_VERIFY=1 checks return value parity against guest code.
+    PS2Runtime::RecompiledFunction g_origSphereTest = nullptr;
+
+    PS2_GUEST_CC void entitySphereTestNative(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t a0 = GPR_U32(ctx, 4), a1 = GPR_U32(ctx, 5);
+        const uint32_t p0 = a0 & 0x1FFFFFFFu, p1 = a1 & 0x1FFFFFFFu;
+        if (ctx->pc != 0x003C4170u || g_ps2ReadWatch.span || g_ps2WriteWatch.span ||
+            p0 >= PS2_RAM_SIZE - 0x60u || p1 >= PS2_RAM_SIZE - 12u)
+        {
+            g_origSphereTest(rdram, ctx, runtime);
+            return;
+        }
+        int16_t idx = 0;
+        std::memcpy(&idx, rdram + p0 + 0x56u, 2);
+        uint32_t modelTable = 0;
+        std::memcpy(&modelTable, rdram + 0x00486518u, 4);
+        const uint32_t mtPhys = (modelTable + static_cast<uint32_t>(static_cast<int32_t>(idx) * 4)) & 0x1FFFFFFFu;
+        if (mtPhys >= PS2_RAM_SIZE - 4u)
+        {
+            g_origSphereTest(rdram, ctx, runtime);
+            return;
+        }
+        uint32_t modelInfo = 0;
+        std::memcpy(&modelInfo, rdram + mtPhys, 4);
+        const uint32_t miPhys = modelInfo & 0x1FFFFFFFu;
+        if (miPhys >= PS2_RAM_SIZE - 24u)
+        {
+            g_origSphereTest(rdram, ctx, runtime);
+            return;
+        }
+        uint32_t colModel = 0;
+        std::memcpy(&colModel, rdram + miPhys + 20u, 4);
+        const uint32_t cmPhys = colModel & 0x1FFFFFFFu;
+        if (cmPhys >= PS2_RAM_SIZE - 16u)
+        {
+            g_origSphereTest(rdram, ctx, runtime);
+            return;
+        }
+        auto evalNative = [&](float extraR) -> uint64_t {
+            const float cx = readF32Fast(rdram, cmPhys + 0u), cy = readF32Fast(rdram, cmPhys + 4u),
+                        cz = readF32Fast(rdram, cmPhys + 8u), cr = readF32Fast(rdram, cmPhys + 12u);
+            const float r0x = readF32Fast(rdram, p0 + 0u),  r0y = readF32Fast(rdram, p0 + 4u),  r0z = readF32Fast(rdram, p0 + 8u);
+            const float r1x = readF32Fast(rdram, p0 + 16u), r1y = readF32Fast(rdram, p0 + 20u), r1z = readF32Fast(rdram, p0 + 24u);
+            const float r2x = readF32Fast(rdram, p0 + 32u), r2y = readF32Fast(rdram, p0 + 36u), r2z = readF32Fast(rdram, p0 + 40u);
+            const float r3x = readF32Fast(rdram, p0 + 48u), r3y = readF32Fast(rdram, p0 + 52u), r3z = readF32Fast(rdram, p0 + 56u);
+            const float tx = readF32Fast(rdram, p1 + 0u),   ty = readF32Fast(rdram, p1 + 4u),   tz = readF32Fast(rdram, p1 + 8u);
+            const float wx = ps2_fadd(ps2_fadd(ps2_fadd(ps2_fmul(r0x, cx), ps2_fmul(r1x, cy)), ps2_fmul(r2x, cz)), r3x);
+            const float wy = ps2_fadd(ps2_fadd(ps2_fadd(ps2_fmul(r0y, cx), ps2_fmul(r1y, cy)), ps2_fmul(r2y, cz)), r3y);
+            const float wz = ps2_fadd(ps2_fadd(ps2_fadd(ps2_fmul(r0z, cx), ps2_fmul(r1z, cy)), ps2_fmul(r2z, cz)), r3z);
+            const float dx = ps2_fsub(wx, tx), dy = ps2_fsub(wy, ty), dz = ps2_fsub(wz, tz);
+            const float d2 = ps2_fadd(ps2_fadd(ps2_fmul(dx, dx), ps2_fmul(dy, dy)), ps2_fmul(dz, dz));
+            const float sr = ps2_fadd(extraR, cr);
+            const float mr2 = ps2_fmul(sr, sr);
+            return d2 < mr2 ? 1ull : 0ull;
+        };
+        static const bool verify = std::getenv("VCS_NATIVE_SPHERE_TEST_VERIFY") != nullptr;
+        if (verify)
+        {
+            const uint64_t nativeV0 = evalNative(ctx->f[12]);
+            g_origSphereTest(rdram, ctx, runtime);
+            static uint64_t checked = 0, diffs = 0;
+            ++checked;
+            if (GPR_U64(ctx, 2) != nativeV0 && ++diffs <= 20)
+                std::fprintf(stderr, "[spheretest-verify] mismatch #%llu: native=%llu orig=%llu\n",
+                             (unsigned long long)diffs, (unsigned long long)nativeV0, (unsigned long long)GPR_U64(ctx, 2));
+            if ((checked & 0xFFFFFu) == 0u)
+                std::fprintf(stderr, "[spheretest-verify] checked=%llu diffs=%llu\n",
+                             (unsigned long long)checked, (unsigned long long)diffs);
+            return;
+        }
+        SET_GPR_U64(ctx, 2, evalNative(ctx->f[12]));
         ctx->pc = GPR_U32(ctx, 31);
     }
 
@@ -1336,6 +1462,159 @@ namespace
         calls = nearFull = 0;
     }
 
+    bool nativeXformEnabled()
+    {
+        static const bool on = [] {
+            const char *e = std::getenv("VCS_NATIVE_XFORM");
+            return !(e && e[0] == '0');
+        }();
+        return on;
+    }
+
+    bool verifyXformEnabled()
+    {
+        static const bool on = [] {
+            const char *e = std::getenv("VCS_NATIVE_XFORM_VERIFY");
+            return e && *e && e[0] != '0';
+        }();
+        return on;
+    }
+
+    PS2Runtime::RecompiledFunction g_origXformDfe0 = nullptr;
+    PS2Runtime::RecompiledFunction g_origXformE050 = nullptr;
+
+    uint8_t *xformFastPtr(uint8_t *rdram, uint32_t vaddr, uint64_t bytes, bool write)
+    {
+        if (vaddr >= PS2_SCRATCHPAD_BASE)
+        {
+            const uint64_t off = vaddr - PS2_SCRATCHPAD_BASE;
+            if (off + bytes <= PS2_SCRATCHPAD_SIZE)
+                return g_ps2ScratchpadHost + off;
+            return nullptr;
+        }
+        const uint32_t limit = write ? g_ps2FastWriteLimit : g_ps2FastReadLimit;
+        if (uint64_t(vaddr) + bytes <= limit)
+            return rdram + vaddr;
+        return nullptr;
+    }
+
+    bool runTransformPointsNative(uint8_t *rdram, R5900Context *ctx, uint32_t *outBytesOut = nullptr)
+    {
+        const uint32_t out = GPR_U32(ctx, 4);
+        const int32_t count = GPR_S32(ctx, 5);
+        const uint32_t matAddr = GPR_U32(ctx, 6);
+        const uint32_t in = GPR_U32(ctx, 7);
+        const uint64_t stride64 = GPR_U64(ctx, 8);
+        const int32_t strideS = static_cast<int32_t>(stride64);
+        if (count <= 0 || (out & 0xFu) != 0u || (matAddr & 0xFu) != 0u || strideS <= 0 || strideS > 0x10000)
+            return false;
+        const int64_t totalAdvance = static_cast<int64_t>(in) + static_cast<int64_t>(count) * static_cast<int64_t>(strideS);
+        if (totalAdvance > INT32_MAX || totalAdvance < INT32_MIN)
+            return false;
+        const uint64_t outBytes = static_cast<uint64_t>(count) * 16u;
+        const uint64_t inBytes = static_cast<uint64_t>(count - 1) * static_cast<uint64_t>(strideS) + 12u;
+        uint8_t *outPtr = xformFastPtr(rdram, out, outBytes, true);
+        const uint8_t *matPtr = xformFastPtr(rdram, matAddr, 64u, false);
+        const uint8_t *inPtr = xformFastPtr(rdram, in, inBytes, false);
+        if (!outPtr || !matPtr || !inPtr)
+            return false;
+        const auto overlaps = [](const uint8_t *a, uint64_t aLen, const uint8_t *b, uint64_t bLen) {
+            return !(a + aLen <= b || b + bLen <= a);
+        };
+        if (overlaps(outPtr, outBytes, matPtr, 64u) || overlaps(outPtr, outBytes, inPtr, inBytes))
+            return false;
+
+        const __m128 m0 = _mm_load_ps(reinterpret_cast<const float *>(matPtr));
+        const __m128 m1 = _mm_load_ps(reinterpret_cast<const float *>(matPtr + 16));
+        const __m128 m2 = _mm_load_ps(reinterpret_cast<const float *>(matPtr + 32));
+        const __m128 m3 = _mm_load_ps(reinterpret_cast<const float *>(matPtr + 48));
+        ctx->vu0_vf[2] = m0;
+        ctx->vu0_vf[3] = m1;
+        ctx->vu0_vf[4] = m2;
+        ctx->vu0_vf[5] = m3;
+
+        const __m128 vf0w = _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3, 3, 3, 3));
+        const __m128 xyzMask = _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1));
+        __m128 acc = ctx->vu0_acc;
+        __m128 vf6 = ctx->vu0_vf[6];
+        const uint32_t stride = static_cast<uint32_t>(strideS);
+        for (int32_t i = 0; i < count; ++i)
+        {
+            float v[3];
+            std::memcpy(v, inPtr + static_cast<uint64_t>(i) * stride, sizeof(v));
+            acc = _mm_blendv_ps(acc, PS2_VMUL(m0, _mm_set1_ps(v[0])), xyzMask);
+            acc = _mm_blendv_ps(acc, PS2_VADD(acc, PS2_VMUL(m1, _mm_set1_ps(v[1]))), xyzMask);
+            acc = _mm_blendv_ps(acc, PS2_VADD(acc, PS2_VMUL(m2, _mm_set1_ps(v[2]))), xyzMask);
+            vf6 = _mm_blendv_ps(vf6, PS2_VADD(acc, PS2_VMUL(m3, vf0w)), xyzMask);
+            _mm_store_ps(reinterpret_cast<float *>(outPtr + static_cast<uint64_t>(i) * 16u), vf6);
+        }
+        ctx->vu0_acc = acc;
+        ctx->vu0_vf[6] = vf6;
+        SET_GPR_U64(ctx, 2, stride64);
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(ADD32(out, static_cast<uint32_t>(outBytes))));
+        SET_GPR_S32(ctx, 5, 0);
+        SET_GPR_S32(ctx, 7, static_cast<int32_t>(totalAdvance));
+        ctx->pc = GPR_U32(ctx, 31);
+        if (outBytesOut)
+            *outBytesOut = static_cast<uint32_t>(outBytes);
+        return true;
+    }
+
+    template <uint32_t EntryPc, PS2Runtime::RecompiledFunction *OrigFn>
+    PS2_GUEST_CC void transformPointsNative(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (ctx->pc != EntryPc || !nativeXformEnabled())
+        {
+            (*OrigFn)(rdram, ctx, runtime);
+            return;
+        }
+        if (verifyXformEnabled()) [[unlikely]]
+        {
+            static std::atomic<uint64_t> checked{0}, diffs{0};
+            static thread_local std::vector<uint8_t> natOut, refOut;
+            const uint32_t out = GPR_U32(ctx, 4);
+            const uint32_t savedRa = GPR_U32(ctx, 31);
+            const R5900Context savedCtx = *ctx;
+            uint32_t outBytes = 0;
+            if (!runTransformPointsNative(rdram, ctx, &outBytes))
+            {
+                *ctx = savedCtx;
+                (*OrigFn)(rdram, ctx, runtime);
+                return;
+            }
+            const uint8_t *outPtr = xformFastPtr(rdram, out, outBytes, true);
+            natOut.assign(outPtr, outPtr + outBytes);
+            const R5900Context natCtx = *ctx;
+            *ctx = savedCtx;
+            (*OrigFn)(rdram, ctx, runtime);
+            if (ctx->pc != savedRa)
+                return; // checkpoint unwind inside reference run: skip comparison
+            refOut.assign(outPtr, outPtr + outBytes);
+            const R5900Context *nat = &natCtx;
+            const R5900Context *sav = &savedCtx;
+            const bool same = (natOut == refOut) &&
+                              std::memcmp(&natCtx.vu0_acc, &ctx->vu0_acc, sizeof(natCtx.vu0_acc)) == 0 &&
+                              std::memcmp(&natCtx.vu0_vf[2], &ctx->vu0_vf[2], sizeof(__m128) * 5u) == 0 &&
+                              GPR_U64(nat, 2) == GPR_U64(ctx, 2) && GPR_U32(nat, 4) == GPR_U32(ctx, 4) &&
+                              GPR_U32(nat, 5) == GPR_U32(ctx, 5) && GPR_U32(nat, 7) == GPR_U32(ctx, 7);
+            const uint64_t n = checked.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (!same)
+            {
+                const uint64_t d = diffs.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (d <= 8)
+                    std::fprintf(stderr, "[xform-verify] 0x%X DIFF #%llu count=%d\n", EntryPc,
+                                 static_cast<unsigned long long>(d), GPR_S32(sav, 5));
+            }
+            if ((n & (n - 1)) == 0 || (n % 65536) == 0)
+                std::fprintf(stderr, "[xform-verify] 0x%X checked=%llu diffs=%llu\n", EntryPc,
+                             static_cast<unsigned long long>(n),
+                             static_cast<unsigned long long>(diffs.load(std::memory_order_relaxed)));
+            return;
+        }
+        if (!runTransformPointsNative(rdram, ctx))
+            (*OrigFn)(rdram, ctx, runtime);
+    }
+
     // Game frame boundary for the perf overlay (runtime/ps2_perf.h): FUN_002723E8 kicks the frame's VIF1 display
     // list (D1_CHCR = 0x145 at 0x27245C), once per rendered frame.
     PS2_GUEST_CC void markFrameKick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1503,6 +1782,21 @@ namespace
             g_origRwFrameUpdate = runtime.lookupFunction(0x001B4FB8u);
             if (g_origRwFrameUpdate)
                 runtime.replaceFunction(0x001B4FB8u, &rwFrameUpdateNative);
+        }
+        if (!std::getenv("VCS_NATIVE_SPHERE_TEST") || std::getenv("VCS_NATIVE_SPHERE_TEST")[0] != '0')
+        {
+            g_origSphereTest = runtime.lookupFunction(0x003C4170u);
+            if (g_origSphereTest)
+                runtime.replaceFunction(0x003C4170u, &entitySphereTestNative);
+        }
+        if (nativeXformEnabled())
+        {
+            g_origXformDfe0 = runtime.lookupFunction(0x0039DFE0u);
+            if (g_origXformDfe0)
+                runtime.replaceFunction(0x0039DFE0u, &transformPointsNative<0x0039DFE0u, &g_origXformDfe0>);
+            g_origXformE050 = runtime.lookupFunction(0x0039E050u);
+            if (g_origXformE050)
+                runtime.replaceFunction(0x0039E050u, &transformPointsNative<0x0039E050u, &g_origXformE050>);
         }
         vcs::rslnative::install(runtime); // before the RSL tools: they wrap whatever the flush is then
         vcs::rsltrace::install(runtime);

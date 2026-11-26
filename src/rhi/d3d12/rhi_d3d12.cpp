@@ -60,8 +60,18 @@ namespace rhi
         constexpr uint32_t kTextureSlots = 8; // t0..t7 / s0..s7 (beginPass unbinds 8, as rhi_d3d11.cpp)
         constexpr UINT64 kRingChunk = 8ull << 20;
         constexpr UINT kViewsPerFrame = 131072; // shader-visible SRV descriptors a frame (tables of 8, cached per frame)
+        constexpr UINT kPersistTables = 16384;  // [gta-recomp] persistent single-texture SRV tables across frames (#113)
         constexpr UINT kSamplerHeap = 2048;     // the most a shader-visible sampler heap may hold
         constexpr UINT kRootTextures = kUniformSlots, kRootSamplers = kUniformSlots + 1;
+
+        bool persistTables()
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("PS2X_D3D12_PERSIST_TABLES");
+                return !(e && e[0] == '0');
+            }();
+            return on;
+        }
 
         UINT64 alignUp(UINT64 v, UINT64 a) { return (v + a - 1) & ~(a - 1); }
 
@@ -609,6 +619,31 @@ namespace rhi
             std::atomic<std::thread::id> owner{};
             std::mutex orphanMutex;
             std::vector<std::function<void()>> orphans;
+            std::mutex persistMutex;
+            UINT persistNext = 0;
+            std::vector<UINT> persistFree;
+
+            INT allocPersistTable()
+            {
+                std::lock_guard<std::mutex> lock(persistMutex);
+                if (!persistFree.empty())
+                {
+                    const UINT slot = persistFree.back();
+                    persistFree.pop_back();
+                    return static_cast<INT>(slot);
+                }
+                if (persistNext < kPersistTables)
+                    return static_cast<INT>(persistNext++);
+                return -1;
+            }
+
+            void freePersistTable(INT slot)
+            {
+                if (slot < 0)
+                    return;
+                std::lock_guard<std::mutex> lock(persistMutex);
+                persistFree.push_back(static_cast<UINT>(slot));
+            }
 
             bool onOwner() const { return owner.load(std::memory_order_relaxed) == std::this_thread::get_id(); }
 
@@ -720,7 +755,8 @@ namespace rhi
                 const D3D12_CPU_DESCRIPTOR_HANDLE s = srv, t = rtv, d = dsv;
                 TextureHeaps::Heap *heap = placedHeap;
                 const UINT64 offset = placedOffset, size = placedSize;
-                core->defer([c, r, views, targets, s, t, d, heap, offset, size]() mutable {
+                const INT pslot = persistSlot;
+                core->defer([c, r, views, targets, s, t, d, heap, offset, size, pslot]() mutable {
                     c->srvs.free(s);
                     c->rtvs.free(t);
                     c->dsvs.free(d);
@@ -731,12 +767,15 @@ namespace rhi
                     r.Reset(); // (before its range is given to another texture)
                     if (heap)
                         c->textureHeaps.release(heap, offset, size);
+                    c->freePersistTable(pslot);
                 });
             }
 
             std::shared_ptr<Core> core;
             ComPtr<ID3D12Resource> resource;
             D3D12_CPU_DESCRIPTOR_HANDLE srv{}, rtv{}, dsv{};
+            INT persistSlot = -1;
+            D3D12_GPU_DESCRIPTOR_HANDLE persistGpu{};
             std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> levelSrv, levelRtv; // generateMips: one level each (made at first use)
             TextureHeaps::Heap *placedHeap = nullptr; // placed in a texture heap: where
             UINT64 placedOffset = 0, placedSize = 0;
@@ -793,6 +832,8 @@ namespace rhi
             }
             std::shared_ptr<Core> core;
             D3D12_CPU_DESCRIPTOR_HANDLE handle{};
+            D3D12_GPU_DESCRIPTOR_HANDLE persistGpu{};
+            uint64_t persistGen = 0;
         };
 
         class DxPipeline final : public Pipeline
@@ -1245,7 +1286,7 @@ namespace rhi
                         const size_t n = b.desc().usage == BufferUsage::Constant ? cbBytes : activeBytes;
                         const Slice s = ringAlloc(n, align);
                         std::memcpy(s.data, data, size);
-                        if (n > size && b.desc().usage == BufferUsage::Constant)
+                        if (fullCb && n > size && b.desc().usage == BufferUsage::Constant)
                             std::memset(s.data + size, 0, n - size);
                         b.used = n;
                         b.sliceVa = s.va;
@@ -1378,6 +1419,7 @@ namespace rhi
                     m_textures[i] = nullptr;
                     m_samplers[i] = nullptr;
                 }
+                m_extraTexMask = 0;
                 m_texturesDirty = true;
                 setViewport(0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h));
                 setScissor(0, 0, static_cast<int>(w), static_cast<int>(h));
@@ -1453,6 +1495,14 @@ namespace rhi
                 {
                     m_textures[slot] = t;
                     m_samplers[slot] = s;
+                    if (slot > 0u)
+                    {
+                        const uint8_t bit = static_cast<uint8_t>(1u << (slot - 1u));
+                        if (t || s)
+                            m_extraTexMask |= bit;
+                        else
+                            m_extraTexMask = static_cast<uint8_t>(m_extraTexMask & ~bit);
+                    }
                     m_texturesDirty = true;
                 }
             }
@@ -1674,7 +1724,8 @@ namespace rhi
             bool createHeaps(std::string &error)
             {
                 ID3D12Device *device = m_core->device.Get();
-                const D3D12_DESCRIPTOR_HEAP_DESC vd{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kViewsPerFrame * kFrames,
+                const D3D12_DESCRIPTOR_HEAP_DESC vd{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                                                    kViewsPerFrame * kFrames + kPersistTables * kTextureSlots,
                                                     D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
                 const D3D12_DESCRIPTOR_HEAP_DESC sd{D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerHeap, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
                 if (FAILED(device->CreateDescriptorHeap(&vd, IID_PPV_ARGS(&m_views))) ||
@@ -1909,6 +1960,7 @@ namespace rhi
                 m_emittedTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
                 std::fill(std::begin(m_emittedCbv), std::end(m_emittedCbv), D3D12_GPU_VIRTUAL_ADDRESS(~0ull));
                 m_emittedTextures = m_emittedSamplers = ~0ull;
+                m_lastViewsValid = m_lastSamplersValid = false;
                 m_emittedVb = {};
                 m_emittedIb = {};
                 m_emittedViewportValid = m_emittedScissorValid = m_emittedBlendValid = false;
@@ -2024,6 +2076,10 @@ namespace rhi
                     if (m_samplers[i] == object)
                         m_samplers[i] = nullptr, m_texturesDirty = true;
                 }
+                m_extraTexMask = 0;
+                for (uint32_t i = 1; i < kTextureSlots; ++i)
+                    if (m_textures[i] || m_samplers[i])
+                        m_extraTexMask |= static_cast<uint8_t>(1u << (i - 1u));
                 if (object == m_pipeline)
                     m_pipeline = nullptr;
                 if (object == m_lastVariantPipe)
@@ -2247,6 +2303,7 @@ namespace rhi
                         flushAndWait(); // every table in use is done with: the heap starts again
                         m_samplerTables.clear();
                         m_samplerNext = 0;
+                        ++m_samplerGen;
                     }
                     at = m_samplerNext;
                     m_samplerNext += kTextureSlots;
@@ -2270,48 +2327,139 @@ namespace rhi
                 m_core->device->CopyDescriptors(1, &dst, &count, kTextureSlots, src, ones, type);
             }
 
+            D3D12_GPU_DESCRIPTOR_HANDLE ensureNullViewTable()
+            {
+                if (m_nullViewTableGpu.ptr)
+                    return m_nullViewTableGpu;
+                const INT slot = m_core->allocPersistTable();
+                if (slot < 0)
+                    return {};
+                const UINT at = kFrames * kViewsPerFrame + static_cast<UINT>(slot) * kTextureSlots;
+                Table views;
+                for (auto &h : views.h)
+                    h = m_nullSrv.ptr;
+                copyTable(m_views.Get(), at, m_viewIncrement, views, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                m_nullViewTableGpu.ptr = m_views->GetGPUDescriptorHandleForHeapStart().ptr + UINT64(at) * m_viewIncrement;
+                return m_nullViewTableGpu;
+            }
+
+            D3D12_GPU_DESCRIPTOR_HANDLE ensurePersistTexture(DxTexture &t)
+            {
+                if (t.persistGpu.ptr)
+                    return t.persistGpu;
+                const INT slot = m_core->allocPersistTable();
+                if (slot < 0)
+                    return {};
+                const UINT at = kFrames * kViewsPerFrame + static_cast<UINT>(slot) * kTextureSlots;
+                D3D12_CPU_DESCRIPTOR_HANDLE src[kTextureSlots];
+                UINT ones[kTextureSlots];
+                src[0] = t.srv;
+                ones[0] = 1;
+                for (uint32_t i = 1; i < kTextureSlots; ++i)
+                {
+                    src[i] = m_nullSrv;
+                    ones[i] = 1;
+                }
+                const D3D12_CPU_DESCRIPTOR_HANDLE dst{m_views->GetCPUDescriptorHandleForHeapStart().ptr + SIZE_T(at) * m_viewIncrement};
+                const UINT count = kTextureSlots;
+                m_core->device->CopyDescriptors(1, &dst, &count, kTextureSlots, src, ones, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                ++g_stats.tables;
+                t.persistSlot = slot;
+                t.persistGpu.ptr = m_views->GetGPUDescriptorHandleForHeapStart().ptr + UINT64(at) * m_viewIncrement;
+                return t.persistGpu;
+            }
+
+            D3D12_GPU_DESCRIPTOR_HANDLE ensurePersistSampler(DxSampler &s)
+            {
+                if (s.persistGpu.ptr && s.persistGen == m_samplerGen)
+                    return s.persistGpu;
+                Table samplers;
+                samplers.h[0] = s.handle.ptr;
+                const SIZE_T defPtr = static_cast<DxSampler *>(m_defaultSampler.get())->handle.ptr;
+                for (uint32_t i = 1; i < kTextureSlots; ++i)
+                    samplers.h[i] = defPtr;
+                s.persistGpu = samplerTable(samplers);
+                s.persistGen = m_samplerGen;
+                return s.persistGpu;
+            }
+
             bool prepareDraw(bool indexed)
             {
                 if (!m_pipeline || !m_inPass || (indexed && !m_indexBuffer))
                     return false;
                 if (m_texturesDirty)
                 {
-                    // textures the shader reads: readable, not the pass's own targets (D3D unbinds a texture that is
-                    // also the target: it reads zeros)
-                    Table views, samplers;
-                    for (uint32_t i = 0; i < kTextureSlots; ++i)
+                    // [gta-recomp] Fast single-texture path: each DxTexture/DxSampler owns a persistent 8-descriptor table,
+                    // eliminating ~700 CopyDescriptors + unordered_map lookups per frame (#113).
+                    if (persistTables() && !m_extraTexMask)
                     {
-                        DxTexture *t = m_textures[i];
+                        DxTexture *t = m_textures[0];
                         if (t && (t == m_passColor || t == m_passDepth || t->samples != 1u || !t->srv.ptr))
                             t = nullptr;
                         if (t && t->state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
                             transition(*t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                        views.h[i] = t ? t->srv.ptr : m_nullSrv.ptr;
-                        samplers.h[i] = (m_samplers[i] ? m_samplers[i] : static_cast<DxSampler *>(m_defaultSampler.get()))->handle.ptr;
-                    }
-                    flushBarriers();
-                    // the renderer sets its textures before every draw: most are the last draw's (no lookup then)
-                    if (m_emittedTextures == ~0ull || !(views == m_lastViews))
-                    {
-                        const D3D12_GPU_DESCRIPTOR_HANDLE vt = textureTable(views);
-                        if (vt.ptr != m_emittedTextures)
+                        flushBarriers();
+                        const D3D12_GPU_DESCRIPTOR_HANDLE vt = t ? ensurePersistTexture(*t) : ensureNullViewTable();
+                        if (vt.ptr)
                         {
-                            m_cmd->SetGraphicsRootDescriptorTable(kRootTextures, vt);
-                            m_emittedTextures = vt.ptr;
+                            if (vt.ptr != m_emittedTextures)
+                            {
+                                m_cmd->SetGraphicsRootDescriptorTable(kRootTextures, vt);
+                                m_emittedTextures = vt.ptr;
+                                m_lastViewsValid = false;
+                            }
+                            DxSampler *s = m_samplers[0] ? m_samplers[0] : static_cast<DxSampler *>(m_defaultSampler.get());
+                            const D3D12_GPU_DESCRIPTOR_HANDLE st = ensurePersistSampler(*s);
+                            if (st.ptr != m_emittedSamplers)
+                            {
+                                m_cmd->SetGraphicsRootDescriptorTable(kRootSamplers, st);
+                                m_emittedSamplers = st.ptr;
+                                m_lastSamplersValid = false;
+                            }
+                            m_texturesDirty = false;
                         }
-                        m_lastViews = views;
                     }
-                    if (m_emittedSamplers == ~0ull || !(samplers == m_lastSamplers))
+                    if (m_texturesDirty)
                     {
-                        const D3D12_GPU_DESCRIPTOR_HANDLE st = samplerTable(samplers);
-                        if (st.ptr != m_emittedSamplers)
+                        // textures the shader reads: readable, not the pass's own targets (D3D unbinds a texture that is
+                        // also the target: it reads zeros)
+                        Table views, samplers;
+                        for (uint32_t i = 0; i < kTextureSlots; ++i)
                         {
-                            m_cmd->SetGraphicsRootDescriptorTable(kRootSamplers, st);
-                            m_emittedSamplers = st.ptr;
+                            DxTexture *t = m_textures[i];
+                            if (t && (t == m_passColor || t == m_passDepth || t->samples != 1u || !t->srv.ptr))
+                                t = nullptr;
+                            if (t && t->state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+                                transition(*t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                            views.h[i] = t ? t->srv.ptr : m_nullSrv.ptr;
+                            samplers.h[i] = (m_samplers[i] ? m_samplers[i] : static_cast<DxSampler *>(m_defaultSampler.get()))->handle.ptr;
                         }
-                        m_lastSamplers = samplers;
+                        flushBarriers();
+                        // the renderer sets its textures before every draw: most are the last draw's (no lookup then)
+                        if (m_emittedTextures == ~0ull || !m_lastViewsValid || !(views == m_lastViews))
+                        {
+                            const D3D12_GPU_DESCRIPTOR_HANDLE vt = textureTable(views);
+                            if (vt.ptr != m_emittedTextures)
+                            {
+                                m_cmd->SetGraphicsRootDescriptorTable(kRootTextures, vt);
+                                m_emittedTextures = vt.ptr;
+                            }
+                            m_lastViews = views;
+                            m_lastViewsValid = true;
+                        }
+                        if (m_emittedSamplers == ~0ull || !m_lastSamplersValid || !(samplers == m_lastSamplers))
+                        {
+                            const D3D12_GPU_DESCRIPTOR_HANDLE st = samplerTable(samplers);
+                            if (st.ptr != m_emittedSamplers)
+                            {
+                                m_cmd->SetGraphicsRootDescriptorTable(kRootSamplers, st);
+                                m_emittedSamplers = st.ptr;
+                            }
+                            m_lastSamplers = samplers;
+                            m_lastSamplersValid = true;
+                        }
+                        m_texturesDirty = false;
                     }
-                    m_texturesDirty = false;
                 }
                 // the pipeline for the pass's targets
                 const DXGI_FORMAT color = m_passToBack ? kBackbufferFormat : m_passColor ? m_passColor->format : DXGI_FORMAT_UNKNOWN;
@@ -2789,6 +2937,10 @@ namespace rhi
             D3D12_GPU_VIRTUAL_ADDRESS m_emittedCbv[kUniformSlots]{};
             UINT64 m_emittedTextures = ~0ull, m_emittedSamplers = ~0ull;
             Table m_lastViews, m_lastSamplers; // what those tables hold
+            bool m_lastViewsValid = false, m_lastSamplersValid = false;
+            D3D12_GPU_DESCRIPTOR_HANDLE m_nullViewTableGpu{};
+            uint8_t m_extraTexMask = 0;
+            uint64_t m_samplerGen = 1;
             D3D12_VERTEX_BUFFER_VIEW m_emittedVb{};
             D3D12_INDEX_BUFFER_VIEW m_emittedIb{};
             D3D12_VIEWPORT m_emittedViewport{};

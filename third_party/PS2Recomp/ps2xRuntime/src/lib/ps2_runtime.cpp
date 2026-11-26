@@ -3265,24 +3265,35 @@ void PS2Runtime::run()
         float aspect = present::displayAspect(!hwRenderer() || hwRenderer()->presenter().showing3d());
         // [gta-recomp] the game's frame (the 3D frames' shape): 4:3 frames (menus, loading screens) are placed inside it
         float frameAspect = present::displayAspect(true);
+        bool movieUpdated = false;
         { // [gta-recomp] a movie playing (ps2_present.h): its picture instead of the game's
             static present::Picture moviePicture;
             static uint64_t movieSequence = 0;
+            static bool wasMovieActive = false;
             std::lock_guard<std::mutex> lock(g_movieFrame.mutex);
             if (g_movieFrame.active && g_movieFrame.width > 0)
             {
+                if (!wasMovieActive || moviePicture.width != g_movieFrame.width || moviePicture.height != g_movieFrame.height)
+                    movieUpdated = true;
                 if (moviePicture.width != g_movieFrame.width || moviePicture.height != g_movieFrame.height)
                     moviePicture = present::createPicture(g_movieFrame.width, g_movieFrame.height, true);
                 if (movieSequence != g_movieFrame.sequence)
                 {
                     present::updatePicture(moviePicture, g_movieFrame.rgba.data());
                     movieSequence = g_movieFrame.sequence;
+                    movieUpdated = true;
                 }
                 shownTex = moviePicture;
                 presentWidth = static_cast<uint32_t>(g_movieFrame.width);
                 presentHeight = static_cast<uint32_t>(g_movieFrame.height);
                 aspect = g_movieFrame.aspect;
                 frameAspect = 0.0f; // movies: the whole window, as before
+                wasMovieActive = true;
+            }
+            else if (wasMovieActive)
+            {
+                wasMovieActive = false;
+                movieUpdated = true;
             }
         }
         static float lastAspect = 0.0f; // [gta-recomp] log the presentation shape when it changes
@@ -3342,8 +3353,23 @@ void PS2Runtime::run()
         platform::endUiFrame();
         int windowWidth = 0, windowHeight = 0;
         platform::windowSize(windowWidth, windowHeight);
+        // [gta-recomp] PS2X_SKIP_DUP_PRESENT=0 disables skipping duplicate window presents between uncapped game frames.
+        static const bool skipDupPresent = [] {
+            const char *e = std::getenv("PS2X_SKIP_DUP_PRESENT");
+            return !(e && e[0] == '0');
+        }();
+        static SpikeClock::time_point s_lastPresentTime{};
+        static int s_lastPresentW = 0, s_lastPresentH = 0;
+        const bool winResized = (windowWidth != s_lastPresentW || windowHeight != s_lastPresentH);
+        const double msSincePresent = s_lastPresentTime.time_since_epoch().count() != 0
+            ? std::chrono::duration<double, std::milli>(SpikeClock::now() - s_lastPresentTime).count()
+            : 1e9;
+        const bool presentThisTick = !skipDupPresent || present::presentMode() == 1 || !hwRenderer() ||
+                                     ps2LastFramesTaken() > 0u || movieUpdated || frameStats || winResized ||
+                                     msSincePresent >= 14.0 || g_burst.left > 0;
         spikeT[3] = SpikeClock::now();
-        present::drawWindow(shownTex, srcWidth, srcHeight, aspect, windowWidth, windowHeight, frameAspect);
+        if (presentThisTick)
+            present::drawWindow(shownTex, srcWidth, srcHeight, aspect, windowWidth, windowHeight, frameAspect);
         spikeT[4] = SpikeClock::now();
 
         // [gta-recomp] control channel (runtime/ps2_control.h): screenshots render the same picture off-screen, so
@@ -3406,7 +3432,13 @@ void PS2Runtime::run()
             ps2HostTick(false, false);
             prePresentTicked = true;
         }
-        present::present();
+        if (presentThisTick)
+        {
+            present::present();
+            s_lastPresentTime = SpikeClock::now();
+            s_lastPresentW = windowWidth;
+            s_lastPresentH = windowHeight;
+        }
         spikeT[5] = SpikeClock::now();
         if (spikeMs > 0.0)
         {

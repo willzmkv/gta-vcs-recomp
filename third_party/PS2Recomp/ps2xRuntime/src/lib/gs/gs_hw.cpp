@@ -273,6 +273,26 @@ void gsHwSetStochastic(bool on) { g_stochastic.store(on, std::memory_order_relax
 uint64_t gsHwStochasticDraws() { return g_stochasticDraws.load(std::memory_order_relaxed); }
 uint64_t gsHwStochasticTextures() { return g_stochasticTextures.load(std::memory_order_relaxed); }
 
+// [gta-recomp] PS2X_HW_ATE_PRUNE=0 disables proving alpha test (GEQUAL/GREATER) always passes to elide AFAIL 2nd-pass draws (#113).
+static bool atePrune()
+{
+    static const bool on = [] {
+        const char *e = std::getenv("PS2X_HW_ATE_PRUNE");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+
+static uint8_t computeMinAlpha(const std::vector<uint32_t> &pixels)
+{
+    if (pixels.empty())
+        return 0u;
+    uint32_t m = 255u;
+    for (uint32_t px : pixels)
+        m = std::min(m, px >> 24);
+    return static_cast<uint8_t>(m);
+}
+
 // [gta-recomp] Classify decoded RGBA8 texture suitability for Deliot & Heitz stochastic tiling: must be opaque
 // (>= 32x32, aspect <= 2:1, minA >= 110), textured (3 <= rgbStd < 50), seamlessly wrapping in U/V, and stationary
 // across 8x8 blocks / 1D profiles / edge gradients (rejects signs, window grids, road stripes, and HUD icons).
@@ -551,6 +571,7 @@ namespace
         // [gta-recomp] a HudDraw's widescreen squeeze, applied in the layer after its pixel snapping (appendHudDraw):
         // x' = pivot + (x - pivot) * squeeze in GS pixel-centre coordinates, the scissor alike (1 = none)
         float hudPivot = 0.0f, hudSqueeze = 1.0f;
+        int16_t minVertAlpha = -1; // [gta-recomp] minimum vertex alpha across primitives when known (atePrune)
     };
 
     // [gta-recomp] A texture made on a helper thread (a free-threaded device: D3D11, Vulkan; HwBackend::makeTextureEarly): its
@@ -570,6 +591,7 @@ namespace
         std::shared_ptr<const render::ReplacementImage> replacement;
         uint32_t levels = 1;
         size_t bytes = 0;
+        uint8_t minAlpha = 0;
         bool stochastic = false; // [gta-recomp] preserved across deferredDecode / helper jobs
         bool checkStochastic = false; // [gta-recomp] run isStochasticSurface on helper thread
         std::unique_ptr<rhi::Texture> made;
@@ -584,6 +606,7 @@ namespace
         std::vector<uint32_t> mips; // [gta-recomp] anisotropic filtering: levels 1.. after each other (buildMipChain)
         std::shared_ptr<EarlyTexture> early; // [gta-recomp] being made on a helper thread (pixels moved there)
         std::shared_ptr<const render::ReplacementImage> replacement; // [gta-recomp] decoded asynchronously
+        uint8_t minAlpha = 0;
         bool stochastic = false; // [gta-recomp] eligible for procedural stochastic tiling (isStochasticSurface)
     };
 
@@ -667,6 +690,7 @@ namespace
     {
         uint64_t key = 0;
         uint32_t stride = 0, count = 0;
+        int16_t minVertAlpha = -1;
         std::vector<uint8_t> bytes;
     };
 
@@ -676,9 +700,10 @@ namespace
         uint64_t meshKey = 0;
         uint32_t kind = 0, drawCount = 0;
         bool transient = false;
+        uint8_t constantCount = 124;
         uint32_t transientOffset = 0; // bytes into the frame's nativeBytes
-        float constants[128] = {};    // the kind's 124 + (XYOFFSET x, y in pixels, Z scale, 0)
         uint32_t instanceFirst = 0, instanceCount = 0; // [gta-recomp] instanced (vs_lit_inst): floats into nativeInstances
+        float constants[128];         // the kind's constantCount + [124..127] = (XYOFFSET x, y in pixels, Z scale, 0)
     };
 
     struct Frame
@@ -729,16 +754,21 @@ namespace
 
         void gsDraw(const Frame &f, const DrawCmd &d)
         {
-            if (gsDrawSourcePacked(d.source)) // recorded from whole packets, not through the GS front end
+            const bool packed = gsDrawSourcePacked(d.source);
+            if (packed) // recorded from whole packets, not through the GS front end
             {
                 ++m_frame.packed;
                 m_frame.packedVertices += d.count;
-                return;
+                if (d.s.ate && d.s.atst != 1u && d.s.afail != 0u)
+                    ++m_frame.packedAfail;
             }
-            ++m_frame.gs;
-            m_frame.gsVertices += d.count;
-            const uint32_t path = gsDrawSourcePath(d.source);
-            ++(path == 1u ? (gsDrawSourceNative(d.source) ? m_frame.hle : m_frame.vu1) : path == 2u ? m_frame.path2 : m_frame.path3);
+            else
+            {
+                ++m_frame.gs;
+                m_frame.gsVertices += d.count;
+                const uint32_t path = gsDrawSourcePath(d.source);
+                ++(path == 1u ? (gsDrawSourceNative(d.source) ? m_frame.hle : m_frame.vu1) : path == 2u ? m_frame.path2 : m_frame.path3);
+            }
             if (!m_table)
                 return;
             const HwState &s = d.s;
@@ -762,12 +792,28 @@ namespace
                                  (uint64_t(s.fst & 1u) << 20) | (uint64_t(s.fge & 1u) << 19) | (uint64_t(s.ate & 1u) << 18) |
                                  (uint64_t(full) << 17) | (uint64_t(far) << 16) |
                                  (uint64_t((s.ba & 3u) | (s.bb & 3u) << 2 | (s.bc & 3u) << 4 | (s.bd & 3u) << 6) << 8);
-            Kind &k = m_kinds[key];
+            Kind &k = packed ? m_packedKinds[key] : m_kinds[key];
             ++k.draws;
             k.vertices += d.count;
             k.state = s;
         }
-        void nativeDraw() { ++m_frame.native; }
+        void nativeDraw(const NativeDrawCmd &nd)
+        {
+            ++m_frame.native;
+            if (nd.kind == GSNativeDraw::VcsWorld)
+                ++m_frame.natWorld;
+            else if (nd.instanceCount)
+                ++m_frame.natLitInst, m_frame.natInstances += nd.instanceCount;
+            else
+                ++m_frame.natLit;
+            if (nd.transient)
+            {
+                ++m_frame.natTransient;
+                m_frame.natTransientVerts += nd.drawCount;
+            }
+            if (nd.s.ate && nd.s.atst != 1u && nd.s.afail != 0u)
+                ++m_frame.natAfail;
+        }
         void hudDraw() { ++m_frame.hud; }
         void postDraws(uint32_t n) { m_frame.post += n; }
 
@@ -786,6 +832,14 @@ namespace
             ps2perf::add(C::PostDraws, m_frame.post);
             ps2perf::add(C::PackedDraws, m_frame.packed);
             ps2perf::add(C::PackedVertices, m_frame.packedVertices);
+            m_sum.natWorld += m_frame.natWorld;
+            m_sum.natLit += m_frame.natLit;
+            m_sum.natLitInst += m_frame.natLitInst;
+            m_sum.natInstances += m_frame.natInstances;
+            m_sum.natTransient += m_frame.natTransient;
+            m_sum.natTransientVerts += m_frame.natTransientVerts;
+            m_sum.natAfail += m_frame.natAfail;
+            m_sum.packedAfail += m_frame.packedAfail;
             m_frame = {};
             ++m_frames;
             if (m_log)
@@ -806,47 +860,68 @@ namespace
                 m_table = true;
                 m_frames = 0;
                 m_kinds.clear();
+                m_packedKinds.clear();
+                m_sum = {};
                 return "[gsdraws] collecting from now\n";
             }
             std::vector<std::pair<uint64_t, Kind>> kinds(m_kinds.begin(), m_kinds.end());
             std::sort(kinds.begin(), kinds.end(), [](const auto &a, const auto &b) { return a.second.draws > b.second.draws; });
+            std::vector<std::pair<uint64_t, Kind>> pKinds(m_packedKinds.begin(), m_packedKinds.end());
+            std::sort(pKinds.begin(), pKinds.end(), [](const auto &a, const auto &b) { return a.second.draws > b.second.draws; });
             const double n = std::max<double>(1.0, static_cast<double>(m_frames));
             std::string out;
             char line[512];
-            double draws = 0.0, vertices = 0.0;
+            double draws = 0.0, vertices = 0.0, pDraws = 0.0, pVerts = 0.0;
             for (const auto &[key, k] : kinds)
             {
                 draws += k.draws;
                 vertices += k.vertices;
             }
-            std::snprintf(line, sizeof(line), "[gsdraws] %llu frames: %.1f GS-path draws, %.0f vertices per frame, %zu kinds\n",
-                          static_cast<unsigned long long>(m_frames), draws / n, vertices / n, kinds.size());
-            out += line;
-            for (const auto &[key, k] : kinds)
+            for (const auto &[key, k] : pKinds)
             {
-                const uint32_t src = static_cast<uint32_t>(key >> 45) & 7u, prog = static_cast<uint32_t>(key >> 48);
-                char from[32];
-                if ((src & 3u) == 1u)
-                    std::snprintf(from, sizeof(from), "%s:0x%04x", (src & 4u) ? "hle" : "vu1", prog);
-                else
-                    std::snprintf(from, sizeof(from), "path%u", src & 3u);
-                const HwState &s = k.state;
-                static const char *const kModes[] = {"tri", "line", "point", "?"};
-                static const char *const kZtst[] = {"never", "always", "gequal", "greater"};
-                std::snprintf(line, sizeof(line),
-                              "[gsdraws] %8.2f draws %9.1f verts  %-11s fb %3u/%-2u %-5s %s%s blend %s(%u%u%u%u) z %s%s%s%s%s%s%s\n",
-                              k.draws / n, k.vertices / n, from, s.fbp, s.fbw, kModes[s.mode & 3u],
-                              s.tme ? (s.texIsRt ? "tex=rt" : "tex") : "flat", s.tme ? (s.fst ? " uv" : " stq") : "",
-                              s.abe ? "on" : "off", s.ba, s.bb, s.bc, s.bd, s.zte ? kZtst[s.ztst & 3u] : "off",
-                              s.zmsk ? " nowrite" : "", s.ate ? " atest" : "", s.fge ? " fog" : "",
-                              (key >> 17) & 1u ? " full" : "", (key >> 16) & 1u ? " far" : "",
-                              s.texIsRt ? (" rt=" + std::to_string(s.rtFbp)).c_str() : "");
-                out += line;
+                pDraws += k.draws;
+                pVerts += k.vertices;
             }
+            std::snprintf(line, sizeof(line),
+                          "[gsdraws] %llu frames: %.1f GS-path, %.1f packed (%.0f v, %.1f afail), %.1f native (world %.1f, lit %.1f, inst %.1f [%.0f inst], trans %.1f [%.0f v], afail %.1f)\n",
+                          static_cast<unsigned long long>(m_frames), draws / n, pDraws / n, pVerts / n, m_sum.packedAfail / n,
+                          (m_sum.natWorld + m_sum.natLit + m_sum.natLitInst) / n, m_sum.natWorld / n, m_sum.natLit / n,
+                          m_sum.natLitInst / n, m_sum.natInstances / n, m_sum.natTransient / n, m_sum.natTransientVerts / n,
+                          m_sum.natAfail / n);
+            out += line;
+            auto appendList = [&](const char *tag, const std::vector<std::pair<uint64_t, Kind>> &list) {
+                for (size_t idx = 0; idx < list.size() && idx < 16u; ++idx)
+                {
+                    const uint64_t key = list[idx].first;
+                    const Kind &k = list[idx].second;
+                    const uint32_t src = static_cast<uint32_t>(key >> 45) & 7u, prog = static_cast<uint32_t>(key >> 48);
+                    char from[32];
+                    if ((src & 3u) == 1u)
+                        std::snprintf(from, sizeof(from), "%s:0x%04x", (src & 4u) ? "hle" : "vu1", prog);
+                    else
+                        std::snprintf(from, sizeof(from), "path%u", src & 3u);
+                    const HwState &s = k.state;
+                    static const char *const kModes[] = {"tri", "line", "point", "?"};
+                    static const char *const kZtst[] = {"never", "always", "gequal", "greater"};
+                    std::snprintf(line, sizeof(line),
+                                  "%s %8.2f draws %9.1f verts  %-11s fb %3u/%-2u %-5s %s%s blend %s(%u%u%u%u) z %s%s%s%s%s%s%s\n",
+                                  tag, k.draws / n, k.vertices / n, from, s.fbp, s.fbw, kModes[s.mode & 3u],
+                                  s.tme ? (s.texIsRt ? "tex=rt" : "tex") : "flat", s.tme ? (s.fst ? " uv" : " stq") : "",
+                                  s.abe ? "on" : "off", s.ba, s.bb, s.bc, s.bd, s.zte ? kZtst[s.ztst & 3u] : "off",
+                                  s.zmsk ? " nowrite" : "", s.ate ? " atest" : "", s.fge ? " fog" : "",
+                                  (key >> 17) & 1u ? " full" : "", (key >> 16) & 1u ? " far" : "",
+                                  s.texIsRt ? (" rt=" + std::to_string(s.rtFbp)).c_str() : "");
+                    out += line;
+                }
+            };
+            appendList("[gsdraws]", kinds);
+            appendList("[packeddraws]", pKinds);
             if (reset)
             {
                 m_frames = 0;
                 m_kinds.clear();
+                m_packedKinds.clear();
+                m_sum = {};
             }
             return out;
         }
@@ -860,12 +935,13 @@ namespace
         struct Counts
         {
             uint64_t gs = 0, gsVertices = 0, vu1 = 0, hle = 0, path2 = 0, path3 = 0, native = 0, hud = 0, post = 0;
-            uint64_t packed = 0, packedVertices = 0;
+            uint64_t packed = 0, packedVertices = 0, packedAfail = 0;
+            uint64_t natWorld = 0, natLit = 0, natLitInst = 0, natInstances = 0, natTransient = 0, natTransientVerts = 0, natAfail = 0;
         };
-        Counts m_frame;
+        Counts m_frame, m_sum{};
         uint64_t m_frames = 0;
         bool m_log = false, m_table = false;
-        std::unordered_map<uint64_t, Kind> m_kinds;
+        std::unordered_map<uint64_t, Kind> m_kinds, m_packedKinds;
         std::chrono::steady_clock::time_point m_lastLog = ps2x::hostNow();
     };
 
@@ -1269,10 +1345,14 @@ namespace
                     d.name = t.replacement ? "replacement texture" : "gs texture"; // [gta-recomp]
                     d.mipLevels = m_anisotropy ? 0u : 1u; // [gta-recomp] anisotropic filtering samples a mip chain
                     const auto createStart = ps2x::hostNow(); // [gta-recomp] tex_create_us / tex_kb
+                    uint8_t texMinA = 0;
+                    bool texStoch = false;
                     if (t.early) // [gta-recomp] made on a helper thread (makeTextureEarly / makeReplacementEarly / makeDecodeEarly)
                     {
                         t.early->done.wait(false);
-                        m_textures[t.key] = {std::move(t.early->made), t.early->stochastic};
+                        texMinA = t.early->minAlpha;
+                        texStoch = t.early->stochastic;
+                        m_textures[t.key] = {std::move(t.early->made), texStoch, texMinA};
                     }
                     else if (t.replacement && t.replacement->dds()) // [gta-recomp] a pack DDS: its levels as stored (level 0
                     {                                          // alone without anisotropic filtering, which reads mips)
@@ -1285,21 +1365,32 @@ namespace
                         auto created = m_dev.createTextureLevels(d, levels, n);
                         if (!created)
                             std::fprintf(stderr, "[textures] texture %ux%u (format %u) not made\n", t.w, t.h, unsigned(r.format));
-                        m_textures[t.key] = {std::move(created), t.stochastic};
+                        texStoch = t.stochastic;
+                        m_textures[t.key] = {std::move(created), texStoch, 0};
                     }
                     else if (t.replacement) // [gta-recomp] a pack PNG (decoded on the loader thread); mips by the GPU (d.mipLevels)
-                        m_textures[t.key] = {m_dev.createTexture(d, t.replacement->pixels.data(), t.w * 4u), t.stochastic};
+                    {
+                        texMinA = t.minAlpha;
+                        texStoch = t.stochastic;
+                        m_textures[t.key] = {m_dev.createTexture(d, t.replacement->pixels.data(), t.w * 4u), texStoch, texMinA};
+                    }
                     else if (!t.mips.empty()) // [gta-recomp] the chain built on the GS stage: one plain creation (buildMipChain)
                     {
                         const void *levels[16];
+                        texMinA = t.minAlpha;
+                        texStoch = t.stochastic;
                         m_textures[t.key] = {m_dev.createTextureLevels(d, levels, mipLevels(t.pixels, t.mips, t.w, t.h, levels)),
-                                             t.stochastic};
+                                             texStoch, texMinA};
                     }
                     else
-                        m_textures[t.key] = {m_dev.createTexture(d, t.pixels.data(), t.w * 4u), t.stochastic};
+                    {
+                        texMinA = t.minAlpha;
+                        texStoch = t.stochastic;
+                        m_textures[t.key] = {m_dev.createTexture(d, t.pixels.data(), t.w * 4u), texStoch, texMinA};
+                    }
                     {
                         const TexEntry &e = m_textures[t.key];
-                        m_texCache.put({t.key, e.tex.get(), e.stochastic, true});
+                        m_texCache.put({t.key, e.tex.get(), e.minAlpha, e.stochastic, true});
                     }
                     ps2perf::add(ps2perf::Counter::TexCreateUs, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                                                     ps2x::hostNow() - createStart).count()));
@@ -1392,7 +1483,7 @@ namespace
                                       static_cast<unsigned long long>(ds.tme ? ds.texKey : 0u), ds.tw, ds.th);
                         m_dev.pushMarker(name);
                     }
-                    draw(ds, f.draws[c.index].first, f.draws[c.index].count, nullptr);
+                    draw(ds, f.draws[c.index].first, f.draws[c.index].count, nullptr, nullptr, f.draws[c.index].minVertAlpha);
                     if (timed)
                     {
                         endPass();
@@ -1427,8 +1518,8 @@ namespace
                     if (m.bytes.empty()) // [gta-recomp] a merged native group's mesh that was cached (nativeMerge)
                         break;
                     auto buf = m_dev.createBuffer({m.bytes.size(), rhi::BufferUsage::Vertex, false, "gs native mesh"}, m.bytes.data());
-                    m_meshCache.put({m.key, buf.get(), true});
-                    m_meshes[m.key] = std::move(buf);
+                    m_meshCache.put({m.key, buf.get(), m.minVertAlpha, true});
+                    m_meshes[m.key] = {std::move(buf), m.minVertAlpha};
                     break;
                 }
                 case CmdType::MeshDelete:
@@ -1445,7 +1536,7 @@ namespace
                         std::fprintf(stderr, "[draw] native kind=%u n=%u mesh=%016llx fbp=%u zbp=%u tme=%u abe=%u fge=%u\n", n.kind, n.drawCount,
                                      (unsigned long long)n.meshKey, n.s.fbp, n.s.zbp, n.s.tme, n.s.abe, n.s.fge);
                     hudSceneDraw(n.s.fbp);
-                    sources.nativeDraw();
+                    sources.nativeDraw(n);
                     const bool timed = gpuTimingMarkers();
                     if (timed)
                     {
@@ -2850,10 +2941,12 @@ namespace
                 last.valid = false;
         }
 
-        void draw(const HwState &s, uint32_t first, uint32_t count, const NativeDrawCmd *native, const LayerTarget *layer = nullptr)
+        void draw(const HwState &s, uint32_t first, uint32_t count, const NativeDrawCmd *native, const LayerTarget *layer = nullptr,
+                  int minVertAlpha = -1)
         {
             rhi::Buffer *vertices = layer ? (layer->vertices ? layer->vertices : m_hudVb.get()) : m_vb.get();
             uint32_t vertexOffset = 0;
+            int meshMinVertA = -1;
             if (native && native->transient)
             {
                 vertices = m_nativeVb.get();
@@ -2864,12 +2957,21 @@ namespace
             else if (native)
             {
                 if (const MeshSlot *ms = execCache() ? m_meshCache.find(native->meshKey) : nullptr)
+                {
                     vertices = ms->buf;
+                    meshMinVertA = ms->minVertAlpha;
+                }
                 else
                 {
                     auto mesh = m_meshes.find(native->meshKey);
-                    vertices = mesh != m_meshes.end() ? mesh->second.get() : nullptr;
-                    m_meshCache.put({native->meshKey, vertices, true});
+                    if (mesh != m_meshes.end())
+                    {
+                        vertices = mesh->second.buf.get();
+                        meshMinVertA = mesh->second.minVertAlpha;
+                    }
+                    else
+                        vertices = nullptr;
+                    m_meshCache.put({native->meshKey, vertices, static_cast<int16_t>(meshMinVertA), true});
                 }
                 if (vertices)
                     updateConstants(*m_worldCb, native->constants, sizeof(native->constants), m_worldCbLast, 1);
@@ -2925,6 +3027,7 @@ namespace
 
             // texture: decoded VRAM, another render target, or this target itself (sampled from a copy)
             rhi::Texture *tex = nullptr;
+            uint8_t texMinAlpha = 0;
             bool texStochastic = false;
             Scale rtScale; // the render target read: its pixels per PS2 pixel
             const bool plainTexture = layer && layer->texture; // a native buffer, read like decoded VRAM
@@ -2953,6 +3056,7 @@ namespace
                     if (const TexSlot *ts = execCache() ? m_texCache.find(s.texKey) : nullptr)
                     {
                         tex = ts->tex;
+                        texMinAlpha = ts->minAlpha;
                         texStochastic = ts->stochastic;
                     }
                     else
@@ -2961,9 +3065,10 @@ namespace
                         if (it != m_textures.end())
                         {
                             tex = it->second.tex.get();
+                            texMinAlpha = it->second.minAlpha;
                             texStochastic = it->second.stochastic;
                         }
-                        m_texCache.put({s.texKey, tex, texStochastic, true});
+                        m_texCache.put({s.texKey, tex, texMinAlpha, texStochastic, true});
                     }
                 }
             }
@@ -3168,16 +3273,56 @@ namespace
                 else
                     m_dev.draw(count, first);
             };
-            if (s.ate && s.atst != 1u && s.afail != 0u)
+            bool ate = s.ate != 0u;
+            uint8_t afail = s.afail;
+            if (atePrune() && ate && (s.atst == 5u || s.atst == 6u) && (!s.tme || (tex && !s.texIsRt && !plainTexture)))
+            {
+                const int texMinA = s.tme ? static_cast<int>(texMinAlpha) : 255;
+                int vertMinA = -1;
+                if (native)
+                {
+                    if (s.mode == 4u || s.mode == 5u)
+                        vertMinA = std::clamp(static_cast<int>(std::floor(native->constants[84])), 0, 255);
+                    else if (s.mode == 3u && meshMinVertA >= 0 && native->constants[31] >= 0.0f)
+                        vertMinA = std::clamp(static_cast<int>(std::trunc(
+                            std::min(native->constants[35] + native->constants[31] * static_cast<float>(meshMinVertA),
+                                     native->constants[39]))), 0, 255);
+                }
+                else if (minVertAlpha >= 0)
+                    vertMinA = minVertAlpha;
+                if (vertMinA >= 0)
+                {
+                    int fragMinA = vertMinA;
+                    if (s.tme && s.tcc)
+                    {
+                        if (s.tfx == 0u)
+                            fragMinA = (texMinA * vertMinA) >> 7;
+                        else if (s.tfx == 1u || s.tfx == 3u)
+                            fragMinA = texMinA;
+                        else
+                            fragMinA = texMinA + vertMinA;
+                    }
+                    if (fragMinA > 255)
+                        fragMinA = 255;
+                    if ((s.atst == 5u && fragMinA >= static_cast<int>(s.aref)) ||
+                        (s.atst == 6u && fragMinA > static_cast<int>(s.aref)))
+                    {
+                        ate = false;
+                        afail = 0u;
+                        c.linearIipFgeAte[3] = 0;
+                    }
+                }
+            }
+            if (ate && s.atst != 1u && afail != 0u)
             {
                 // AFAIL other than KEEP: draw the passing pixels normally, the failing ones with the AFAIL mask
                 submit(drawPipeline(b, mask, depthOn, s.ztst, zwrite, s.mode, drawSampleMode(c)));
                 c.atstArefAfailRt[2] = 1;
-                if (s.afail == 1u) zwrite = false;                      // FB_ONLY
-                else if (s.afail == 2u) mask = 0;                       // ZB_ONLY
+                if (afail == 1u) zwrite = false;                      // FB_ONLY
+                else if (afail == 2u) mask = 0;                       // ZB_ONLY
                 else { mask = static_cast<uint8_t>(mask & 7u); zwrite = false; } // RGB_ONLY
             }
-            else if (!(s.ate && s.atst != 1u))
+            else if (!(ate && s.atst != 1u))
             {
                 c.linearIipFgeAte[3] = 0; // no alpha test (ATST ALWAYS)
             }
@@ -3251,6 +3396,7 @@ namespace
         {
             uint64_t key = 0;
             rhi::Buffer *buf = nullptr;
+            int16_t minVertAlpha = -1;
             bool valid = false;
         };
         Cache2Way<MeshSlot, 8192u> m_meshCache;
@@ -3258,6 +3404,7 @@ namespace
         {
             uint64_t key = 0;
             rhi::Texture *tex = nullptr;
+            uint8_t minAlpha = 0;
             bool stochastic = false;
             bool valid = false;
         };
@@ -3280,7 +3427,12 @@ namespace
             m_lastHudSceneFbp = ~0u;
             invalidateTargetCache();
         }
-        std::unordered_map<uint64_t, std::unique_ptr<rhi::Buffer>> m_meshes; // native draws' vertex data
+        struct MeshEntry
+        {
+            std::unique_ptr<rhi::Buffer> buf;
+            int16_t minVertAlpha = -1;
+        };
+        std::unordered_map<uint64_t, MeshEntry> m_meshes; // native draws' vertex data
         std::unique_ptr<rhi::Buffer> m_nativeVb; // transient native vertices of the frame
         size_t m_nativeVbCapacity = 0;
         size_t m_vbCapacity = 0;
@@ -3303,6 +3455,7 @@ namespace
         {
             std::unique_ptr<rhi::Texture> tex;
             bool stochastic = false;
+            uint8_t minAlpha = 0;
         };
         std::unordered_map<uint64_t, TexEntry> m_textures;
         std::unique_ptr<rhi::Texture> m_display, m_feedback;
@@ -3364,7 +3517,31 @@ namespace
             m_cpu.Initialize(vram, vramSize);
             m_textureVram = vram; // [gta-recomp] read-only, after materializing queued texture uploads
         }
-        void Reset() override { m_cpu.Reset(); }
+        // [gta-recomp] PS2X_HW_UPLOAD_FAST=0 restores the original upload/CLUT/memo bookkeeping; PS2X_HW_MESH_PROMOTE=0
+        // creates static GPU buffers on the first sight of every mesh key.
+        static bool fastUploadOpt()
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("PS2X_HW_UPLOAD_FAST");
+                return !(e && e[0] == '0');
+            }();
+            return on;
+        }
+        static bool meshPromoteOpt()
+        {
+            static const bool on = [] {
+                const char *e = std::getenv("PS2X_HW_MESH_PROMOTE");
+                return !(e && e[0] == '0');
+            }();
+            return on;
+        }
+        void Reset() override
+        {
+            m_cpu.Reset();
+            m_lastClut.valid = false;
+            std::fill(m_blockLastWriter.begin(), m_blockLastWriter.end(), UINT64_MAX);
+            std::fill(m_meshSeen.begin(), m_meshSeen.end(), 0ull);
+        }
 
         void Submit(const GSPrimitiveBatch &batch) override
         {
@@ -3626,6 +3803,8 @@ namespace
                 Frame &f = *m_frame;
                 const size_t firstVertex = f.vertices.size();
                 const bool depthTested = s.zte && s.ztst >= 2u;
+                const bool trackMinA = s.ate && (s.atst == 5u || s.atst == 6u) && s.afail != 0u;
+                uint8_t minA = 255u;
                 bool had3d = false;
                 for (uint32_t i = 2; i < count; ++i)
                 {
@@ -3641,6 +3820,8 @@ namespace
                             out[k].b = out[2].b;
                             out[k].a = out[2].a;
                         }
+                    if (trackMinA)
+                        minA = std::min(minA, std::min(out[0].a, std::min(out[1].a, out[2].a)));
                     if (depthTested && !(out[0].z >= 0.99999f && out[1].z >= 0.99999f && out[2].z >= 0.99999f))
                         had3d = true;
                     f.vertices.insert(f.vertices.end(), out, out + 3);
@@ -3654,7 +3835,15 @@ namespace
                     std::memcmp(&f.draws.back().s, &s, sizeof(HwState)) != 0)
                 {
                     f.cmds.push_back({CmdType::Draw, static_cast<uint32_t>(f.draws.size())});
-                    f.draws.push_back({s, static_cast<uint32_t>(firstVertex), 0u, source});
+                    f.draws.push_back({s, static_cast<uint32_t>(firstVertex), 0u, source, 0.0f, 1.0f,
+                                       trackMinA ? static_cast<int16_t>(minA) : static_cast<int16_t>(-1)});
+                }
+                else
+                {
+                    DrawCmd &dc = f.draws.back();
+                    dc.minVertAlpha = (trackMinA && dc.minVertAlpha >= 0)
+                                          ? std::min<int16_t>(dc.minVertAlpha, static_cast<int16_t>(minA))
+                                          : static_cast<int16_t>(-1);
                 }
                 f.draws.back().count += added;
                 ps2hle::g_gsVerticesRecorded += added;
@@ -4174,11 +4363,18 @@ namespace
                 std::fprintf(stderr, "[gs-hw] clut cld=%u cbp=%u cpsm=%u csm=%u csa=%u psm=%u\n", tex0.cld, tex0.cbp, tex0.cpsm, tex0.csm,
                              tex0.csa, tex0.psm);
             }
-            if (tex0.cld != 0u && loadClutFromQueuedUpload(tex0, texclut))
+            if (tex0.cld != 0u)
             {
-                ++m_texStateVersion;
-                return;
+                const int q = loadClutFromQueuedUpload(tex0, texclut);
+                if (q == 2)
+                    return; // [gta-recomp] unchanged CLUT repeat / CLD skip: version stays valid
+                if (q == 1)
+                {
+                    ++m_texStateVersion;
+                    return;
+                }
             }
+            m_lastClut.valid = false;
             if (tex0.cld != 0u)
             {
                 const bool eightBit = tex0.psm == GS_PSM_T8 || tex0.psm == GS_PSM_T8H;
@@ -4352,7 +4548,8 @@ namespace
         // is the latest writer of every block the load reads and covers the pixels it reads; otherwise VRAM as before.
         // PS2X_HW_CLUT_FROM_UPLOAD=0: always VRAM. PS2X_HW_CLUT_VERIFY=1: the VRAM load runs as well and the 512 CLUT
         // entries are compared.
-        bool loadClutFromQueuedUpload(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
+        // Returns 0 if VRAM fallback is needed, 1 if loaded into CPU backend, 2 if skipped (unchanged / CLD skip).
+        int loadClutFromQueuedUpload(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
         {
             static const bool on = [] {
                 const char *e = std::getenv("PS2X_HW_CLUT_FROM_UPLOAD");
@@ -4360,7 +4557,7 @@ namespace
             }();
             static const bool verify = std::getenv("PS2X_HW_CLUT_VERIFY") != nullptr;
             if (!on || m_pendingUploads.empty())
-                return false;
+                return 0;
             const bool eightBit = tex0.psm == GS_PSM_T8 || tex0.psm == GS_PSM_T8H;
             const bool csm2 = tex0.csm != 0u;
             const uint32_t bw = csm2 ? std::max<uint32_t>(texclut.cbw, 1u) : 1u;
@@ -4370,15 +4567,51 @@ namespace
             rectBlocks(tex0.cpsm, tex0.cbp, bw, x0, y0, w, h, m_scratchRead, nullptr);
             const PendingUpload *source = soleQueuedWriter(m_scratchRead);
             if (!source)
-                return false;
+                return 0;
             const GSTransferCommand &c = source->cmd;
             if (c.bitbltbuf.dbp != tex0.cbp || c.bitbltbuf.dpsm != tex0.cpsm || c.trxpos.dsax != 0u || c.trxpos.dsay != 0u ||
                 (c.bitbltbuf.dpsm != GS_PSM_CT32 && c.bitbltbuf.dpsm != GS_PSM_CT16))
-                return false;
+                return 0;
+            const uint32_t clutReg = csm2 ? (uint32_t(texclut.cbw & 0x3Fu) | (uint32_t(texclut.cou & 0x3Fu) << 6) |
+                                             (uint32_t(texclut.cov & 0x7FFu) << 12))
+                                          : 0u;
+            if (fastUploadOpt() && !verify && m_lastClut.valid && source->dataHash != 0ull &&
+                (tex0.cld == 1u || (m_lastClut.cld == tex0.cld && m_lastClut.cbp == tex0.cbp)) &&
+                m_lastClut.dataHash == source->dataHash && m_lastClut.psm == tex0.psm && m_lastClut.cpsm == tex0.cpsm &&
+                m_lastClut.csm == tex0.csm && m_lastClut.csa == tex0.csa && m_lastClut.clutReg == clutReg &&
+                m_lastClut.rrw == c.trxreg.rrw && m_lastClut.rrh == c.trxreg.rrh)
+            {
+                ++m_clutFromUpload;
+                ++m_clutSkipRepeat;
+                return 2;
+            }
             const int loaded = m_cpu.LoadClutFromRect(tex0, texclut, source->data.data(), c.trxreg.rrw, c.trxreg.rrh);
             if (loaded < 0)
-                return false;
+            {
+                m_lastClut.valid = false;
+                return 0;
+            }
             ++m_clutFromUpload;
+            if (loaded == 0)
+                return fastUploadOpt() ? 2 : 1;
+            if (fastUploadOpt() && source->dataHash != 0ull)
+            {
+                m_lastClut.valid = true;
+                m_lastClut.dataHash = source->dataHash;
+                m_lastClut.psm = tex0.psm;
+                m_lastClut.cbp = tex0.cbp;
+                m_lastClut.cpsm = tex0.cpsm;
+                m_lastClut.csm = tex0.csm;
+                m_lastClut.csa = tex0.csa;
+                m_lastClut.cld = tex0.cld;
+                m_lastClut.clutReg = clutReg;
+                m_lastClut.rrw = c.trxreg.rrw;
+                m_lastClut.rrh = c.trxreg.rrh;
+            }
+            else
+            {
+                m_lastClut.valid = false;
+            }
             if (verify && loaded > 0)
             {
                 const std::array<uint16_t, 512> fromUpload = m_cpu.ClutEntries();
@@ -4393,7 +4626,7 @@ namespace
                     std::fprintf(stderr, "[gs-hw] clut from upload checked: %llu the same as from VRAM, %llu differ\n",
                                  (unsigned long long)m_clutVerifySame, (unsigned long long)m_clutVerifyDiffer);
             }
-            return true;
+            return 1;
         }
 
         void BeginTransfer(const GSTransferCommand &command) override
@@ -4503,16 +4736,34 @@ namespace
                                                      (uint64_t(t.trxpos.dsax) << 32) | (uint64_t(t.trxpos.dsay) << 48)),
                                   t.trxreg.rrw | (uint64_t(t.trxreg.rrh) << 16) | (uint64_t(sizeBytes) << 32));
                 dataHash = hashBytes(data, sizeBytes);
-                auto it = m_uploads.find(uploadKey);
-                if (it != m_uploads.end() && it->second.hash == dataHash && it->second.first == first && it->second.gens.size() == last - first)
+                if (fastUploadOpt())
                 {
-                    bool untouched = true;
-                    for (uint32_t p = first; p < last && untouched; ++p)
-                        untouched = m_pageGen[p] == it->second.gens[p - first];
-                    if (untouched)
+                    const UploadRecord &rec = m_fastUploads[(uploadKey ^ (uploadKey >> 16)) & (kUploadTableSize - 1u)];
+                    if (rec.valid && rec.key == uploadKey && rec.hash == dataHash && rec.first == first && rec.gens.size() == last - first)
                     {
-                        ++m_skippedUploads;
-                        return;
+                        bool untouched = true;
+                        for (uint32_t p = first; p < last && untouched; ++p)
+                            untouched = m_pageGen[p] == rec.gens[p - first];
+                        if (untouched)
+                        {
+                            ++m_skippedUploads;
+                            return;
+                        }
+                    }
+                }
+                else
+                {
+                    auto it = m_uploads.find(uploadKey);
+                    if (it != m_uploads.end() && it->second.hash == dataHash && it->second.first == first && it->second.gens.size() == last - first)
+                    {
+                        bool untouched = true;
+                        for (uint32_t p = first; p < last && untouched; ++p)
+                            untouched = m_pageGen[p] == it->second.gens[p - first];
+                        if (untouched)
+                        {
+                            ++m_skippedUploads;
+                            return;
+                        }
                     }
                 }
             }
@@ -4521,7 +4772,7 @@ namespace
                 (dpsm == GS_PSM_T4 || dpsm == GS_PSM_T8 || dpsm == GS_PSM_CT32 || dpsm == GS_PSM_CT16) && !overlapsRenderTarget(first, last))
             {
                 m_uploadRaster = raster;
-                deferUpload(data, sizeBytes);
+                deferUpload(data, sizeBytes, dataHash);
             }
             else
             {
@@ -4565,13 +4816,25 @@ namespace
                 info.w = t.trxreg.rrw;
                 info.h = t.trxreg.rrh;
                 info.first = first;
-                info.gens.assign(m_pageGen + first, m_pageGen + last);
-                if (m_uploads.size() > 4096u)
-                    m_uploads.clear();
-                UploadRecord &rec = m_uploads[uploadKey];
-                rec.hash = dataHash;
-                rec.first = first;
-                rec.gens.assign(m_pageGen + first, m_pageGen + last);
+                info.gens.assign(m_pageGen + first, last - first);
+                if (fastUploadOpt())
+                {
+                    UploadRecord &rec = m_fastUploads[(uploadKey ^ (uploadKey >> 16)) & (kUploadTableSize - 1u)];
+                    rec.valid = true;
+                    rec.key = uploadKey;
+                    rec.hash = dataHash;
+                    rec.first = first;
+                    rec.gens.assign(m_pageGen + first, last - first);
+                }
+                else
+                {
+                    if (m_uploads.size() > 4096u)
+                        m_uploads.clear();
+                    UploadRecord &rec = m_uploads[uploadKey];
+                    rec.hash = dataHash;
+                    rec.first = first;
+                    rec.gens.assign(m_pageGen + first, last - first);
+                }
             }
         }
 
@@ -4623,11 +4886,72 @@ namespace
             return mix64(mix64(mix64(h[0], h[1]), h[2]), h[3]);
         }
 
-        // [gta-recomp] queued uploads' data buffers, kept with their capacity (an allocation and a free per streamed
-        // texture before)
+        // [gta-recomp] queued uploads' data buffers, bucketed by size class so CLUTs never swap capacities with textures
+        static constexpr size_t kUploadPoolBuckets = 9u;
+        std::vector<std::vector<uint8_t>> m_uploadBufferPools[kUploadPoolBuckets];
         std::vector<std::vector<uint8_t>> m_uploadBufferPool;
+        static size_t uploadPoolBucket(size_t bytes)
+        {
+            if (bytes <= 512u)
+                return 0u;
+            const unsigned w = std::bit_width(bytes - 1u);
+            return w >= 17u ? 8u : size_t(w - 9u);
+        }
+        void takeUploadData(size_t sizeBytes, std::vector<uint8_t> &out)
+        {
+            if (fastUploadOpt())
+            {
+                const size_t b = uploadPoolBucket(sizeBytes);
+                auto &pool = m_uploadBufferPools[b];
+                if (b < 8u && !pool.empty())
+                {
+                    out = std::move(pool.back());
+                    pool.pop_back();
+                    return;
+                }
+                if (b == 8u)
+                {
+                    for (size_t i = pool.size(); i-- > 0;)
+                        if (pool[i].capacity() >= sizeBytes)
+                        {
+                            out = std::move(pool[i]);
+                            pool[i] = std::move(pool.back());
+                            pool.pop_back();
+                            return;
+                        }
+                }
+                out.clear();
+                if (b < 8u)
+                    out.reserve(size_t(512u) << b);
+                return;
+            }
+            if (!m_uploadBufferPool.empty())
+            {
+                out = std::move(m_uploadBufferPool.back());
+                m_uploadBufferPool.pop_back();
+            }
+        }
         void recycleUploadData(std::vector<uint8_t> &data)
         {
+            if (fastUploadOpt())
+            {
+                const size_t cap = data.capacity();
+                if (cap >= 512u && cap <= (1u << 20))
+                {
+                    const unsigned w = std::bit_width(cap);
+                    const size_t b = w >= 18u ? 8u : size_t(w - 10u); // guaranteed cap >= (512 << b) for b < 8
+                    auto &pool = m_uploadBufferPools[b];
+                    const size_t limit = (b == 8u) ? 16u : 64u;
+                    if (pool.size() < limit)
+                    {
+                        data.clear();
+                        pool.push_back(std::move(data));
+                        return;
+                    }
+                }
+                std::vector<uint8_t>().swap(data);
+                return;
+            }
             if (m_uploadBufferPool.size() < 256u && data.capacity() <= (1u << 20))
             {
                 data.clear();
@@ -4696,11 +5020,35 @@ namespace
         // PS2X_HW_LAZY_UPLOADS=0 writes every upload immediately (as before).
         static constexpr uint32_t kBlocks = 16384u; // 4 MiB / 256 B
 
+        template <typename T, size_t InlineN>
+        struct SmallInlineVec
+        {
+            T inlineData[InlineN]{};
+            std::vector<T> extra;
+            uint32_t count = 0;
+
+            uint32_t size() const { return count; }
+            bool empty() const { return count == 0u; }
+            T operator[](uint32_t i) const { return i < InlineN ? inlineData[i] : extra[i - InlineN]; }
+            void assign(const T *src, size_t n)
+            {
+                count = static_cast<uint32_t>(n);
+                const size_t inl = std::min(n, InlineN);
+                if (inl)
+                    std::memcpy(inlineData, src, inl * sizeof(T));
+                if (n > InlineN)
+                    extra.assign(src + InlineN, src + n);
+                else
+                    extra.clear();
+            }
+        };
+
         struct PendingUpload
         {
             GSTransferCommand cmd;
             std::vector<uint8_t> data;
-            std::vector<uint16_t> blocks; // touched
+            SmallInlineVec<uint16_t, 64> blocks; // touched (inline <= 64 blocks: zero heap alloc)
+            uint64_t dataHash = 0;
             uint32_t live = 0;            // blocks not yet completely overwritten by a later upload
             bool done = false;            // written or dropped
             uint32_t takeStamp = 0;       // == m_wantGeneration: chosen by the current materializeBlocks
@@ -4751,6 +5099,19 @@ namespace
         const PendingUpload *soleQueuedWriter(const std::vector<uint16_t> &blocks)
         {
             const PendingUpload *source = nullptr;
+            if (fastUploadOpt())
+            {
+                for (uint16_t b : blocks)
+                {
+                    if (!m_blockPending[b])
+                        return nullptr;
+                    const PendingUpload *latest = pendingById(m_blockLastWriter[b]);
+                    if (!latest || (source && latest != source))
+                        return nullptr;
+                    source = latest;
+                }
+                return source;
+            }
             for (uint16_t b : blocks)
             {
                 const PendingUpload *latest = nullptr;
@@ -4771,8 +5132,8 @@ namespace
         void retire(PendingUpload &u)
         {
             u.done = true;
-            for (uint16_t b : u.blocks)
-                --m_blockPending[b];
+            for (uint32_t bi = 0; bi < u.blocks.size(); ++bi)
+                --m_blockPending[u.blocks[bi]];
             m_pendingBytes -= u.data.size();
             recycleUploadData(u.data);
             while (!m_pendingUploads.empty() && m_pendingUploads.front().done)
@@ -4782,7 +5143,7 @@ namespace
             }
         }
 
-        void deferUpload(const uint8_t *data, uint32_t sizeBytes)
+        void deferUpload(const uint8_t *data, uint32_t sizeBytes, uint64_t dataHash = 0ull)
         {
             const GSTransferCommand &t = m_transfer;
             m_scratchTouched.clear();
@@ -4804,20 +5165,39 @@ namespace
             PendingUpload pu;
             pu.cmd = t;
             pu.raster = m_uploadRaster;
-            if (!m_uploadBufferPool.empty())
-            {
-                pu.data = std::move(m_uploadBufferPool.back());
-                m_uploadBufferPool.pop_back();
-            }
+            pu.dataHash = dataHash;
+            takeUploadData(sizeBytes, pu.data);
             pu.data.assign(data, data + sizeBytes);
-            pu.blocks = m_scratchTouched;
-            std::sort(pu.blocks.begin(), pu.blocks.end());
-            pu.blocks.erase(std::unique(pu.blocks.begin(), pu.blocks.end()), pu.blocks.end());
-            pu.live = static_cast<uint32_t>(pu.blocks.size());
-            const uint64_t id = m_pendingFrontId + m_pendingUploads.size();
-            for (uint16_t b : pu.blocks)
+            if (fastUploadOpt())
             {
+                if (++m_touchedGen == 0u)
+                {
+                    std::fill(m_touchedStamp.begin(), m_touchedStamp.end(), 0u);
+                    m_touchedGen = 1u;
+                }
+                const uint32_t stamp = m_touchedGen;
+                uint32_t uniq = 0;
+                for (uint16_t b : m_scratchTouched)
+                    if (m_touchedStamp[b] != stamp)
+                    {
+                        m_touchedStamp[b] = stamp;
+                        m_scratchTouched[uniq++] = b;
+                    }
+                m_scratchTouched.resize(uniq);
+            }
+            else
+            {
+                std::sort(m_scratchTouched.begin(), m_scratchTouched.end());
+                m_scratchTouched.erase(std::unique(m_scratchTouched.begin(), m_scratchTouched.end()), m_scratchTouched.end());
+            }
+            pu.blocks.assign(m_scratchTouched.data(), m_scratchTouched.size());
+            pu.live = pu.blocks.size();
+            const uint64_t id = m_pendingFrontId + m_pendingUploads.size();
+            for (uint32_t bi = 0; bi < pu.blocks.size(); ++bi)
+            {
+                const uint16_t b = pu.blocks[bi];
                 ++m_blockPending[b];
+                m_blockLastWriter[b] = id;
                 m_blockWriters[b].push_back(id);
                 std::vector<uint64_t> &uploads = m_blockUploads[b];
                 if (uploads.size() >= 64u) // ids of written / dropped uploads leave when met; blocks nobody reads, here
@@ -4897,8 +5277,8 @@ namespace
                             continue;
                         u->takeStamp = stamp;
                         takeList.push_back(static_cast<size_t>(ids[k] - m_pendingFrontId));
-                        for (uint16_t ub : u->blocks)
-                            want(ub);
+                        for (uint32_t bi = 0; bi < u->blocks.size(); ++bi)
+                            want(u->blocks[bi]);
                     }
                     ids.resize(kept);
                 }
@@ -4920,14 +5300,14 @@ namespace
                         if (take[i] || u.done)
                             continue;
                         bool hit = false;
-                        for (size_t k = 0; k < u.blocks.size() && !hit; ++k)
+                        for (uint32_t k = 0; k < u.blocks.size() && !hit; ++k)
                             hit = wanted(u.blocks[k]);
                         if (!hit)
                             continue;
                         take[i] = 1u;
                         changed = true;
-                        for (uint16_t b : u.blocks)
-                            m_wantStamp[b] = stamp;
+                        for (uint32_t bi = 0; bi < u.blocks.size(); ++bi)
+                            m_wantStamp[u.blocks[bi]] = stamp;
                     }
                 }
                 for (size_t i = 0; i < take.size(); ++i)
@@ -4941,8 +5321,8 @@ namespace
                 m_cpu.BeginTransfer(u.cmd);
                 m_cpu.UploadImage(u.data.data(), static_cast<uint32_t>(u.data.size()));
                 u.done = true;
-                for (uint16_t b : u.blocks)
-                    --m_blockPending[b];
+                for (uint32_t bi = 0; bi < u.blocks.size(); ++bi)
+                    --m_blockPending[u.blocks[bi]];
                 m_pendingBytes -= u.data.size();
                 recycleUploadData(u.data);
                 ++m_lazyWritten;
@@ -4982,7 +5362,10 @@ namespace
                 m_blockWriters[b].clear();
             }
             // whatever is still queued on these blocks (partly covered, or alive elsewhere) goes out first
-            return materializeBlocks(m_scratchTouched);
+            const bool wrote = materializeBlocks(m_scratchTouched);
+            for (uint16_t b : m_scratchTouched)
+                m_blockLastWriter[b] = UINT64_MAX;
+            return wrote;
         }
 
         bool materializeRect(uint32_t psm, uint32_t bp, uint32_t bw, uint32_t x, uint32_t y, uint32_t w, uint32_t h)
@@ -5033,16 +5416,24 @@ namespace
                          (unsigned long long)m_lazyDeferred, (unsigned long long)m_lazyWritten, (unsigned long long)m_lazyDropped,
                          m_pendingUploads.size(), m_pendingBytes >> 10, (unsigned long long)m_lazyWhy[0], (unsigned long long)m_lazyWhy[1],
                          (unsigned long long)m_lazyWhy[2], (unsigned long long)m_lazyWhy[3]);
-            std::fprintf(stderr, "[upload] clut loads from the queued upload: %llu; textures decoded from it: %llu (%llu in another format, %llu straight from its pixels); from VRAM: %llu\n",
-                         (unsigned long long)m_clutFromUpload, (unsigned long long)m_decodeFromUpload, (unsigned long long)m_decodeCrossFormat,
+            std::fprintf(stderr, "[upload] clut loads from the queued upload: %llu (%llu skipped repeat); textures decoded from it: %llu (%llu in another format, %llu straight from its pixels); from VRAM: %llu\n",
+                         (unsigned long long)m_clutFromUpload, (unsigned long long)m_clutSkipRepeat,
+                         (unsigned long long)m_decodeFromUpload, (unsigned long long)m_decodeCrossFormat,
                          (unsigned long long)m_decodeFast, (unsigned long long)m_decodeFromVram);
             std::fprintf(stderr, "[upload] textures made: %llu named by their raster, %llu not (%zu rasters known)\n",
                          (unsigned long long)m_texNamed, (unsigned long long)m_texUnnamed, g_rasterTextures.size());
             std::fprintf(stderr, "[upload] texture binds: %llu, %llu as the last one, %llu looked up (%llu found cached)\n",
                          (unsigned long long)m_bindCalls, (unsigned long long)m_bindRepeats, (unsigned long long)m_bindLookups,
                          (unsigned long long)m_bindLookupHits);
-            std::fprintf(stderr, "[upload] texture binds from the memo: %llu\n", (unsigned long long)m_bindMemoHits);
-            m_bindMemoHits = 0;
+            std::fprintf(stderr, "[upload] texture binds from the memo: %llu (%llu misses)\n",
+                         (unsigned long long)m_bindMemoHits, (unsigned long long)m_bindMemoMisses);
+            std::fprintf(stderr, "[upload] meshes: hits %llu, promoted %llu, transientFirst %llu (world %llu, lit %llu), evicts %llu, cached %zu\n",
+                         (unsigned long long)m_meshHits, (unsigned long long)m_meshPromoted,
+                         (unsigned long long)m_meshTransientFirstSeen, (unsigned long long)m_meshWorldMiss,
+                         (unsigned long long)m_meshLitMiss, (unsigned long long)m_meshEvicts, m_meshLru.size());
+            m_clutSkipRepeat = 0;
+            m_meshHits = m_meshPromoted = m_meshTransientFirstSeen = m_meshWorldMiss = m_meshLitMiss = m_meshEvicts = 0;
+            m_bindMemoHits = m_bindMemoMisses = 0;
             m_texNamed = m_texUnnamed = 0;
             m_bindCalls = m_bindRepeats = m_bindLookups = m_bindLookupHits = 0;
             m_clutFromUpload = m_decodeFromUpload = m_decodeCrossFormat = m_decodeFromVram = m_decodeFast = 0;
@@ -5110,7 +5501,10 @@ namespace
                     TexCreate t;
                     t.key = key; t.w = image->width; t.h = image->height;
                     if (!image->dds() && !image->pixels.empty())
+                    {
+                        t.minAlpha = computeMinAlpha(image->pixels);
                         t.stochastic = isStochasticSurface(image->pixels, t.w, t.h);
+                    }
                     else if (auto sit = m_replacementStochastic.find(image->id); sit != m_replacementStochastic.end())
                         t.stochastic = sit->second;
                     else if (auto pit = m_pendingReplacementStochastic.find(image->id); pit != m_pendingReplacementStochastic.end())
@@ -5285,6 +5679,10 @@ namespace
             nd.kind = draw.kind;
             nd.drawCount = draw.drawCount;
             nd.transient = draw.transient;
+            nd.constantCount = static_cast<uint8_t>(draw.constantCount);
+            nd.transientOffset = 0;
+            nd.instanceFirst = 0;
+            nd.instanceCount = 0;
             std::memcpy(nd.constants, draw.constants, sizeof(float) * draw.constantCount);
             if (draw.instanceCount && draw.instances) // [gta-recomp] the instances' rows, for the draw's execution
             {
@@ -5299,6 +5697,7 @@ namespace
             nd.constants[124] = state.context.xyoffset.ofx / 16.0f;
             nd.constants[125] = state.context.xyoffset.ofy / 16.0f;
             nd.constants[126] = zs;
+            nd.constants[127] = 0.0f;
             f.nativeVertices += draw.drawCount;
             f.had3d = true;
             ps2hle::g_gsVerticesRecorded += draw.drawCount;
@@ -5329,7 +5728,7 @@ namespace
                 g.bytes.assign(bytes, bytes + size_t(draw.vertexStride) * draw.vertexCount);
             }
             else
-                useMesh(f, draw.meshKey, draw.vertexStride, static_cast<const uint8_t *>(draw.vertices), draw.vertexCount);
+                useMesh(f, draw.meshKey, draw.vertexStride, static_cast<const uint8_t *>(draw.vertices), draw.vertexCount, UINT32_MAX, &nd);
             g.cmd = static_cast<uint32_t>(f.cmds.size());
             f.cmds.push_back({CmdType::NativeDraw, static_cast<uint32_t>(f.nativeDraws.size())});
             f.nativeDraws.push_back(nd);
@@ -5357,20 +5756,51 @@ namespace
             std::vector<uint8_t> bytes;   // cached meshes: the vertices (one member: all; more: the drawn strips joined)
         } m_group;
 
+        bool tryFirstSeenTransient(Frame &f, NativeDrawCmd &nd, uint64_t key, const uint8_t *bytes, size_t byteSize)
+        {
+            if (!meshPromoteOpt() || !byteSize)
+                return false;
+            const uint64_t tag = key ? key : 0x9E3779B97F4A7C15ull;
+            const size_t slot = (tag ^ (tag >> 17)) & (kMeshSeenSize - 1u);
+            if (m_meshSeen[slot] == tag)
+                return false; // seen before: promote to a persistent static mesh
+            m_meshSeen[slot] = tag;
+            ++m_meshTransientFirstSeen;
+            ++(nd.kind == GSNativeDraw::VcsWorld ? m_meshWorldMiss : m_meshLitMiss);
+            nd.transient = true;
+            nd.transientOffset = static_cast<uint32_t>(f.nativeBytes.size());
+            f.nativeBytes.insert(f.nativeBytes.end(), bytes, bytes + byteSize);
+            return true;
+        }
+
         // a mesh used by a draw: cached, or created ahead of it
-        void useMesh(Frame &f, uint64_t key, uint32_t stride, const uint8_t *bytes, uint32_t count, uint32_t slot = UINT32_MAX)
+        void useMesh(Frame &f, uint64_t key, uint32_t stride, const uint8_t *bytes, uint32_t count, uint32_t slot = UINT32_MAX,
+                     NativeDrawCmd *nd = nullptr, std::vector<uint8_t> *moveBytes = nullptr)
         {
             auto lru = m_meshLru.find(key);
             if (lru != m_meshLru.end())
             {
+                ++m_meshHits;
                 lru->second = m_frameIndex;
                 return;
             }
+            if (nd && tryFirstSeenTransient(f, *nd, key, bytes, size_t(stride) * count))
+                return;
             MeshCreate mc;
             mc.key = key;
             mc.stride = stride;
             mc.count = count;
-            mc.bytes.assign(bytes, bytes + size_t(stride) * count);
+            if (moveBytes)
+                mc.bytes = std::move(*moveBytes);
+            else
+                mc.bytes.assign(bytes, bytes + size_t(stride) * count);
+            if (stride == 32u && mc.bytes.size() >= 32u)
+            {
+                uint8_t minA = 255u;
+                for (size_t i = 27u; i < mc.bytes.size(); i += 32u)
+                    minA = std::min(minA, mc.bytes[i]);
+                mc.minVertAlpha = static_cast<int16_t>(minA);
+            }
             if (slot == UINT32_MAX)
             {
                 f.cmds.push_back({CmdType::MeshCreate, static_cast<uint32_t>(f.meshes.size())});
@@ -5378,6 +5808,7 @@ namespace
             }
             else
                 f.meshes[slot] = std::move(mc);
+            ++m_meshPromoted;
             m_meshLru[key] = m_frameIndex;
             if (m_meshLru.size() > maxMeshes())
                 evictMeshes();
@@ -5390,8 +5821,10 @@ namespace
                 g.stride != draw.vertexStride || !draw.drawCount || draw.vertexStride > 64u || draw.instanceCount)
                 return false;
             NativeDrawCmd &p = f.nativeDraws[f.cmds.back().index];
-            if (p.kind != nd.kind || p.transient != nd.transient || p.instanceCount || std::memcmp(&p.s, &nd.s, sizeof(HwState)) != 0 ||
-                std::memcmp(p.constants, nd.constants, sizeof(nd.constants)) != 0 || !p.drawCount)
+            if (p.kind != nd.kind || p.transient != nd.transient || p.instanceCount ||
+                p.constantCount != nd.constantCount || std::memcmp(&p.s, &nd.s, sizeof(HwState)) != 0 ||
+                p.constants[124] != nd.constants[124] || p.constants[125] != nd.constants[125] || p.constants[126] != nd.constants[126] ||
+                std::memcmp(p.constants, nd.constants, size_t(p.constantCount) * sizeof(float)) != 0 || !p.drawCount)
                 return false;
             const size_t stride = g.stride;
             std::vector<uint8_t> &out = draw.transient ? f.nativeBytes : g.bytes;
@@ -5435,9 +5868,19 @@ namespace
                 d.meshKey = g.key;
                 static const bool pruneMerge = !(std::getenv("PS2X_HW_MERGE_PRUNE") && *std::getenv("PS2X_HW_MERGE_PRUNE") == '0');
                 auto lru = pruneMerge ? m_meshLru.find(g.key) : m_meshLru.end();
+                bool needMesh = true;
                 if (pruneMerge && lru != m_meshLru.end())
                 {
+                    ++m_meshHits;
                     lru->second = m_frameIndex;
+                    needMesh = false;
+                }
+                else if (tryFirstSeenTransient(f, d, g.key, g.bytes.data(), g.bytes.size()))
+                {
+                    needMesh = false;
+                }
+                if (!needMesh)
+                {
                     if (g.mesh + 1u == f.meshes.size() && g.cmd >= 1u && g.cmd + 1u == f.cmds.size() &&
                         f.cmds[g.cmd - 1u].type == CmdType::MeshCreate && f.cmds[g.cmd - 1u].index == g.mesh)
                     {
@@ -5447,23 +5890,35 @@ namespace
                     }
                 }
                 else
-                    useMesh(f, g.key, g.stride, g.bytes.data(), static_cast<uint32_t>(g.bytes.size() / g.stride), g.mesh);
+                {
+                    useMesh(f, g.key, g.stride, g.bytes.data(), static_cast<uint32_t>(g.bytes.size() / g.stride), g.mesh, nullptr,
+                            &g.bytes);
+                }
             }
             g.frame = nullptr;
         }
 
         void evictMeshes()
         {
+            ++m_meshEvicts;
             std::vector<std::pair<uint64_t, uint64_t>> byAge(m_meshLru.begin(), m_meshLru.end());
-            std::sort(byAge.begin(), byAge.end(), [](auto &a, auto &b) { return a.second < b.second; });
+            const size_t evictCount = byAge.size() / 4;
+            if (evictCount > 0u && evictCount < byAge.size())
+                std::nth_element(byAge.begin(), byAge.begin() + static_cast<ptrdiff_t>(evictCount), byAge.end(),
+                                 [](const auto &a, const auto &b) { return a.second < b.second; });
             Frame &f = *m_frame;
-            for (size_t i = 0; i < byAge.size() / 4; ++i)
+            for (size_t i = 0; i < evictCount; ++i)
             {
                 if (byAge[i].second == m_frameIndex)
-                    break;
+                    continue;
+                const uint64_t key = byAge[i].first;
                 f.cmds.push_back({CmdType::MeshDelete, static_cast<uint32_t>(f.meshDeletes.size())});
-                f.meshDeletes.push_back(byAge[i].first);
-                m_meshLru.erase(byAge[i].first);
+                f.meshDeletes.push_back(key);
+                m_meshLru.erase(key);
+                const uint64_t tag = key ? key : 0x9E3779B97F4A7C15ull;
+                const size_t slot = (tag ^ (tag >> 17)) & (kMeshSeenSize - 1u);
+                if (m_meshSeen[slot] == tag)
+                    m_meshSeen[slot] = 0ull;
             }
         }
 
@@ -5793,13 +6248,46 @@ namespace
             memoIn.version = 0;
             const bool paletted = t.psm == GS_PSM_T4 || t.psm == GS_PSM_T8 || t.psm == GS_PSM_T8H || t.psm == GS_PSM_T4HL ||
                                   t.psm == GS_PSM_T4HH;
+            const uint64_t clutHash = paletted ? m_cpu.ClutHash(t) : 0ull;
             uint32_t first = 0, last = 0;
             pageRange(t.tbp0, t.tbw, t.psm, 0, 0, d.textureWidth, d.textureHeight, first, last);
-            uint64_t deps = mix64(m_rtVersion, m_texEvictions);
+            // [gta-recomp] Key m_bindMemo by upload content hash instead of volatile VRAM page generations when the
+            // upload at tbp0 covers the texture intact (including T4 uploaded as CT16 and T8 as CT32; when not over a
+            // render target), and use 4-way set-associative lookup to stop conflict thrash (#113).
+            const bool directColor = t.psm == GS_PSM_CT32 || t.psm == GS_PSM_CT24 || t.psm == GS_PSM_CT16 || t.psm == GS_PSM_CT16S;
+            bool contentDeps = false;
+            uint64_t contentKeyHash = 0ull;
+            if (fastUploadOpt() && !(directColor && overlapsRenderTarget(first, last)))
+            {
+                if (auto up = m_uploadAt.find(t.tbp0); up != m_uploadAt.end())
+                {
+                    const UploadInfo &u = up->second;
+                    if (u.x == 0u && u.y == 0u && first >= u.first && last <= u.first + u.gens.size() &&
+                        (u.dpsm != t.psm || (u.dbw == t.tbw && u.w >= d.textureWidth && u.h >= d.textureHeight)))
+                    {
+                        bool untouched = true;
+                        for (uint32_t p = first; p < last && untouched; ++p)
+                            untouched = m_pageGen[p] == u.gens[p - u.first];
+                        if (untouched)
+                        {
+                            contentDeps = true;
+                            contentKeyHash = mix64(mix64(0xC0FFEE77ull, u.hash),
+                                                   u.dpsm | (uint64_t(u.dbw) << 8) | (uint64_t(u.w) << 16) | (uint64_t(u.h) << 32));
+                        }
+                    }
+                }
+            }
+            uint64_t pagesHash = 0;
+            if (!contentDeps)
+                for (uint32_t p = first; p < last && p < kPages; ++p)
+                    pagesHash = mix64(pagesHash, m_pageGen[p]);
+            // [gta-recomp] Paletted textures (T4/T8) never read render targets, so RT churn does not invalidate them;
+            // hashing deps into memoHash spreads shared staging VRAM slots across all 2048 4-way sets (#113).
+            const uint64_t rtVer = (fastUploadOpt() && !directColor) ? 0ull : m_rtVersion;
+            uint64_t deps = mix64(rtVer, m_texEvictions);
             if (paletted)
-                deps = mix64(deps, m_cpu.ClutHash(t));
-            for (uint32_t p = first; p < last && p < kPages; ++p)
-                deps = mix64(deps, m_pageGen[p]);
+                deps = mix64(deps, clutHash);
+            deps = mix64(deps, contentDeps ? contentKeyHash : pagesHash);
             uint64_t memoHash = 0x2545F4914F6CDD1Dull;
             {
                 uint64_t words[4] = {};
@@ -5808,32 +6296,53 @@ namespace
                 for (uint64_t w : words)
                     memoHash = mix64(memoHash, w);
             }
-            BindMemo &memo = m_bindMemo[memoHash & (kBindMemoSize - 1u)];
-            if (memo.valid && memo.deps == deps && std::memcmp(&memo.in, &memoIn, sizeof(memoIn)) == 0)
+            if (fastUploadOpt())
+                memoHash = mix64(memoHash, deps);
+            BindMemo *set = fastUploadOpt() ? &m_bindMemo[(memoHash & (kBindMemoSets - 1u)) * kBindMemoWays]
+                                            : &m_bindMemo[memoHash & (kBindMemoSize - 1u)];
+            const uint32_t ways = fastUploadOpt() ? kBindMemoWays : 1u;
+            uint32_t victim = 0;
+            for (uint32_t wi = 0; wi < ways; ++wi)
             {
-                ++m_bindMemoHits;
-                s.texIsRt = memo.texIsRt;
-                s.rtFbp = memo.rtFbp;
-                s.rtOx = memo.rtOx;
-                s.rtOy = memo.rtOy;
-                s.texKey = memo.texKey;
-                if (!s.texIsRt && memo.touchedFrame != m_frameIndex)
-                    m_texLru[s.texKey] = m_frameIndex;
-                memo.touchedFrame = m_frameIndex;
-                m_bindIn = in;
-                m_bindOut = s;
-                m_bindResult = memo.result;
-                m_bindTouchedFrame = m_frameIndex;
-                m_bindCacheValid = true;
-                return memo.result;
+                BindMemo &cand = set[wi];
+                if (cand.valid && std::memcmp(&cand.in, &memoIn, sizeof(memoIn)) == 0 && cand.deps == deps)
+                {
+                    ++m_bindMemoHits;
+                    s.texIsRt = cand.texIsRt;
+                    s.rtFbp = cand.rtFbp;
+                    s.rtOx = cand.rtOx;
+                    s.rtOy = cand.rtOy;
+                    s.texKey = cand.texKey;
+                    if (!s.texIsRt && cand.touchedFrame != m_frameIndex)
+                        m_texLru[s.texKey] = m_frameIndex;
+                    cand.touchedFrame = m_frameIndex;
+                    m_bindIn = in;
+                    m_bindOut = s;
+                    m_bindResult = cand.result;
+                    m_bindTouchedFrame = m_frameIndex;
+                    m_bindCacheValid = true;
+                    return cand.result;
+                }
+                if (!cand.valid)
+                {
+                    victim = wi;
+                    break;
+                }
+                if (cand.touchedFrame < set[victim].touchedFrame)
+                    victim = wi;
             }
-            const bool result = bindTextureUncached(d, s);
+            ++m_bindMemoMisses;
+            const bool result = bindTextureUncached(d, s, clutHash);
             // the deps again: binding can create a texture (and evict others) or note a render target
-            uint64_t after = mix64(m_rtVersion, m_texEvictions);
+            uint64_t afterPages = 0;
+            if (!contentDeps)
+                for (uint32_t p = first; p < last && p < kPages; ++p)
+                    afterPages = mix64(afterPages, m_pageGen[p]);
+            uint64_t after = mix64(rtVer, m_texEvictions);
             if (paletted)
-                after = mix64(after, m_cpu.ClutHash(t));
-            for (uint32_t p = first; p < last && p < kPages; ++p)
-                after = mix64(after, m_pageGen[p]);
+                after = mix64(after, clutHash);
+            after = mix64(after, contentDeps ? contentKeyHash : afterPages);
+            BindMemo &memo = set[victim];
             memo.valid = true;
             memo.in = memoIn;
             memo.deps = after;
@@ -5997,7 +6506,7 @@ namespace
             return 0;
         }
 
-        bool bindTextureUncached(const GSDrawState &d, HwState &s)
+        bool bindTextureUncached(const GSDrawState &d, HwState &s, uint64_t clutHash)
         {
             const GSTex0Reg &t = d.context.tex0;
             const uint32_t texStart = t.tbp0 * 256u;
@@ -6036,7 +6545,7 @@ namespace
             const bool paletted = t.psm == GS_PSM_T4 || t.psm == GS_PSM_T8 || t.psm == GS_PSM_T8H || t.psm == GS_PSM_T4HL ||
                                   t.psm == GS_PSM_T4HH;
             if (paletted)
-                key = mix64(key, m_cpu.ClutHash(t));
+                key = mix64(key, clutHash);
             // [gta-recomp] Texture = an intact whole upload (same base/format/width, covers it, pages untouched since):
             // key it by the upload's content instead of the page generations, so a texture that is streamed into a
             // shared VRAM area every frame finds its decoded GPU copy again.
@@ -6058,15 +6567,26 @@ namespace
                     }
                 }
                 // [gta-recomp] step 3d: named by the raster of the upload at its base when that upload's pages hold the
-                // texture and are untouched since - in any format (VCS sends T4 as CT16 and T8 as CT32, keyed by page
-                // generations above)
+                // texture and are untouched since - in any format (VCS sends T4 as CT16 and T8 as CT32; when intact and
+                // non-RT, also content-key cross-format whole uploads so shared-page churn does not recreate GPU textures).
                 else if (u.x == 0u && u.y == 0u && first >= u.first && last <= u.first + u.gens.size())
                 {
                     bool untouched = true;
                     for (uint32_t p = first; p < last && untouched; ++p)
                         untouched = m_pageGen[p] == u.gens[p - u.first];
                     if (untouched)
+                    {
                         raster = u.raster;
+                        const bool directColor = t.psm == GS_PSM_CT32 || t.psm == GS_PSM_CT24 || t.psm == GS_PSM_CT16 || t.psm == GS_PSM_CT16S;
+                        const uint64_t uBits = uint64_t(u.w) * u.h * transferBitsPerPixel(u.dpsm);
+                        const uint64_t tBits = uint64_t(d.textureWidth) * d.textureHeight * transferBitsPerPixel(t.psm);
+                        if (fastUploadOpt() && !(directColor && overlapsRenderTarget(first, last)) && tBits != 0u && uBits >= tBits)
+                        {
+                            contentKeyed = true;
+                            key = mix64(mix64(key ^ 0xC0FFEEull, u.hash),
+                                        u.dpsm | (uint64_t(u.dbw) << 8) | (uint64_t(u.w) << 16) | (uint64_t(u.h) << 32));
+                        }
+                    }
                 }
             }
             if (!raster && !m_pendingUploads.empty()) // [gta-recomp] step 3d: or the queued upload that wrote all its blocks
@@ -6184,7 +6704,8 @@ namespace
                 }
                 else
                 {
-                    // Compute stochastic surface suitability BEFORE makeTextureEarly moves tc.pixels to the worker thread.
+                    // Compute minAlpha & stochastic suitability BEFORE makeTextureEarly moves tc.pixels to helper thread.
+                    tc.minAlpha = computeMinAlpha(tc.pixels);
                     tc.stochastic = isStochasticSurface(tc.pixels, tc.w, tc.h);
                     if (tc.stochastic)
                         g_stochasticTextures.fetch_add(1, std::memory_order_relaxed);
@@ -6232,6 +6753,7 @@ namespace
             job->w = tc.w;
             job->h = tc.h;
             job->mipChain = mipChain;
+            job->minAlpha = tc.minAlpha;
             job->stochastic = tc.stochastic;
             job->checkStochastic = deferStochastic;
             job->pixels = std::move(tc.pixels);
@@ -6375,6 +6897,7 @@ namespace
                     }
                     else if (job->levels > 1u && r.pixels.size() == size_t(job->w) * job->h)
                     {
+                        job->minAlpha = computeMinAlpha(r.pixels);
                         buildMipChain(r.pixels, job->w, job->h, job->mips);
                         const void *levels[16];
                         const uint32_t n = mipLevels(r.pixels, job->mips, job->w, job->h, levels);
@@ -6384,6 +6907,7 @@ namespace
                     }
                     else
                     {
+                        job->minAlpha = computeMinAlpha(r.pixels);
                         d.mipLevels = 1;
                         job->made = dev.createTexture(d, r.pixels.data(), job->w * 4u);
                         job->bytes = r.gpuBytes(false);
@@ -6405,6 +6929,7 @@ namespace
                 }
                 if (job->deferredDecode || job->checkStochastic)
                 {
+                    job->minAlpha = computeMinAlpha(job->pixels);
                     job->stochastic = isStochasticSurface(job->pixels, job->w, job->h);
                     if (job->stochastic)
                         g_stochasticTextures.fetch_add(1, std::memory_order_relaxed);
@@ -6818,19 +7343,23 @@ namespace
         std::unique_ptr<Frame> m_frame;
         uint64_t m_frameIndex = 0;
         uint32_t m_pageGen[kPages]{};
+        static constexpr size_t kUploadTableSize = 8192u;
         struct UploadRecord // [gta-recomp] last whole-transfer upload per destination (see UploadImage)
         {
+            bool valid = false;
+            uint64_t key = 0;
             uint64_t hash = 0;
             uint32_t first = 0;
-            std::vector<uint32_t> gens;
+            SmallInlineVec<uint32_t, 16> gens;
         };
+        std::vector<UploadRecord> m_fastUploads = std::vector<UploadRecord>(kUploadTableSize);
         std::unordered_map<uint64_t, UploadRecord> m_uploads;
         struct UploadInfo // [gta-recomp] last whole upload per base pointer (content-keyed textures)
         {
             uint64_t hash = 0;
             uint32_t dbw = 0, dpsm = 0, x = 0, y = 0, w = 0, h = 0, first = 0;
             uint32_t raster = 0; // [gta-recomp] the game's raster it sent (RAM address), 0 unknown
-            std::vector<uint32_t> gens;
+            SmallInlineVec<uint32_t, 16> gens;
         };
         uint64_t m_texNamed = 0, m_texUnnamed = 0; // [gta-recomp] textures made, by whether their raster is known
         uint64_t m_bindCalls = 0, m_bindRepeats = 0, m_bindLookups = 0, m_bindLookupHits = 0; // [gta-recomp] PS2X_HW_UPSTATS
@@ -6860,14 +7389,17 @@ namespace
             uint8_t texIsRt = 0;
             bool result = false, valid = false;
         };
-        static constexpr size_t kBindMemoSize = 4096;
+        static constexpr size_t kBindMemoWays = 4u;
+        static constexpr size_t kBindMemoSets = 2048u;
+        static constexpr size_t kBindMemoSize = kBindMemoWays * kBindMemoSets;
         std::vector<BindMemo> m_bindMemo = std::vector<BindMemo>(kBindMemoSize);
         uint64_t m_rtVersion = 1;    // [gta-recomp] the render targets (m_rts) changed: bindTexture's memo
         uint64_t m_texEvictions = 0; // [gta-recomp] evictTextures ran: bindTexture's memo
-        uint64_t m_bindMemoHits = 0;
+        uint64_t m_bindMemoHits = 0, m_bindMemoMisses = 0;
         std::deque<PendingUpload> m_pendingUploads;       // [gta-recomp] lazy uploads, in submission order
         uint64_t m_pendingFrontId = 0;                    // id of m_pendingUploads.front()
         std::vector<uint16_t> m_blockPending = std::vector<uint16_t>(kBlocks, 0u); // queued uploads touching each block
+        std::vector<uint64_t> m_blockLastWriter = std::vector<uint64_t>(kBlocks, UINT64_MAX); // latest queued writer per block
         std::vector<std::vector<uint64_t>> m_blockWriters = std::vector<std::vector<uint64_t>>(kBlocks); // their ids
         // ids of every queued upload touching each block, also after a later one overwrote it completely (m_blockWriters
         // forgets those) - materializeBlocks' index; ids of uploads no longer queued are pruned when met
@@ -6875,6 +7407,19 @@ namespace
         std::vector<uint16_t> m_scratchWork;
         std::vector<size_t> m_scratchTakeList;
         std::vector<uint16_t> m_scratchTouched, m_scratchFull, m_scratchRead;
+        std::vector<uint32_t> m_touchedStamp = std::vector<uint32_t>(kBlocks, 0u);
+        uint32_t m_touchedGen = 0;
+        struct ClutRepeatState
+        {
+            bool valid = false;
+            uint64_t dataHash = 0;
+            uint32_t psm = 0, cbp = 0, cpsm = 0, csm = 0, csa = 0, cld = 0, clutReg = 0, rrw = 0, rrh = 0;
+        } m_lastClut;
+        static constexpr size_t kMeshSeenSize = 32768u;
+        std::vector<uint64_t> m_meshSeen = std::vector<uint64_t>(kMeshSeenSize, 0ull);
+        uint64_t m_clutSkipRepeat = 0;
+        uint64_t m_meshHits = 0, m_meshPromoted = 0, m_meshTransientFirstSeen = 0, m_meshEvicts = 0;
+        uint64_t m_meshWorldMiss = 0, m_meshLitMiss = 0;
         std::vector<uint32_t> m_wantStamp = std::vector<uint32_t>(kBlocks, 0u);
         uint32_t m_wantGeneration = 0;
         std::vector<uint8_t> m_scratchTake;

@@ -51,6 +51,7 @@ namespace present
     void setFrameInputTime(int64_t steadyNs); // the shown frame's input snapshot (rhi::Device::setFrameInputTime)
     // How present() shows frames (the Display > Vertical sync setting; main thread).
     void setPresentMode(int mode); // rhi::Device::PresentMode: 0 Immediate, 1 Vsync, 2 Tearing
+    int presentMode();
 
     // Post-processing (opt-in enhancement): exposure percent (100 = original) applied as a full-screen pass.
     void setPostProcessEnabled(bool on);

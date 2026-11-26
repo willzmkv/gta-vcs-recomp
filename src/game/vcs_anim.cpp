@@ -97,7 +97,11 @@ namespace vcs::anim
                 wr32(rdram, args + k * 4u, v);
             }
             wr32(rdram, args + s.argCount * 4u, 0);
-            alignas(16) R5900Context ctx = *s.base;
+            alignas(16) static thread_local R5900Context ctx;
+            // Copy active CPU/FPU state used by animation callbacks (skip ~850B VU0/COP0 register blocks)
+            static_assert(offsetof(R5900Context, sa) < offsetof(R5900Context, vu0_vf));
+            std::memcpy(&ctx, s.base, offsetof(R5900Context, vu0_vf));
+            std::memcpy(ctx.f, s.base->f, sizeof(ctx.f) + sizeof(ctx.f_acc) + sizeof(ctx.fcr31));
             const uint32_t nodes = rd32(rdram, s.ad + 0x10u);
             for (uint32_t i = s.first; i < s.end; ++i)
             {
@@ -391,7 +395,9 @@ namespace vcs::anim
             if (rd32(rdram, ad + 0xCu))
                 for (uint32_t i = 0; i < count; ++i)
                     roots += (rdram[(nodes + i * kNodeSize) & PS2_RAM_MASK] & 8u) != 0;
-            alignas(16) R5900Context base = *ctx;
+            alignas(16) static thread_local R5900Context base;
+            std::memcpy(&base, ctx, offsetof(R5900Context, vu0_vf));
+            std::memcpy(base.f, ctx->f, sizeof(base.f) + sizeof(base.f_acc) + sizeof(base.fcr31));
             base.pc = callback;
             unsigned slices = 1;
             static const bool guard = !(std::getenv("VCS_ANIM_GUARD") && std::getenv("VCS_ANIM_GUARD")[0] == '0');
@@ -530,6 +536,11 @@ namespace vcs::anim
                     }
                 }
                 ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
+            if (g_mode == Mode::Serial || (g_mode == Mode::Parallel && (!g_pool || rd32(rdram, GPR_U32(ctx, 4) + 8u) < 12u)))
+            {
+                g_origLoop(rdram, ctx, runtime);
                 return;
             }
             runCopies(rdram, ctx, fn, callback, g_mode == Mode::Parallel);
