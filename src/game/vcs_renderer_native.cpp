@@ -2733,42 +2733,39 @@ namespace
             }
             if (tb == 6u || ((ef >> 49) & 1ULL) != 0ULL)
             {
-                if ((ef >> 49) & 1ULL)
-                {
-                    const auto getAlphaFn = resolveOuterOrRaw(0x0036ED68u, g_outer36ED68, FUN_0036ed68_0x36ed68, runtime);
-                    uint32_t alpha = 0u;
-                    if (!callU32_1(rdram, ctx, runtime, getAlphaFn, 0x0036ED68u, 0x0035C828u, rd32(rdram, ent + 0x50u), alpha))
-                    {
-                        deferGuard.popNow();
-                        bak.restoreArgsAndFrame(ctx);
-                        return false;
-                    }
-                    if (alpha != 0xFFu)
-                    {
-                        const float dx = rdF32(rdram, 0x006F3C00u) - rdF32(rdram, ent + 0x30u);
-                        const float dy = rdF32(rdram, 0x006F3C04u) - rdF32(rdram, ent + 0x34u);
-                        const float dz = rdF32(rdram, 0x006F3C08u) - rdF32(rdram, ent + 0x38u);
-                        const float dist = std::sqrt((dx * dx + dy * dy) + dz * dz);
-                        int32_t added = 0;
-                        if (!invokeInsertEntitySortedFade(rdram, ctx, runtime, ent, dist, 0x0035C88Cu, added))
-                        {
-                            deferGuard.popNow();
-                            bak.restoreArgsAndFrame(ctx);
-                            return false;
-                        }
-                        if (added != 0)
-                            continue;
-                    }
-                }
-                SET_GPR_S32(ctx, 4, static_cast<int32_t>(ent));
-                SET_GPR_S32(ctx, 5, 0);
-                if (!callWrapped(rdram, ctx, runtime, g_hooks[kH_RenderEntityWithAlpha].outer,
-                                 0x0035D610u, 0x0035C8B4u, 0x20u))
+                const auto getAlphaFn = resolveOuterOrRaw(0x0036ED68u, g_outer36ED68, FUN_0036ed68_0x36ed68, runtime);
+                uint32_t alpha = 0u;
+                if (!callU32_1(rdram, ctx, runtime, getAlphaFn, 0x0036ED68u, 0x0035C828u, rd32(rdram, ent + 0x50u), alpha))
                 {
                     deferGuard.popNow();
                     bak.restoreArgsAndFrame(ctx);
                     return false;
                 }
+                if (alpha != 0xFFu)
+                {
+                    const float dx = rdF32(rdram, 0x006F3C00u) - rdF32(rdram, ent + 0x30u);
+                    const float dy = rdF32(rdram, 0x006F3C04u) - rdF32(rdram, ent + 0x34u);
+                    const float dz = rdF32(rdram, 0x006F3C08u) - rdF32(rdram, ent + 0x38u);
+                    const float dist = std::sqrt((dx * dx + dy * dy) + dz * dz);
+                    int32_t added = 0;
+                    if (!invokeInsertEntitySortedFade(rdram, ctx, runtime, ent, dist, 0x0035C88Cu, added))
+                    {
+                        deferGuard.popNow();
+                        bak.restoreArgsAndFrame(ctx);
+                        return false;
+                    }
+                    if (added != 0)
+                        continue;
+                }
+            }
+            SET_GPR_S32(ctx, 4, static_cast<int32_t>(ent));
+            SET_GPR_S32(ctx, 5, 0);
+            if (!callWrapped(rdram, ctx, runtime, g_hooks[kH_RenderEntityWithAlpha].outer,
+                             0x0035D610u, 0x0035C8B4u, 0x20u))
+            {
+                deferGuard.popNow();
+                bak.restoreArgsAndFrame(ctx);
+                return false;
             }
         }
         bak.restoreSavedOnly(ctx);
@@ -2820,8 +2817,7 @@ namespace
             }
             const uint32_t tb = static_cast<uint32_t>(ef & 0xEu);
             const bool path35CEBC = ((tb == 6u) || isPedBit) &&
-                                    (!isPedBit || rd32(rdram, ent + 0x8C4u) != 0x37u) &&
-                                    (tb != 6u || rd32(rdram, ent + 0x8C4u) != 0x37u || !isPedBit) &&
+                                    (rd32(rdram, ent + 0x8C4u) != 0x37u) &&
                                     (a0_cam3 == 0u);
             if (path35CEBC)
             {

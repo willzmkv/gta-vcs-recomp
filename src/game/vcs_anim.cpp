@@ -12,11 +12,13 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #if defined(VCS_ANIM_WORKER)
@@ -61,6 +63,13 @@ namespace vcs::anim
         };
         Mode g_mode = Mode::Parallel;
         PS2Runtime::RecompiledFunction g_origLoop = nullptr, g_origUpdate = nullptr;
+        struct PrevClumpDt
+        {
+            uint32_t ad = 0;
+            float dt = 0.0f;
+        };
+        bool g_stepFixOn = true;
+        std::unordered_map<uint32_t, PrevClumpDt> g_prevClumpDt;
         PS2Runtime *g_runtime = nullptr;
 
         uint32_t rd32(const uint8_t *rdram, uint32_t a)
@@ -437,12 +446,58 @@ namespace vcs::anim
             return slices; // how many slices it ran in
         }
 
-        // verify only: the last loop compared before the next clump update begins, then the update as it is
+        // verify only: the last loop compared before the next clump update begins, then the update as it is;
+        // also rescales root-motion delta from the clump's previous update dt to dtCurr so step fluctuations do
+        // not amplify velocity when the game divides delta by the current frame's time step (VCS_ANIM_STEP_FIX=0 disables)
         PS2_GUEST_CC void clumpUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            if (ctx->pc == kClumpUpdate)
+            const bool enter = ctx->pc == kClumpUpdate;
+            if (enter && g_mode == Mode::Verify)
                 compare(rdram);
+            uint32_t clump = 0u, ad = 0u, deltaPtr = 0u;
+            float dtCurr = 0.0f, prevDt = 0.0f;
+            bool hasAssoc = false, applyScale = false;
+            if (enter && g_stepFixOn)
+            {
+                clump = GPR_U32(ctx, 4);
+                dtCurr = ctx->f[12];
+                ad = clump ? rd32(rdram, clump + 0x18u) : 0u;
+                const uint32_t firstLink = ad ? rd32(rdram, ad) : 0u;
+                hasAssoc = firstLink && firstLink != ad;
+                deltaPtr = hasAssoc ? rd32(rdram, ad + 0xCu) : 0u;
+                if (deltaPtr && dtCurr >= 1e-4f)
+                {
+                    const auto it = g_prevClumpDt.find(clump);
+                    if (it != g_prevClumpDt.end() && it->second.ad == ad && it->second.dt >= 1e-4f)
+                    {
+                        prevDt = it->second.dt;
+                        applyScale = std::fabs(dtCurr - prevDt) > 1e-7f;
+                    }
+                }
+            }
             g_origUpdate(rdram, ctx, runtime);
+            if (enter && g_stepFixOn && hasAssoc && dtCurr >= 1e-4f)
+            {
+                if (applyScale && deltaPtr)
+                {
+                    const float scale = dtCurr / prevDt;
+                    for (uint32_t off = 0u; off <= 8u; off += 4u)
+                    {
+                        uint32_t bits = rd32(rdram, deltaPtr + off);
+                        float v = 0.0f;
+                        std::memcpy(&v, &bits, 4);
+                        if (std::isfinite(v) && v != 0.0f)
+                        {
+                            v *= scale;
+                            std::memcpy(&bits, &v, 4);
+                            wr32(rdram, deltaPtr + off, bits);
+                        }
+                    }
+                }
+                if (g_prevClumpDt.size() > 4096u)
+                    g_prevClumpDt.clear();
+                g_prevClumpDt[clump] = PrevClumpDt{ad, dtCurr};
+            }
         }
 
         PS2_GUEST_CC void nodeLoop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -553,9 +608,13 @@ namespace vcs::anim
     {
 #if defined(VCS_ANIM_WORKER)
         g_runtime = &runtime;
+        const char *stepEnv = std::getenv("VCS_ANIM_STEP_FIX");
+        g_stepFixOn = !(stepEnv && stepEnv[0] == '0');
         const char *e = std::getenv("VCS_NATIVE_ANIM");
         const std::string mode = e ? e : "";
         g_mode = mode == "0" ? Mode::Off : mode == "serial" ? Mode::Serial : mode == "verify" ? Mode::Verify : mode == "slices" ? Mode::Slices : Mode::Parallel;
+        if ((g_mode == Mode::Verify || g_stepFixOn) && (g_origUpdate = runtime.lookupFunction(kClumpUpdate)))
+            runtime.replaceFunction(kClumpUpdate, &clumpUpdate);
         if (g_mode == Mode::Off)
         {
             std::fprintf(stderr, "[anim] the game's node loop (VCS_NATIVE_ANIM=0)\n");
@@ -565,8 +624,6 @@ namespace vcs::anim
         if (!g_origLoop)
             return;
         runtime.replaceFunction(kNodeLoop, &nodeLoop);
-        if (g_mode == Mode::Verify && (g_origUpdate = runtime.lookupFunction(kClumpUpdate)))
-            runtime.replaceFunction(kClumpUpdate, &clumpUpdate);
         unsigned workers = 0;
         if (g_mode != Mode::Serial)
         {

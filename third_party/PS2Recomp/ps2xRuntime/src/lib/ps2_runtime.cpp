@@ -3265,12 +3265,20 @@ void PS2Runtime::run()
             const char *e = std::getenv("PS2X_PRE_PRESENT_TICK");
             return !(e && e[0] == '0');
         }();
+        static const bool prePresentGuardOn = [] {
+            const char *e = std::getenv("PS2X_PRE_PRESENT_GUARD");
+            return !(e && e[0] == '0');
+        }();
         static bool prePresentTicked = false;
+        bool hostTickedThisFrame = false;
         platform::pumpEvents(); // [gta-recomp]
         // [gta-recomp] host-paced game frames start on fresh input (ps2_present.h): here, unless the frame lead or the
         // pre-present tick (VSync/uncap overlap) started this one already
         if (!platform::frameLeadRan() && !prePresentTicked)
+        {
             ps2HostTick(false, platform::frameSlept());
+            hostTickedThisFrame = true;
+        }
         prePresentTicked = false;
         spikeT[0] = SpikeClock::now();
         present::beginFrame();
@@ -3451,7 +3459,8 @@ void PS2Runtime::run()
         }
         ps2control::pump(capturePng, shootPng, [this] { requestStop(); });
         present::setFrameInputTime(gsHwShownInputNs()); // [gta-recomp] input-to-screen delay (PS2X_RHI_STATS)
-        if (prePresentTickOn && g_hostPaced.load(std::memory_order_relaxed) && !platform::frameLeadRan())
+        if (prePresentTickOn && g_hostPaced.load(std::memory_order_relaxed) && !platform::frameLeadRan() &&
+            (!prePresentGuardOn || !hostTickedThisFrame))
         {
             platform::pumpEvents(false);
             ps2HostTick(false, false);
