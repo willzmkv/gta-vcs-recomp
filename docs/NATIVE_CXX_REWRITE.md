@@ -1,0 +1,153 @@
+# Engenharia Reversa Progressiva em C++ Nativo (`exp/native-cxx`)
+
+**Branch:** `exp/native-cxx` (local e `origin/exp/native-cxx`, derivado de `agent/issue-113` após as rodadas 1–5 de `#113`).  
+**Preservação:** `origin/hd-world-merge` é o **backup estável e branch de releases públicas (minor releases apenas)**. **Nunca mesclar trabalho experimental em `hd-world-merge` sem validação completa e aprovação explícita do usuário.**
+
+---
+
+## Contrato Obrigatório para Todos os Agentes
+
+1. **O que estamos fazendo:** substituição progressiva por engenharia reversa (reimplementação em C++ x64 nativo) dos módulos quentes do jogo (EE / colisão / renderização / simulação), mais melhorias estruturais no recompilador/runtime (`ps2xRecomp`, arena virtual de memória, GPU skinning, submissão RSL), mantendo a semântica do jogo original de PS2.
+2. **Regra 1 de `AGENTS.md` (Fallback & Paridade):** toda substituição nativa ou otimização estrutural **DEVE** manter o caminho emulado/anterior acessível por variável de ambiente (`VCS_...=0` / `PS2X_...=0`) e ser validada antes com verificador bit-a-bit (`*_VERIFY=1`) ou captura de cenas (`tools/scenes.py compare`), além de `tools/build.py --opt lto` ao medir.
+3. **Registro Obrigatório Passo a Passo:** ao concluir (ou abortar/reverter) qualquer subpasso listado neste documento, **atualize obrigatoriamente**:
+   - A tabela de **Progresso por Passo** abaixo;
+   - A seção **Diário Técnico de Passos Executados** com: data, endereço/função PS2 investigada, arquivos alterados, flag de fallback (Rule 1), método e contagem exata de paridade (`VERIFY`, `selftest`, `scenes`), números A/B antes/depois em ThinLTO (`--opt lto`) nas cenas-referência (Little Havana `redwood_rain`, `police`, `bench_avenue`, prints F3), e eventuais armadilhas descobertas;
+   - `docs/game-internals.md` (estruturas, offsets e endereços descobertos) e `docs/PS2RECOMP_PATCHES.md` (se tocar em `third_party/PS2Recomp`).
+4. **Não perder foco por micro-otimizações que não movem o gargalo:** olhar sempre para onde o profiler + `F3` mostram o tempo real. Não gastar um ciclo otimizando 0.5 ms na GPU/MainThread se a `GameThread` está em `12–14 ms` (`85%+` da barra laranja do `F3`).
+
+---
+
+## Baseline Inicial do Branch (`2026-11-25`, pós-#113 Rodadas 1–5)
+
+### Por que 4K Little Havana ainda ficava em ~58–72 fps?
+Medições reais do usuário (3 screenshots com `F3`, `4K`, `HD World R=3`, população 100%, `Crowd Bands = 1`, mods, aniso 16) + ThinLTO `--opt lto` automatizado:
+
+| Cenário (4K, mods, R=3) | FPS | Frame | `game` (laranja) | `render` (azul) | `wait` | `host` | `gpu` | Draws | Peds / Carros |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Print usuário #1 (`PCJ600` 00:48 NW) | **61.9** | 16.1 ms | **14.1 ms** | 1.3 ms | 0.5 ms | 14.9 ms | 5.0 ms | 4530 | 86 / 67 |
+| Print usuário #2 (`PCJ600` 00:11 Redwood NE) | **58.1** | 17.2 ms | **14.1 ms** | 1.8 ms | 1.2 ms | 15.8 ms | 5.7 ms | 5105 | 72 / 65 |
+| Print usuário #3 (`Admiral` 00:13 Redwood NE) | **72.5** | 13.8 ms | **12.1 ms** | 1.3 ms | 0.2 ms | 6.0 ms | 2.6 ms | 4359 | 99 / 71 |
+| Auto `redwood_4k_d3d12_uncap` (`14:32` chuva) | **71.5** | 14.0 ms | **12.3 ms** | 1.5 ms | 0.0 ms | 5.1 ms | 1.9 ms | 4160 | 119 / 44 |
+| Auto `redwood_4k_vulkan_uncap` (`14:31` chuva) | **68.1** | 14.7 ms | **12.9 ms** | 1.5 ms | 0.0 ms | 5.3 ms | 2.2 ms | 4113 | 111 / 43 |
+| Auto `police_4k_d3d12_uncap` | **99.9** | 10.0 ms | 8.8 ms | 1.0 ms | 0.0 ms | 5.2 ms | 1.7 ms | 2734 | 30 / 41 |
+| Auto `police_4k_vulkan_uncap` | **107.9** | 9.3 ms | 8.2 ms | 0.9 ms | 0.0 ms | 4.6 ms | 1.9 ms | 2746 | 32 / 44 |
+| Auto `fortbaxter_lh_4k_vulkan` | **99.0** | 10.1 ms | 7.6 ms | 1.4 ms | 1.0 ms | 6.8 ms | 2.4 ms | 2497 | 73 / 43 |
+| `bench_avenue.py` D3D12 (2 rodadas) | **75.5** | 13.24 ms | 11.25 ms | — | — | 5.37 ms | — | — | 88 (44 <200m) |
+| `bench_avenue.py` Vulkan (2 rodadas) | **72.2** | 13.86 ms | 12.45 ms | — | — | 5.04 ms | — | — | 91 (45 <200m) |
+
+### Perfil real de gargalos (`VCS_PROFILE` em Little Havana `redwood_rain`)
+- **`GameThread` (~85–90% do tempo de quadro nos prints do usuário, `12.1–14.1 ms`):**
+  - `63.9%` em código guest recompilado (`generated/ee/`) em 1 thread (`CWorld::Process 0x1933c4` `~29%` incl., `CRenderer 0x35d610` `~21%` incl., `CGame::Process 0x3ba904` `~15%` incl.).
+  - Principais focos individuais observados antes da Fase 1:
+    1. **Colisão & Física:** `FUN_002b8ed0` (`11.1%` amostras de folha no profiler recente + scratchpad `0x70002020`), `sphereTriangle` (`5.5%` + `segmentTriangleFrom0068` `1.7%` = `7.2%` em `vcs_vu0_native.cpp`), `FUN_00348d44`/`0x34fd60` (`~8.4%` incl.), `CAutomobile::ProcessControl` (`0x13a0a0`, `4.4%`), `CPed::ProcessControl` (`0x1f4bf0`, `~8.8%` incl.), `entitySphereTestNative` (`0x3c4170` + `ps2_fadd_slow`/`ps2_fmul_slow` `~2.5%`). *(Nota: `0x39dfe0`/`0x39e050` `3.2%` já receberam port nativo no commit base `3f9cc36`.)*
+    2. **Render no lado do jogo (`GameThread`):** `FUN_0039EC18` (skinned clumps + paletas de ossos + pacotes, `15.2%` inclusivo / `5.3%` próprio), `CRenderer` traversal (`0x35cd98` `15%`, `0x36dbf8` `9.4%`, `0x36eb70` `8.6%` incl.), `FUN_002F62B8`/`0x2F6A78` (`~2.5%` próprio).
+    3. **Overhead estrutural do código recompilado:** `ps2ReadChecked<uint32_t>` (`2.2%`), checks `if (addr < g_ps2FastReadLimit)` em cada leitura/escrita RAM, `ctx->r[]`/`ctx->f[]` em memória, `eeCheckpointDue()` em loops, `FUN_002560D8` VM de scripts (`3.0%`).
+- **`RenderWorker` (~80% ocupada em paralelo, gera `1.3–1.8 ms` de `render` sync na `GameThread`):**
+  - `24.1–26.5%` `memcpy`, `5.9–7.5%` `beforeNative`, `4.1–4.3%` `skin`, `2.0–3.4%` `memcmp`, `2.6–2.8%` `setupMatrices`/`drawNativeRigid`.
+  - **Por que GPU Skinning sozinho não destrava FPS maciço hoje:** tira apenas os `4.1–4.3%` do `RenderWorker` (< 1 ms paralelo) e parte dos `memcpy`, sem tocar nos `12–14 ms` da `GameThread`. Faz sentido na Fase 4 (ou após derrubar a `GameThread`).
+
+---
+
+## Plano Passo a Passo (Fases 1 a 4)
+
+| Fase / Passo | Alvo Principal | Meta na `GameThread` / Frame | Status |
+|---|---|---|---|
+| **1.1** | `entitySphereTestNative` (`0x003C4170` fast normal-float SSE) + `vcs_vu0_native.cpp` (`CollisionVu` em registradores SSE locais, `dotW`, `clipW`, `convertInputs`) | `-0.8 a -1.5 ms` | `concluido` |
+| **1.2** | Engenharia reversa (`eedecomp.py 0x2b8ed0 0x34fd60 0x348d44`) + port nativo C++ SIMD de `FUN_002b8ed0` (bypass total de scratchpad/VU0 marshaling na colisão mesh/setor) | `-1.5 a -2.2 ms` | `concluido` |
+| **1.3** | Engenharia reversa & port nativo de `FUN_0034FD60` / `FUN_0012A278` / `FUN_002B7A10` (varredura de colisão de entidades/setores) | `-1.0 a -1.5 ms` | `pendente` |
+| **2.1** | Engenharia reversa (`eedecomp.py 0x39ec18 0x2f62b8 0x2f6a78`) + substituição nativa C++ de `FUN_0039EC18` (paleta de ossos AVX2 + iluminação + submissão direta RSL sem pacotes DMA) | `-1.5 a -2.5 ms` | `pendente` |
+| **2.2** | Engenharia reversa & port nativo de `CRenderer` (`0x35d610`, `0x35cd98`, `0x36dbf8`, `0x36eb70` frustum/traversal) | `-1.0 a -2.0 ms` | `pendente` |
+| **2.3** | Simulação & Crowd/Vehicle LOD adaptativo (`0x13a0a0`, `0x1f4bf0`, pool `65–71` veículos / `72–99` peds fora do raio próximo) | `-1.0 a -2.0 ms` | `pendente` |
+| **3.1** | Memória Virtual Direta (`VirtualAlloc`/`mmap` + guard pages / fast arena) para eliminar `if (addr < limit)` + `PS2_RAM_MASK` de todo `READ`/`WRITE` em `generated/` | `-1.5 a -2.5 ms` | `pendente` |
+| **3.2** | Otimização da Script VM (`FUN_002560D8` despacho direto / fast-path) | `-0.3 a -0.5 ms` | `pendente` |
+| **3.3** | Melhorias de codegen no `ps2xRecomp` (caching local de registradores GPR/FPR quentes, eliminação de `eeCheckpointDue` redundante em leaf/pequenos loops, fast-FPU onde seguro) + `--recompile` | `-2.0 a -3.5 ms` | `pendente` |
+| **4.1** | **GPU Skinning** (`CROWD_BANDS_PLAN.md` Passo 6: índices/pesos no VB estático + paleta de ossos em cbuffer no `vs_lit` / `vs_lit_inst`, removendo `skin()` da `RenderWorker`) | `-render sync & p99` | `pendente` |
+| **4.2** | Submissão RSL direta na `RenderWorker` (`RSL_SUBMISSION.md`: matar cópias/replay VIF1 em `beforeNative` + `25% memcpy`) | `-render sync & p99` | `pendente` |
+| **4.3** | Treino final de **PGO (`--opt pgo --train`)** após estabilização da cadeia nativa | polish final (`+5-15%`) | `pendente` |
+
+---
+
+## Como Executar Cada Fase (Guia Técnico para Agentes)
+
+### Fase 1: Colisão & Física Nativa (`src/game/vcs_overrides.cpp`, `src/game/vcs_vu0_native.cpp`, novo `src/game/vcs_collision_native.cpp`)
+1. **Passo 1.1 (Kernels VU0 & `entitySphereTest`):**
+   - Em [vcs_overrides.cpp](file:///D:/Games/vcs-agent/src/game/vcs_overrides.cpp), `entitySphereTestNative` (`0x003C4170`) hoje chama 22 operações `ps2_fadd`/`ps2_fsub`/`ps2_fmul` escalares que saltam para `ps2_fadd_slow`/`ps2_fmul_slow` sempre que coordenadas locais do `CColModel` são zero (`cx=0`, `r0y=0`). Substituir `evalNative` por cálculo SSE direto (`_mm_mul_ps`/`_mm_add_ps`, `-ffp-contract=off` respeitado) após checar se algum operando não-zero tem expoente `0` ou `255`, com fallback para caminho escalar quando houver número especial. Testar com `VCS_NATIVE_SPHERE_TEST_VERIFY=1` (`0 diffs`).
+   - Em [vcs_vu0_native.cpp](file:///D:/Games/vcs-agent/src/game/vcs_vu0_native.cpp), otimizar `CollisionVu`: substituir `dotW` (que faz 3 idas/voltas de RAM em `r.acc` e `r.vf[]`), vetorizar `clipW` (`_mm_cmpgt_epi32`/`_mm_movemask_ps`), e vetorizar `convertInputs` em registradores locais antes de gravar `r.vf[14..17]`. Sempre checar com `PS2X_VU0_VERIFY=1` (`0 differed`).
+2. **Passo 1.2 (Engenharia reversa & port de `FUN_002b8ed0`):**
+   - Decompilar `0x2b8ed0`, `0x34fd60`, `0x348d44`, `0x2b7a10`, `0x2b7e88`, `0x2b8508` com `tools/eedecomp.py` para `build/analysis/decomp/`.
+   - Documentar em `docs/game-internals.md` o layout exato de `CColModel`, lista de caixas/esferas/triângulos comprimidos (`int16_t` 1/128 e normal 1/4096), cache de scratchpad `0x70002020..`, e quais valores/registradores os chamadores realmente leem na saída de `0x2b8ed0`.
+   - Criar `VCS_NATIVE_COL_VERIFY=1` (comparando resultado de contato, normal, profundidade, `a0..a3` e lista de contatos com `FUN_002b8ed0_0x2b8ed0`) e `VCS_NATIVE_COL=0` (fallback Rule 1), mantendo `ctx->pc != entry` encaminhado para `g_orig` se houver retomada de checkpoint.
+   - Reimplementar o loop de teste de triângulos diretamente em C++ x64 AVX2/SSE sem copiar nada ao scratchpad nem invocar `0x39DFE0`/`0x39E050`/VU0.
+3. **Passo 1.3 (`FUN_0034FD60` / `FUN_0012A278`):**
+   - Levantar a varredura de entidades na grade de colisão (`0x34FD60` / `0x12A278`) para C++ nativo com checagens AABB/esfera em SoA/SIMD local, mantendo exatamente a mesma ordem de resposta de colisão e desativando via `VCS_NATIVE_COL=0`.
+
+### Fase 2: Renderização do Lado do Jogo & Simulação (`CRenderer` / `FUN_0039EC18` / Crowd LOD)
+1. **Passo 2.1 (`FUN_0039EC18` — Skinned Clump Render & Paleta):**
+   - Decompilar `0x39EC18` (observado em `PERFORMANCE.md 48` + `15.2%` incl. no profiler).
+   - Mapear como ela lê hierarquia de ossos, calcula matrizes 3x4, aplica luzes (`0x520860..`), e chama `FUN_002F7D58`/`0x2F62B8`/`0x2F6A78` para gravar pacotes.
+   - Criar port nativo C++ (`VCS_NATIVE_SKIN_SUBMIT=0` fallback, `VCS_NATIVE_SKIN_SUBMIT_VERIFY=1`) que escreve os mesmos itens/matrizes/pacotes (ou itens RSL diretos em `vcs_rsl_world` / novo `vcs_rsl_models.cpp`) sem overhead do guest.
+2. **Passo 2.2 (`CRenderer` `0x35d610`, `0x35cd98`, `0x36dbf8`, `0x36eb70`):**
+   - Decompilar e instrumentar quantas entidades são varridas por frame em Little Havana (`r=3`, `4500–5100` draws vs `2160` nas docas).
+   - Portar o culling/frustum/list builder de `CRenderer` para C++ nativo (`VCS_NATIVE_RENDERER=0`), verificando com `tools/scenes.py compare` + capturas em Little Havana e `hud_check`/`hdworld_missions`.
+3. **Passo 2.3 (Simulação / Crowd & Traffic LOD):**
+   - Investigar por que os prints reais em Little Havana mantêm `65–71` veículos e `72–99` peds mesmo com `Crowd Bands = 1`: usar `distancestate` / `popview` / `VCS_PROFILE` para medir `CAutomobile::ProcessControl` (`0x13a0a0`) e `CPed::ProcessControl` (`0x1f4bf0`), e aplicar LOD de simulação seguro além da zona próxima (sem afetar missões, carros perseguidores/scripts ativos, ou causar pops visíveis).
+
+### Fase 3: Recompilador (`ps2xRecomp`) & Memória Virtual Direta
+1. **Passo 3.1 (Arena Virtual Direta para RDRAM + Scratchpad):**
+   - Avaliar `VirtualAlloc` (Windows) / `mmap` (Linux) contíguo ou base fixa mapeada com guard pages de `PS2_RAM_SIZE + ...` para que `READ`/`WRITE` no código gerado deixe de testar `addr < g_ps2FastReadLimit` em cada instrução (protegendo compatibilidade com `PS2X_WRITE_WATCH` e MMIO/Scratchpad `0x70000000`).
+2. **Passo 3.2 (`FUN_002560D8` VM Dispatch):**
+   - Otimizar o loop/despacho de opcodes em `vcs_overrides.cpp` preservando `VCS_TRACE_TELEPORT`/`VCS_TRACE_PED_REMOVE` e extensão de sinal de retorno.
+3. **Passo 3.3 (Codegen em `third_party/PS2Recomp/ps2xRecomp/`):**
+   - Registradores em variáveis locais dentro de blocos/funções folha (menor tráfego em `ctx->r[]`/`ctx->f[]`), redução de `eeCheckpointDue()` em loops curtos garantidos, e fast-path FPU (`ps2_fadd`/`ps2_fmul`) configurável por opção preservando estritamente `VCS_SELFTEST=1` e `LAN_B6` (`#103`).
+
+### Fase 4: `RenderWorker`, GPU Skinning & PGO Final
+1. **Passo 4.1 (GPU Skinning — `CROWD_BANDS_PLAN.md` Step 6):** mover matriz de ossos (4x3 ou 4x4, até N ossos por draw) para cbuffer dedicado no `vs_lit`/`vs_lit_inst` e atributos de índice/peso no VB estático da malha (`PS2X_GPU_SKIN=0` fallback), validado com `PS2X_HLE_VERIFY` / comparativo de pixels.
+2. **Passo 4.2 (RSL Direto na `RenderWorker` — `RSL_SUBMISSION.md`):** eliminar o rebuild de memória VU no `beforeNative`/`replay`.
+3. **Passo 4.3 (`--opt pgo --train`)** na árvore estabilizada + bateria completa (`scenes`, `tour`, `bench_avenue`, `redwood_rain`, `framerate_audit`, `fire_check`, `soundcheck`).
+
+---
+
+## Diário Técnico de Passos Executados
+
+### `[2026-11-25]` Passo 0 — Criação do branch e snapshot base (`exp/native-cxx`)
+- Commit consolidado das rodadas 1–5 do `#113` salvo em `agent/issue-113` (`3f9cc36`).
+- Criado branch `exp/native-cxx` local e publicado em `origin/exp/native-cxx` (`origin/hd-world-merge` mantido intocado em `e676a68` como backup estável/release pública).
+- Documento vivo criado em `docs/NATIVE_CXX_REWRITE.md` e referenciado em `AGENTS.md`.
+- **Próximo:** Passos 1.1 e 1.2 concluídos; iniciar imediatamente **Fase 2 / Passo 2.1** (`0x0039EC18` skinning/submissão — atual #1 guest hotspot em 4K com `3.4%` + `memcpy 4.0%` / `o_memset 2.4%`) e mapear `0x0032E750`, `0x002560D8`, `0x0023E74C`, `0x002F648C`, `0x00141FE8`, `0x0034FD60` + `vcs::rslworld` (`5.3%` host).
+
+### `[2026-11-26]` Passo 1.1 — Fast-path SSE em `entitySphereTestNative` (`0x003C4170`) e `CollisionVu` em registradores locais
+
+- **Arquivos alterados:** [src/game/vcs_overrides.cpp](src/game/vcs_overrides.cpp), [src/game/vcs_vu0_native.cpp](src/game/vcs_vu0_native.cpp)
+- **O que foi feito:**
+  - Adicionado fast-path SSE para floats normais em `entitySphereTestNative` (`0x003C4170`) evitando fallbacks desnecessários no caminho rápido.
+  - Reescritos helpers quentes de `CollisionVu` em `vcs_vu0_native.cpp` (`dotW`, `clipW`, `convertInputs`) operando em registradores SSE locais em vez de ficar transitando pelos bancos completos do contexto R5900/VU0.
+- **Verificação bit-exata:**
+  - `[spheretest-verify] checked=196608 diffs=0` (`VCS_NATIVE_SPHERE_TEST_VERIFY=1`)
+  - `[xform-verify]` `0x39E050 checked=327680 diffs=0`, `0x39DFE0 checked=16384 diffs=0` (`VCS_NATIVE_XFORM_VERIFY=1`)
+  - `[vu0verify]` (`PS2X_VU0_VERIFY=1`): `0x020` (`500000 runs, 0 differed`), `0x3A0` (`580000 runs, 0 differed`), `0x0CF8` (`1160000 runs, 0 differed`), `0x0EB8` (`1120000 runs, 0 differed`), `0x0C10` (`180000 runs, 0 differed`).
+
+### `[2026-11-26]` Passo 1.2 — Port nativo C++ / SSE de `CCollision::ProcessColModels` (`0x002B8ED0`)
+
+- **Arquivos adicionados/alterados:** [src/game/vcs_collision_native.h](src/game/vcs_collision_native.h), [src/game/vcs_collision_native.cpp](src/game/vcs_collision_native.cpp), [src/game/vcs_vu0_native.cpp](src/game/vcs_vu0_native.cpp), [src/game/vcs_overrides.cpp](src/game/vcs_overrides.cpp), [docs/game-internals.md](docs/game-internals.md) (seção 12f).
+- **Engenharia reversa e arquitetura:**
+  - `0x002B8ED0` (`CCollision::ProcessColModels`) e helpers de caixa/esfera/linha/triângulo (`col_helpers.c`, `col_lru.c`) portados para C++ nativo com entrypoints VU0 diretos sem cópia de bancos (`vuSphereTriangleTest`, `vuSphereTriangleHit`, `vuSegmentTriangleHit`).
+  - **Switches de fallback/verificação (Regra 1):** `VCS_NATIVE_COL=0` desativa o port nativo e retorna ao código recompilado; `VCS_NATIVE_COL_VERIFY=1` executa ambos em paralelo e compara resultados bit a bit; `VCS_NATIVE_COL_MAX_TRIS` / `VCS_NATIVE_COL_LINES` disponíveis para ajuste. Fallbacks em runtime restritos a cache frio de normais (`numTris != 0 && pNormals == 0`) ou ponteiros fora do range (`fallbacks=18` em 65536 chamadas).
+- **Armadilha crítica resolvida (`1..57 ULP` em `lineT`):**
+  - Microprogramas VU0 no PS2 executam em **round-toward-zero** (`MXCSR RC = 3`, `(csr & ~0x6000u) | 0x6000u` em `ps2_runtime.cpp:2171-2174`), enquanto o EE/host roda em **round-to-nearest-even** (`RC = 0`).
+  - Ao rodar `vuSphereTriangleTest` / `vuSphereTriangleHit` / `vuSegmentTriangleHit` com arredondamento do host, produtos escalares de interseção divergiam `1..57 ULP`. Aplicado `Vu0RoundGuard` RAII ao redor dos loops de teste VU0 (mantendo `FPU_SUB_S(sA.w, h.dist)` fora do guard, em arredondamento EE) e coletando hits em buffer local antes da subtração EE.
+- **Verificação e qualidade (build `--opt lto`):**
+  - **Paridade bit-exata (`police` + `havana` + `autodrive`):** `[col-verify] checked=65536 diffs=0 fallbacks=18`.
+  - **Self-test (`VCS_SELFTEST=1`):** `[selftest] 0 failure(s)`.
+  - **`framerate_audit.py --steps 30,60,100 --only car,carcam,runover`:** concluído limpo (`car distance_4s`: `69.5 / 68.7 / 69.1`; `carcam half_s`: `0.467 / 0.483 / 0.46`; zero desvios novos).
+  - **`scenes.py compare` (`VCS_NATIVE_COL=0` vs `1`, 8 cenas):** `8/8 ok` (`loading mean 0.03`, `flyover_road 0.01`, `gameplay_hud 0.46`, `pause_map 0.13`, `gameplay_resumed 0.49`; cenas dinâmicas com variância normal de tráfego dentro do esperado; `p1_2_col1` salvo em `build/scenes/reference`).
+- **Benchmarks (`--opt lto`):**
+  - **Teste manual do usuário (4K max settings):** Little Havana subiu para mínima de `64–65 fps` (`65.0 fps / 15.4 ms`, `game 13.3 ms`, `HOST 187 fps`, `105 peds / 70 vehicles`), e Downtown próximo à delegacia atingiu o teto do monitor (`75 fps`). Observado secundariamente frame pacing dente-de-serra dentro da casa do Vic (`area 2`: `74.9 fps`, `game 6.1 ms`, `p95 25.6 ms`, `max 29.0 ms`) e um bug de mira (ambos agendados após o gargalo aberto de CPU).
+  - **`tools/bench.py` (60 fps, `COL=1` vs `COL=0`):** `city_575_175` `game 4.8 vs 6.0 ms`, `drive` `game 6.6 vs 7.2 ms`, `city_1325_-325` `3.1 vs 3.5 ms`, `city_-1425_-575` `4.7 vs 5.1 ms`, `fortbaxter` `5.8 vs 4.7 ms`, `city_-675_1425` `5.6 vs 5.3 ms`.
+  - **`tools/bench_avenue.py --rounds 2` (4K, user save, pop cheio):** `COL=1` avg `frame 12.09 ms, game 10.86 ms, host 4.83 ms, p99 18.8 ms, >25ms 16, >33ms 5` vs `COL=0` avg `frame 11.94 ms, game 10.76 ms, host 4.71 ms, p99 22.1 ms, >25ms 52, >33ms 5` (ganho claro em tail latency `p99` e spikes `>25ms`).
+  - **ABBA Redwood 4K D3D12 uncap (`p1_2_redwood_ab.py`, parado em Little Havana):** `col1 (n=1299)` `64.9 fps (avg 15.41, game 13.03, p99 29.60)` vs `col0 (n=1380)` `68.9 fps (avg 14.50, game 12.50, p99 29.08)` (`prof` `69.2 fps, game 12.36`). Em cena estacionária com tráfego aleatório, `FUN_002b8ed0` já havia sido amortizado pelo Passo 1.1 (~0% leaf no profiler), e a alocação de `float vf[32][4]` por triângulo em `vuSphereTriangleTest` (`0.7%` host no perfil) explica o empate em cena parada enquanto em movimento (`bench.py` / `bench_avenue` tail) o bypass nativo ajuda.
+- **Novo diagnóstico `VCS_PROFILE=10` em Redwood 4K D3D12 uncap (`t=20..30s`, `game 12.9 ms`, `67.3 fps`):**
+  - `59.3%` dos samples ainda em código guest gerado (`5685 samples`):
+    - **#1 guest:** `0x0039EC18` (`3.4%` self + callees de skinning/submissão)
+    - **Top guest seguintes:** `0x002F648C` (`1.1%`), `0x00141FE8` (`1.0%`), `0x0034FD60` (`1.0%`), `0x0023E74C` (`0.9%`), `0x0013A0A0` (`0.6%`), `0x002560D8` (`0.6%`), `0x00329990` (`0.6%`), `0x001933C4` (`0.6%`), `0x003814A0` (`0.5%`), `0x001F4BF0` (`0.5%`), `0x0024E8D0` (`0.5%`), `0x0032E750` (`0.5%`, `1.6%` em `t=15..20s`), `0x002BCF88` (`0.5%`), `0x00317FB8` (`0.5%`).
+  - **Top host na `GameThread` / frame:** `memcpy` (`4.0%`), `o_memset` (`2.4%`), `NtGetWriteWatch` (`2.0%`), família `vcs::rslworld::*` (`~5.3%` somados: `skippable 1.5%`, `settleRegion 1.2%`, `observe 1.0%`, `itemDraw 0.6%`, `appendRegion 0.5%`, `settleIm2D 0.5%`), `matrixTimes3From` (`1.4%`), `PS2Runtime::dispatchGuestBranch` (`1.0%`), `rwFrameUpdateNative` (`0.9%`), `boxClip` (`0.9%`), `rwMatrixMulDirect` (`0.8%`), `vcs::col::vuSphereTriangleTest` (`0.7%`).
+  - **Conclusão estratégica:** Atacar imediatamente `0x0039EC18` (skinning nativo / GPU skinning) e reduzir `memcpy` (`4.0%`), além dos próximos maiores blocos guest/RSL (`0x0034FD60`, `0x002F648C`, `0x00141FE8`, `0x0032E750`, `vcs::rslworld`).

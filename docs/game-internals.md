@@ -4251,6 +4251,12 @@ measured with `tools/melee_check.py`.
 - **`RwMatrixMultiply` (`0x002C0A40`) & `RwFrameUpdateObjects` (`0x001B4FB8`)**: RenderWare affine 4x3 matrix multiply (`dst`, `m1`, `m2`, with `#pragma clang fp contract(off)` and full input load before store for in-place aliasing) and recursive frame hierarchy update accounted for ~5.4% of `GameThread` in dense Little Havana views. Native implementations in `src/game/vcs_overrides.cpp` (`VCS_NATIVE_RWFRAME=0` disables; `VCS_NATIVE_RWFRAME_VERIFY=1` compares every call bit-for-bit against guest execution).
 - **128 MB fast RDRAM bounds (`PS2_RAM_SIZE`)**: VCS maps no PS2 hardware registers below `PS2_IO_BASE` (`0x10000000`). Raising `g_ps2FastReadLimit` / `g_ps2FastWriteLimit` from `PS2_FAST_RAM_LIMIT` (32 MB) to `PS2_RAM_SIZE - 16u` (128 MB) when read/write watchpoints are inactive (`PS2X_FAST_RAM_32MB=1` restores 32 MB) removes slow-path checks across the `0x02000000..0x07FFFFFF` streaming and HD World arenas (`ps2_runtime.cpp`).
 
+## 12f. Native `CCollision::ProcessColModels` (`0x002B8ED0`) & VU0 rounding (`2026-11-26`)
+
+- **`0x002B8ED0` (`CCollision::ProcessColModels`):** replaced natively in `src/game/vcs_collision_native.{h,cpp}` (controlled by `VCS_NATIVE_COL=0`, verified against guest execution via `VCS_NATIVE_COL_VERIFY=1`). Calls local-register SSE VU0 collision helpers (`vuSphereTriangleTest`, `vuSphereTriangleHit`, `vuSegmentTriangleHit` in `src/game/vcs_vu0_native.cpp`) on unpacked `int16_t` triangle vertices and normals, eliminating R5900/VU0 context copies and VU0 program dispatch overhead.
+- **Cold normal-cache / pointer safety fallback:** falls back cleanly to guest `0x002B8ED0` only when a `CColModel` triangle list has `numTris != 0 && pNormals == 0` (cold LRU normal cache) or out-of-range pointers.
+- **VU0 microprogram MXCSR rounding (`RC = 3` vs `RC = 0`):** `PS2Runtime::executeVU0Microprogram` (`third_party/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp:2171-2174`) runs VU0 microcode with **round-toward-zero** (`MXCSR RC = 3`, `(csr & ~0x6000u) | 0x6000u`), whereas EE code runs under host round-to-nearest-even (`RC = 0`). Matching that with `Vu0RoundGuard` around VU0 triangle tests while collecting sphere-hit distances and running `FPU_SUB_S` outside the guard (in EE rounding) eliminated `1..57 ULP` mismatches in `lineT` and achieved `0 diffs` across 65,536 verified calls (`[col-verify] checked=65536 diffs=0 fallbacks=18`).
+
 ## 13. Open questions / next research targets
 
 - Main loop, frame limiter, CTimer (section 4) - milestone 4 (60 fps).

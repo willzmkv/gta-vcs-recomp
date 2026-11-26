@@ -31,6 +31,7 @@
 #include "game/vcs_stream.h"
 #include "game/vcs_aim.h"
 #include "game/vcs_anim.h"
+#include "game/vcs_collision_native.h"
 #include "game/vcs_distance.h"
 #include "game/vcs_distant.h"
 #include "game/vcs_carcam.h"
@@ -686,7 +687,7 @@ namespace
             g_origSphereTest(rdram, ctx, runtime);
             return;
         }
-        auto evalNative = [&](float extraR) -> uint64_t {
+        auto evalSlow = [&](float extraR) -> uint64_t {
             const float cx = readF32Fast(rdram, cmPhys + 0u), cy = readF32Fast(rdram, cmPhys + 4u),
                         cz = readF32Fast(rdram, cmPhys + 8u), cr = readF32Fast(rdram, cmPhys + 12u);
             const float r0x = readF32Fast(rdram, p0 + 0u),  r0y = readF32Fast(rdram, p0 + 4u),  r0z = readF32Fast(rdram, p0 + 8u);
@@ -703,6 +704,49 @@ namespace
             const float mr2 = ps2_fmul(sr, sr);
             return d2 < mr2 ? 1ull : 0ull;
         };
+        auto evalNative = [&](float extraR) -> uint64_t {
+            const __m128 xyzMask = _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1));
+            const __m128 r0 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + p0 + 0u)), xyzMask);
+            const __m128 r1 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + p0 + 16u)), xyzMask);
+            const __m128 r2 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + p0 + 32u)), xyzMask);
+            const __m128 r3 = _mm_and_ps(_mm_loadu_ps(reinterpret_cast<const float *>(rdram + p0 + 48u)), xyzMask);
+            const __m128 c = _mm_loadu_ps(reinterpret_cast<const float *>(rdram + cmPhys));
+            const float tx = readF32Fast(rdram, p1 + 0u), ty = readF32Fast(rdram, p1 + 4u), tz = readF32Fast(rdram, p1 + 8u);
+            const __m128 t = _mm_set_ps(extraR, tz, ty, tx);
+            const __m128i expMask = _mm_set1_epi32(0x7F800000);
+            const __m128i absMask = _mm_set1_epi32(0x7FFFFFFF);
+            const __m128i zeroI = _mm_setzero_si128();
+            auto badFlags = [&](__m128 v) -> __m128i {
+                const __m128i bits = _mm_castps_si128(v);
+                const __m128i absB = _mm_and_si128(bits, absMask);
+                const __m128i exp = _mm_and_si128(bits, expMask);
+                return _mm_or_si128(_mm_cmpeq_epi32(exp, expMask),
+                                    _mm_andnot_si128(_mm_cmpeq_epi32(absB, zeroI), _mm_cmpeq_epi32(exp, zeroI)));
+            };
+            const __m128i inBad = _mm_or_si128(_mm_or_si128(badFlags(r0), badFlags(r1)),
+                                               _mm_or_si128(_mm_or_si128(badFlags(r2), badFlags(r3)),
+                                                            _mm_or_si128(badFlags(c), badFlags(t))));
+            if (_mm_movemask_epi8(inBad) != 0) [[unlikely]]
+                return evalSlow(extraR);
+            const __m128 w = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(r0, _mm_shuffle_ps(c, c, _MM_SHUFFLE(0, 0, 0, 0))),
+                                                              _mm_mul_ps(r1, _mm_shuffle_ps(c, c, _MM_SHUFFLE(1, 1, 1, 1)))),
+                                                   _mm_mul_ps(r2, _mm_shuffle_ps(c, c, _MM_SHUFFLE(2, 2, 2, 2)))),
+                                        r3);
+            const __m128 d = _mm_sub_ps(w, t);
+            const __m128 dSq = _mm_mul_ps(d, d);
+            alignas(16) float fSq[4], fC[4];
+            _mm_store_ps(fSq, dSq);
+            _mm_store_ps(fC, c);
+            const float d01 = fSq[0] + fSq[1];
+            const float d2 = d01 + fSq[2];
+            const float sr = extraR + fC[3];
+            const float mr2 = sr * sr;
+            const __m128i midBad = _mm_or_si128(_mm_or_si128(badFlags(w), badFlags(d)),
+                                                _mm_or_si128(badFlags(dSq), badFlags(_mm_set_ps(d2, mr2, sr, d01))));
+            if (_mm_movemask_epi8(midBad) != 0) [[unlikely]]
+                return evalSlow(extraR);
+            return d2 < mr2 ? 1ull : 0ull;
+        };
         static const bool verify = std::getenv("VCS_NATIVE_SPHERE_TEST_VERIFY") != nullptr;
         if (verify)
         {
@@ -713,7 +757,7 @@ namespace
             if (GPR_U64(ctx, 2) != nativeV0 && ++diffs <= 20)
                 std::fprintf(stderr, "[spheretest-verify] mismatch #%llu: native=%llu orig=%llu\n",
                              (unsigned long long)diffs, (unsigned long long)nativeV0, (unsigned long long)GPR_U64(ctx, 2));
-            if ((checked & 0xFFFFFu) == 0u)
+            if ((checked & 0xFFFFu) == 0u)
                 std::fprintf(stderr, "[spheretest-verify] checked=%llu diffs=%llu\n",
                              (unsigned long long)checked, (unsigned long long)diffs);
             return;
@@ -1798,6 +1842,7 @@ namespace
             if (g_origXformE050)
                 runtime.replaceFunction(0x0039E050u, &transformPointsNative<0x0039E050u, &g_origXformE050>);
         }
+        vcs::col::install(runtime);
         vcs::rslnative::install(runtime); // before the RSL tools: they wrap whatever the flush is then
         vcs::rsltrace::install(runtime);
         vcs::rslshadow::install(runtime);

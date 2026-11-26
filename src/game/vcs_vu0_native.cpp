@@ -4,6 +4,7 @@
 // results are bit-identical to the interpreter. Registered by code hash: they only run while VU0 code memory
 // holds exactly the game's programs. PS2X_VU0_VERIFY=1 checks them against the interpreter on live data.
 #include "ps2_runtime.h"
+#include "game/vcs_collision_native.h"
 #include "runtime/ps2_vu0_native.h"
 #include "runtime/ps2_vu1_compiled.h"
 
@@ -332,8 +333,19 @@ namespace
         uint32_t clip;
 
         explicit CollisionVu(R5900Context *ctx) : q(ctx->vu0_q), i(ctx->vu0_i), clip(ctx->vu0_clip_flags) { loadRegs(ctx, r); }
+        CollisionVu(float (*vfPtr)[4], float *accPtr) : q(0.0f), i(0.0f), clip(0u)
+        {
+            r.vf = vfPtr;
+            r.acc = accPtr;
+            r.vf[0][0] = 0.0f;
+            r.vf[0][1] = 0.0f;
+            r.vf[0][2] = 0.0f;
+            r.vf[0][3] = 1.0f;
+        }
         void finish(R5900Context *ctx) const
         {
+            if (!ctx)
+                return;
             storeRegs(r, ctx);
             ctx->vu0_q = q;
             ctx->vu0_i = i;
@@ -358,9 +370,12 @@ namespace
         // ACC.w / dest.w = the sum of v.xyz (MULAx.w, MADDAy.w, MADDz.w with vf0.w = 1)
         void dotW(int dest, int v)
         {
-            store<0x8u>(r.acc, mul(vf(0), lane(v, 0)));
-            store<0x8u>(r.acc, fused<0x8u, false>(acc(), vf(0), lane(v, 1)));
-            store<0x8u>(r.vf[dest], fused<0x8u, false>(acc(), vf(0), lane(v, 2)));
+            const __m128 one = _mm_set1_ps(1.0f);
+            const vu1v::V x = operand(vu1v::mul(one, splat(vu1fast::operand(r.vf[v][0]))));
+            const vu1v::V y = fused<0x8u, false>(x, one, splat(vu1fast::operand(r.vf[v][1])));
+            const vu1v::V z = fused<0x8u, false>(y, one, splat(vu1fast::operand(r.vf[v][2])));
+            store<0x8u>(r.acc, y);
+            store<0x8u>(r.vf[dest], z);
         }
         // the MAC sign flags FMAND sees for a result written to `lanes` (bit 0 = x ... bit 3 = w): x 0x80 ... w 0x10
         static uint16_t vecSigns(const float *p, unsigned lanes)
@@ -379,22 +394,15 @@ namespace
             uint32_t wBits;
             std::memcpy(&wBits, &r.vf[ft][3], 4);
             const int32_t limit = (wBits & 0x7F800000u) != 0u ? static_cast<int32_t>(wBits & 0x7FFFFFFFu) : 0x007FFFFF;
-            auto exceeds = [limit](float value, uint32_t signMask) {
-                uint32_t bits;
-                std::memcpy(&bits, &value, 4);
-                bits ^= signMask;
-                int32_t ordered;
-                std::memcpy(&ordered, &bits, 4);
-                return ordered > limit;
-            };
-            uint32_t flags = 0u;
-            for (int c = 0; c < 3; ++c)
-            {
-                if (exceeds(r.vf[fs][c], 0x00000000u))
-                    flags |= 1u << (2 * c);
-                if (exceeds(r.vf[fs][c], 0x80000000u))
-                    flags |= 2u << (2 * c);
-            }
+            const __m128i bits = _mm_loadu_si128(reinterpret_cast<const __m128i *>(r.vf[fs]));
+            const __m128i vlimit = _mm_set1_epi32(limit);
+            const __m128i signFlip = _mm_set1_epi32(static_cast<int>(0x80000000u));
+            const unsigned posMask = static_cast<unsigned>(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(bits, vlimit)))) & 7u;
+            const unsigned negMask =
+                static_cast<unsigned>(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(_mm_xor_si128(bits, signFlip), vlimit)))) & 7u;
+            static constexpr uint8_t kPos[8] = {0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15};
+            static constexpr uint8_t kNeg[8] = {0x00, 0x02, 0x08, 0x0A, 0x20, 0x22, 0x28, 0x2A};
+            const uint32_t flags = static_cast<uint32_t>(kPos[posMask] | kNeg[negMask]);
             clip = ((clip << 6) | flags) & 0xFFFFFFu;
         }
         int16_t fcand(uint32_t mask) const { return (clip & mask) != 0u ? 1 : 0; }
@@ -419,15 +427,18 @@ namespace
         // the fixed-point inputs (0x020..0x060 / 0x3A0..0x3E0): vf17.xyz in 1/4096, the rest in 1/128
         void convertInputs()
         {
-            itof0(17), itof0(14), itof0(15), itof0(16);                       // ITOF0 | LOI 1/4096
-            i = vu1fast::fromBits(0x397FFFD5u);
-            store<0x7u>(r.vf[17], mul(vf(17), splat(vu1fast::operand(i)))); // MULi.xyz vf17 (I = 1/4096) | LOI 1/128
+            const float i4096 = vu1fast::operand(vu1fast::fromBits(0x397FFFD5u));
             i = 0.0078125f;
-            const vu1v::V i128 = splat(i);
-            store<0x8u>(r.vf[17], mul(vf(17), i128));                       // MULi.w vf17
-            store<0xFu>(r.vf[14], mul(vf(14), i128));
-            store<0xFu>(r.vf[15], mul(vf(15), i128));
-            store<0xFu>(r.vf[16], mul(vf(16), i128));
+            const __m128 scale17 = _mm_setr_ps(i4096, i4096, i4096, i);
+            const __m128 i128 = splat(i);
+            const __m128 v17 = _mm_mul_ps(vu1v::intToFloat(load(r.vf[17])), scale17);
+            const __m128 v14 = _mm_mul_ps(vu1v::intToFloat(load(r.vf[14])), i128);
+            const __m128 v15 = _mm_mul_ps(vu1v::intToFloat(load(r.vf[15])), i128);
+            const __m128 v16 = _mm_mul_ps(vu1v::intToFloat(load(r.vf[16])), i128);
+            store<0xFu>(r.vf[17], operand(v17));
+            store<0xFu>(r.vf[14], operand(v14));
+            store<0xFu>(r.vf[15], operand(v15));
+            store<0xFu>(r.vf[16], operand(v16));
         }
 
         // 0x228: the point of segment vf14 + t * vf15 nearest to vf12 (clamped to the segment) -> vf16.xyz, the
@@ -563,9 +574,9 @@ namespace
     // VU0 0x3A0 (collision overlay): sphere vf12 (centre, w = radius) against the triangle vf14 / vf15 / vf16 with
     // normal vf17 (fixed point). vi1 = 1 when they touch, with the contact point in vf1 and the push-out direction /
     // depth in vf2 / vf3.
-    void sphereTriangle(R5900Context *ctx, uint8_t *, uint32_t)
+    template <bool NeedOutputs>
+    bool sphereTriangleCore(CollisionVu &v, R5900Context *ctx)
     {
-        CollisionVu v(ctx);
         Vu0Regs &r = v.r;
         using CV = CollisionVu;
         v.convertInputs();                                                  // 03a0..03e0
@@ -580,7 +591,8 @@ namespace
         r.vi[5] = static_cast<int16_t>(r.vi[6] & mac03f0);
         store<0x8u>(r.acc, fused<0x8u, false>(v.acc(), v.vf(0), v.lane(2, 2))); // 0418 MADDAz.w
         store<0x8u>(r.vf[2], fused<0x8u, true>(v.acc(), v.vf(0), v.vf(17))); // 0420 MSUB.w vf2: signed distance
-        v.move(4, 3);                                                       // 0428 MOVE vf4, vf3 (before the upper)
+        if constexpr (NeedOutputs)
+            v.move(4, 3);                                                   // 0428 MOVE vf4, vf3 (before the upper)
         store<0x8u>(r.vf[3], CV::mul(v.vf(0), splat(vu1fast::operand(v.i)))); // 0428 MULi.w vf3 = 0.1
         v.clipW(13, 2);                                                     // 0440 CLIPw vf13 vs vf2.w
         const uint32_t clip0440 = v.clip;
@@ -592,7 +604,7 @@ namespace
         r.vi[1] = (clip0440 & 0x3u) != 0u ? 1 : 0;
         store<0x8u>(r.vf[2], vu1v::abs(v.vf(2)));                           // 0468 ABS.w vf2 | IBEQ vi0, vi1 -> 0000
         if (r.vi[1] == 0)
-            return v.exit(0), v.finish(ctx);
+            return v.exit(0), v.finish(ctx), false;
         r.vi[1] = v.fcand(0x03u);                                           // 0478 FCAND
         store<0x7u>(r.vf[2], CV::sub(v.vf(12), v.vf(1)));                   // 0480 | IADDIU vi2
         r.vi[2] = static_cast<int16_t>(r.vi[1] + 127);
@@ -627,14 +639,18 @@ namespace
         }
         r.vi[6] = static_cast<int16_t>(r.vi[6] + r.vi[4]);                  // 04e8 IADD vi6
         r.vi[2] = static_cast<int16_t>(r.vi[6] & mac[0]);                   // 04f0 FMAND (04d0)
-        store<0x8u>(r.acc, CV::mul(v.vf(0), v.lane(3, 0)));                 // 04f8 MULAx.w | IAND vi5
+        if constexpr (NeedOutputs)
+            store<0x8u>(r.acc, CV::mul(v.vf(0), v.lane(3, 0)));             // 04f8 MULAx.w | IAND vi5
         r.vi[5] = static_cast<int16_t>(r.vi[5] & r.vi[6]);
-        store<0x8u>(r.acc, fused<0x8u, false>(v.acc(), v.vf(0), v.lane(3, 1))); // 0500 MADDAy.w | FMAND vi3 (04e0)
+        if constexpr (NeedOutputs)
+            store<0x8u>(r.acc, fused<0x8u, false>(v.acc(), v.vf(0), v.lane(3, 1))); // 0500 MADDAy.w | FMAND vi3 (04e0)
         r.vi[3] = static_cast<int16_t>(r.vi[6] & mac[1]);
-        store<0x8u>(r.vf[3], fused<0x8u, false>(v.acc(), v.vf(0), v.lane(3, 2))); // 0508 MADDz.w vf3 | IADDIU vi8, 3
+        if constexpr (NeedOutputs)
+            store<0x8u>(r.vf[3], fused<0x8u, false>(v.acc(), v.vf(0), v.lane(3, 2))); // 0508 MADDz.w vf3 | IADDIU vi8, 3
         r.vi[8] = 3;
         r.vi[4] = static_cast<int16_t>(r.vi[6] & mac[2]);                   // 0510 FMAND vi4 (04f0)
-        v.rsqrt(0, 3, 3, 3);                                                // 0528 RSQRT Q (delay slot of 0520)
+        if constexpr (NeedOutputs)
+            v.rsqrt(0, 3, 3, 3);                                            // 0528 RSQRT Q (delay slot of 0520)
         if (r.vi[2] == r.vi[5])                                             // 0520 IBNE vi2, vi5 -> 0538
         {
             store<0x7u>(r.vf[4], CV::add(v.vf(0), v.vf(16)));               // 0530 | IADDIU vi7, 1
@@ -651,15 +667,19 @@ namespace
             ++r.vi[7];
             if (r.vi[7] == r.vi[8])                                         // 0570 IBEQ vi7, vi8 -> 0720: inside all edges
             {
-                store<0x1u>(r.vf[3], CV::add(v.vf(0), v.lane(2, 3)));       // 0720 ADDw.x vf3 = depth | WAITQ
-                store<0x7u>(r.vf[2], CV::mul(v.vf(2), v.qv()));             // 0728 MULq vf2
+                if constexpr (NeedOutputs)
+                {
+                    store<0x1u>(r.vf[3], CV::add(v.vf(0), v.lane(2, 3)));   // 0720 ADDw.x vf3 = depth | WAITQ
+                    store<0x7u>(r.vf[2], CV::mul(v.vf(2), v.qv()));         // 0728 MULq vf2
+                }
                 r.vi[1] = 1;                                                // 0730
-                return v.finish(ctx);
+                return v.finish(ctx), true;
             }
         }
         store<0x1u>(r.vf[13], CV::mul(v.vf(13), v.vf(13)));                 // 0580 MUL.x vf13 (radius^2) | IADDIU vi8, 2
         r.vi[8] = 2;
-        store<0x7u>(r.vf[2], CV::mul(v.vf(2), v.qv()));                     // 0588 MULq vf2 | WAITQ
+        if constexpr (NeedOutputs)
+            store<0x7u>(r.vf[2], CV::mul(v.vf(2), v.qv()));                 // 0588 MULq vf2 | WAITQ
         if (r.vi[7] == r.vi[8])                                             // 0590 IBNE vi7, vi8 -> 0648
         {
             // outside one edge: the nearest point of that edge (subroutine 0228), then 0740
@@ -682,32 +702,69 @@ namespace
             }
             v.nearestOnSegment();
             v.clipW(13, 16);                                                // 0740 CLIPw vf13 vs vf16.w | SQRT Q
-            v.sqrtQ(16, 3);
-            store<0x7u>(r.vf[1], CV::add(v.vf(0), v.vf(16)));               // 0748 ADD vf1 = nearest point
-            store<0x7u>(r.vf[2], CV::sub(v.vf(12), v.vf(16)));              // 0750 SUB vf2
+            if constexpr (NeedOutputs)
+                v.sqrtQ(16, 3);
+            if constexpr (NeedOutputs)
+            {
+                store<0x7u>(r.vf[1], CV::add(v.vf(0), v.vf(16)));           // 0748 ADD vf1 = nearest point
+                store<0x7u>(r.vf[2], CV::sub(v.vf(12), v.vf(16)));          // 0750 SUB vf2
+            }
             r.vi[1] = v.fcand(0x1u);                                        // 0760 FCAND vi1, 1: r^2 > d^2
-            store<0x1u>(r.vf[3], CV::add(v.vf(0), v.qv()));                 // 0768 ADDq.x vf3 = distance | WAITQ
+            if constexpr (NeedOutputs)
+                store<0x1u>(r.vf[3], CV::add(v.vf(0), v.qv()));             // 0768 ADDq.x vf3 = distance | WAITQ
             if (r.vi[1] == 0)                                               // 0770 IBEQ vi0, vi1 -> 0000
-                return v.exit(0), v.finish(ctx);
-            v.div(0, 3, 3, 0);                                              // 0788 DIV Q = 1 / distance
-            store<0x7u>(r.vf[2], CV::mul(v.vf(2), v.qv()));                 // 0790 MULq vf2 | WAITQ
-            return v.finish(ctx);                                           // 0798 E (vi1 = 1 from 0760)
+                return v.exit(0), v.finish(ctx), false;
+            if constexpr (NeedOutputs)
+            {
+                v.div(0, 3, 3, 0);                                          // 0788 DIV Q = 1 / distance
+                store<0x7u>(r.vf[2], CV::mul(v.vf(2), v.qv()));             // 0790 MULq vf2 | WAITQ
+            }
+            return v.finish(ctx), true;                                     // 0798 E (vi1 = 1 from 0760)
         }
         // outside two edges: the nearest corner vf4
         store<0x7u>(r.vf[5], CV::sub(v.vf(4), v.vf(12)));                   // 0648 SUB vf5
-        store<0x7u>(r.vf[1], CV::add(v.vf(0), v.vf(4)));                    // 0650 ADD vf1 = corner
-        store<0x7u>(r.vf[2], CV::sub(v.vf(12), v.vf(4)));                   // 0658 SUB vf2
+        if constexpr (NeedOutputs)
+        {
+            store<0x7u>(r.vf[1], CV::add(v.vf(0), v.vf(4)));                // 0650 ADD vf1 = corner
+            store<0x7u>(r.vf[2], CV::sub(v.vf(12), v.vf(4)));               // 0658 SUB vf2
+        }
         store<0x7u>(r.vf[5], CV::mul(v.vf(5), v.vf(5)));                    // 0668 MUL vf5
         v.dotW(5, 5);                                                       // 0688..0698
         v.clipW(13, 5);                                                     // 06b8 CLIPw vf13 vs vf5.w | SQRT Q
-        v.sqrtQ(5, 3);
+        if constexpr (NeedOutputs)
+            v.sqrtQ(5, 3);
         r.vi[1] = v.fcand(0x1u);                                            // 06d8 FCAND vi1, 1
-        store<0x1u>(r.vf[3], CV::add(v.vf(0), v.qv()));                     // 06e0 ADDq.x vf3 | WAITQ
+        if constexpr (NeedOutputs)
+            store<0x1u>(r.vf[3], CV::add(v.vf(0), v.qv()));                 // 06e0 ADDq.x vf3 | WAITQ
         if (r.vi[1] == 0)                                                   // 06e8 IBEQ vi0, vi1 -> 0000
-            return v.exit(0), v.finish(ctx);
-        v.div(0, 3, 3, 0);                                                  // 0700 DIV Q = 1 / distance
-        store<0x7u>(r.vf[2], CV::mul(v.vf(2), v.qv()));                     // 0708 MULq vf2 | WAITQ
+            return v.exit(0), v.finish(ctx), false;
+        if constexpr (NeedOutputs)
+        {
+            v.div(0, 3, 3, 0);                                              // 0700 DIV Q = 1 / distance
+            store<0x7u>(r.vf[2], CV::mul(v.vf(2), v.qv()));                 // 0708 MULq vf2 | WAITQ
+        }
         v.finish(ctx);                                                      // 0710 E
+        return r.vi[1] != 0;
+    }
+
+    void sphereTriangle(R5900Context *ctx, uint8_t *, uint32_t)
+    {
+        CollisionVu v(ctx);
+        sphereTriangleCore<true>(v, ctx);
+    }
+
+    inline void loadPackedTriangle(float (*vf)[4], const int16_t *v0, const int16_t *v1, const int16_t *v2,
+                                   const int16_t *norm4)
+    {
+        auto loadTriVert = [](float *dst, const int16_t *src) {
+            const __m128i iv = _mm_setr_epi32(src[0], src[1], src[2], (src[2] < 0) ? -1 : 0);
+            _mm_storeu_ps(dst, _mm_castsi128_ps(iv));
+        };
+        loadTriVert(vf[14], v0);
+        loadTriVert(vf[15], v1);
+        loadTriVert(vf[16], v2);
+        const __m128i in = _mm_setr_epi32(norm4[0], norm4[1], norm4[2], norm4[3]);
+        _mm_storeu_ps(vf[17], _mm_castsi128_ps(in));
     }
 
     struct Registrar
@@ -729,4 +786,53 @@ namespace
             ps2RegisterVu0Native(0x0E30u, 0x068u, 0x0EAEDF438E869B5Bull, &storeTwelve, "VCS VU0 store vf1..vf12 (0x0E30)");
         }
     } registrar;
+}
+
+namespace vcs::col
+{
+    bool vuSphereTriangleTest(const __m128 &sphereCenterR, const int16_t *v0, const int16_t *v1, const int16_t *v2,
+                              const int16_t *norm4)
+    {
+        alignas(16) float vf[32][4];
+        alignas(16) float acc[4];
+        _mm_storeu_ps(vf[12], sphereCenterR);
+        loadPackedTriangle(vf, v0, v1, v2, norm4);
+        CollisionVu v(vf, acc);
+        return sphereTriangleCore<false>(v, nullptr);
+    }
+
+    bool vuSphereTriangleHit(const __m128 &sphereCenterR, const int16_t *v0, const int16_t *v1, const int16_t *v2,
+                             const int16_t *norm4, __m128 &outPos, __m128 &outNorm, float &outDist)
+    {
+        alignas(16) float vf[32][4];
+        alignas(16) float acc[4];
+        _mm_storeu_ps(vf[12], sphereCenterR);
+        loadPackedTriangle(vf, v0, v1, v2, norm4);
+        CollisionVu v(vf, acc);
+        if (!sphereTriangleCore<true>(v, nullptr))
+            return false;
+        outPos = _mm_loadu_ps(vf[1]);
+        outNorm = _mm_loadu_ps(vf[2]);
+        outDist = vf[3][0];
+        return true;
+    }
+
+    bool vuSegmentTriangleHit(const __m128 &segStart, const __m128 &segEnd, const int16_t *v0, const int16_t *v1,
+                              const int16_t *v2, const int16_t *norm4, __m128 &outPos, __m128 &outNorm, float &outT)
+    {
+        alignas(16) float vf[32][4];
+        alignas(16) float acc[4];
+        _mm_storeu_ps(vf[12], segStart);
+        _mm_storeu_ps(vf[13], segEnd);
+        loadPackedTriangle(vf, v0, v1, v2, norm4);
+        CollisionVu v(vf, acc);
+        v.convertInputs();
+        segmentTriangleFrom0068(v, nullptr);
+        if (v.r.vi[1] == 0)
+            return false;
+        outPos = _mm_loadu_ps(vf[1]);
+        outNorm = _mm_loadu_ps(vf[2]);
+        outT = vf[3][0];
+        return true;
+    }
 }
