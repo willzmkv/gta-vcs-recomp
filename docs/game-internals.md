@@ -4268,6 +4268,16 @@ measured with `tools/melee_check.py`.
   - `FUN_0032E440` (VU0 norm3 / directional light helper used in EE) runs under host round-to-nearest-even (RN), not VU0 RZ.
 - **`CheckpointDeferGuard` (`EeScheduler::checkpointDue`):** native C++ hooks calling bounded guest sub-calls (`FUN_003298D8`, `FUN_002F8710`, etc.) mid-packet must bracket those calls with `ps2PushCheckpointDefer()` / `ps2PopCheckpointDefer()`, preventing mid-packet `g_checkpointUnwind` aborts while retaining cycle accounting and interrupts.
 
+## 12h. Native `CRenderer` / `CVisibilityPlugins` / world culling internals (Passo 2.2, `2026-11-26`)
+- **`vcs::renderer::install` (`src/game/vcs_renderer_native.{h,cpp}`):** installs 44 hooks covering `CRenderer`, `CVisibilityPlugins`, sphere/frustum/box culling, and world sector scanning (`VCS_NATIVE_RENDERER=0` disables; `VCS_NATIVE_RENDERER_VERIFY=1` runs dual execution and logs mismatches).
+- **World sector grid & scan (`0x0035E620` `scanWorldImpl`, `0x0035C310` `scanWorldWrapperImpl`):**
+  - Sector grid scale is **`1/80 m` (`0.0125f`, `0x3C4CCCCD`)** in `toSectorXY`, top-down box clip, and the `farClip > 300.0f` BigBuilding triangle scan (not `1/40 m` / `0.025f`).
+  - `idxA` selection reads camera `at.z` at `camMat + 0x28u` (`0x35e8b4`), not `up.z` (`+ 0x18u`).
+  - `scanWorldWrapperImpl` must restore caller saved registers (`$s0..$s7`, `$fp`) via `bak.restoreSavedOnly(ctx)` on fast-path return as well as fallback.
+- **Entity visibility setup (`0x0035EFD8` `setupEntityVisibilityImpl`):**
+  - `camBase = 0x006F44D0`, `modeOff = rd8(camBase + 0x50) * 0x270`: the camera-target check at `0x35F2BC..0x35F300` runs only when `camType (camBase + modeOff + 0x70) == 0x10` and `vehPtr == 0u`, and reads the target entity pointer at `camBase + modeOff + 0xE4u` (`0x74($a2)` relative to `camBase + modeOff + 0x70u`).
+  - For `miType == 3u`, updates visibility byte only when `rVt != 0u`, and when `rVt == 0u` jumps straight to distance calculation with `s5_isVehicleOrType = 0`.
+
 ## 13. Open questions / next research targets
 
 - Main loop, frame limiter, CTimer (section 4) - milestone 4 (60 fps).

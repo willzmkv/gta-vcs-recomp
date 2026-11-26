@@ -40,6 +40,7 @@
 #include "game/vcs_frontend.h"
 #include "game/vcs_hud.h"
 #include "game/vcs_prompts.h"
+#include "game/vcs_renderer_native.h"
 #include "game/vcs_rsl_native.h"
 #include "game/vcs_rsl_render_native.h"
 #include "game/vcs_rsl_world.h"
@@ -1681,6 +1682,7 @@ namespace
         vcs::rslshadow::onFrameKick(rdram);         // VCS_RSL_SHADOW (debug/rsl_shadow.h)
         vcs::rslworld::onFrameKick();               // world / model draws from RSL calls (game/vcs_rsl_world.h)
         vcs::rslnative::onFrameKick(rdram);         // native RSL emitters' verify (game/vcs_rsl_native.h)
+        vcs::renderer::onFrameKick();               // native CRenderer verify stats (game/vcs_renderer_native.h)
         FUN_002723e8_0x2723e8(rdram, ctx, runtime);
     }
 
@@ -1759,6 +1761,7 @@ namespace
         vcs::freecam::install(runtime);    // the trainer's free camera (game/vcs_freecam.h)
         vcs::aim::install(runtime);        // free aim with the mouse / right stick (game/vcs_aim.h)
         vcs::anim::install(runtime);       // the animation's node loop on worker threads (game/vcs_anim.h)
+        vcs::renderer::install(runtime);   // native CRenderer / CVisibilityPlugins / culling (before distance / distant)
         vcs::distance::install(runtime);   // the draw distance settings, around aim's CCamera::Process (game/vcs_distance.h)
         vcs::rslrender::install(runtime);  // native RSL/RW submission pipeline (before distant / rslnative / rslworld)
         vcs::distant::install(runtime);    // decorative distant traffic's simulation (game/vcs_distant.h)
