@@ -41,6 +41,7 @@
 #include "game/vcs_hud.h"
 #include "game/vcs_prompts.h"
 #include "game/vcs_rsl_native.h"
+#include "game/vcs_rsl_render_native.h"
 #include "game/vcs_rsl_world.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -1759,6 +1760,7 @@ namespace
         vcs::aim::install(runtime);        // free aim with the mouse / right stick (game/vcs_aim.h)
         vcs::anim::install(runtime);       // the animation's node loop on worker threads (game/vcs_anim.h)
         vcs::distance::install(runtime);   // the draw distance settings, around aim's CCamera::Process (game/vcs_distance.h)
+        vcs::rslrender::install(runtime);  // native RSL/RW submission pipeline (before distant / rslnative / rslworld)
         vcs::distant::install(runtime);    // decorative distant traffic's simulation (game/vcs_distant.h)
         vcs::carcam::install(runtime);     // the mouse on the camera behind a vehicle (game/vcs_carcam.h)
         vcs::footcam::install(runtime);    // on-foot mouse camera stabilisation (game/vcs_footcam.h)

@@ -403,6 +403,31 @@ namespace
 bool g_checkpointUnwind = false; // [gta-recomp] extern in ps2_runtime.h (the inline dispatch)
 void ps2ClearCheckpointUnwind() { g_checkpointUnwind = false; }
 
+// [gta-recomp] Defer eeCheckpointDue/dispatchGuestBranch preemption while a native C++ hook invokes short bounded
+// guest helpers mid-packet; cycle accounting and timer/event latching still run, and pending checkpoints fire at the
+// next guest branch/loop once popped.
+namespace
+{
+    thread_local uint32_t t_checkpointDeferDepth = 0u;
+    thread_local uint32_t t_checkpointDeferSkips = 0u;
+}
+void ps2PushCheckpointDefer() noexcept
+{
+    ++t_checkpointDeferDepth;
+}
+void ps2PopCheckpointDefer() noexcept
+{
+    if (t_checkpointDeferDepth > 0u && --t_checkpointDeferDepth == 0u)
+        t_checkpointDeferSkips = 0u;
+}
+bool ps2CheckpointDeferConsume() noexcept
+{
+    if (t_checkpointDeferDepth == 0u || t_checkpointDeferSkips >= 65536u)
+        return false;
+    ++t_checkpointDeferSkips;
+    return true;
+}
+
 // [gta-recomp] PS2X_TRACE_VU1=1: per VU1 program start address, runs / XGKICKs / where it stopped, every 5 s.
 extern uint64_t g_vu1XgkickCount;
 static void traceVu1Program(uint32_t startPc, uint64_t kicks, uint32_t endPc)

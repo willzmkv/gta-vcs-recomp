@@ -62,16 +62,86 @@ namespace vcs::rslnative
 
         uint64_t g_fallbackCfae0 = 0; // flushes the original ran for bit 0x4 (the rest: plug-in callbacks)
 
+        // FUN_001CFAE0(dst, *(context+0x134), *(0x4882AC), *(0x4882B0)): 1 CNT qwc=3 tag + 48 bytes (game-internals.md 6i)
+        void emitCfae0(const uint8_t *rdram, uint32_t context, Output &out)
+        {
+            const uint32_t a1 = rd32(rdram, context + 0x134u);
+            const uint32_t a2 = rd32(rdram, 0x4882ACu);
+            const uint32_t a3 = rd32(rdram, 0x4882B0u);
+            uint32_t pop = 0;
+            for (uint32_t m = a2; m != 0u; m >>= 1)
+                pop += (m & 1u);
+
+            uint32_t w[12]{};
+            if (a3 == 0u)
+            {
+                const uint32_t t4 = (0x400u - a1) >> 1;
+                const uint32_t step = (t4 - 2u) / (pop + 3u);
+                uint32_t cur = 1u;
+                for (uint32_t i = 0; i < 6u; ++i)
+                {
+                    if (a2 & (1u << i))
+                    {
+                        w[4u + i] = cur;
+                        cur += step;
+                    }
+                    else
+                    {
+                        w[4u + i] = 1u;
+                    }
+                }
+                w[0] = 0x03000000u | a1;
+                w[1] = 0x02000000u | t4;
+                w[2] = 0u;
+                w[3] = 0x6C02002Fu;
+                w[10] = 0x0000FFFFu;
+                w[11] = cur;
+            }
+            else
+            {
+                const uint32_t start = a1 + 1u;
+                const uint32_t step = ((0x3F5u - a1) / (pop + 6u)) & 0xFFFFFFFEu;
+                uint32_t cur = start;
+                for (uint32_t i = 0; i < 6u; ++i)
+                {
+                    if (a2 & (1u << i))
+                    {
+                        w[4u + i] = cur;
+                        cur += step;
+                    }
+                    else
+                    {
+                        w[4u + i] = 1u;
+                    }
+                }
+                const uint32_t end = (0x400u - cur) >> 1;
+                w[0] = 0x03000000u | cur;
+                w[1] = 0x02000000u | end;
+                w[2] = 0u;
+                w[3] = 0x6C02002Fu;
+                w[10] = 0u;
+                w[11] = 4u;
+            }
+
+            put64(out, 0x10000003u);
+            put64(out, 0x1000000000000000ull);
+            std::memcpy(out.bytes + out.size, w, sizeof(w));
+            out.size += static_cast<uint32_t>(sizeof(w));
+        }
+
         // FUN_002F8710 without its callback branches (game-internals.md 6i); false: the original must run
         bool build(const uint8_t *rdram, Output &out)
         {
             const uint32_t dirty = rd32(rdram, kDirty);
-            if (dirty & 0x4u)
+            const uint32_t context = rd32(rdram, 0x4882A4u);
+            if ((context & 0xF0000000u) != 0u)
+                return false;
+            static const bool nativeCfae0 = !(std::getenv("VCS_RSL_CFAE0") && *std::getenv("VCS_RSL_CFAE0") == '0');
+            if ((dirty & 0x4u) && !nativeCfae0)
             {
                 ++g_fallbackCfae0;
                 return false; // FUN_001CFAE0
             }
-            const uint32_t context = rd32(rdram, 0x4882A4u);
             // step 5f: the +0x50 callbacks on bit 0x10 that are known (game-internals.md 6i "The state flush"), emitted
             // natively below in the original's place: {callback, node +0x34, +0x54}
             uint32_t plugins[16][3];
@@ -80,8 +150,8 @@ namespace vcs::rslnative
             if (dirty & 0x11u)
             {
                 // the render context's plug-in list (+0x114, ends at +0xB0, next at +0x64): any callback the flush would
-                // call (+0x48 and +0x4C on a context change, +0x50 on bit 0x10) means the original runs - but for the two
-                // +0x50 ones VCS has (0x1CEF90 -> FUN_001CEF18, 0x40F798 -> FUN_0040F6C8), written here
+                // call (+0x48 and +0x4C on a context change, +0x50 on bit 0x10) means the original runs - but for the
+                // +0x50 ones VCS has (0x1CEF90 -> FUN_001CEF18, 0x40F798 -> FUN_0040F6C8, plus 0x2F4080 / 0x2A9538), written here
                 const uint32_t end = context + 0xB0u;
                 uint32_t node = rd32(rdram, context + 0x114u);
                 for (int n = 0; node != end; ++n, node = rd32(rdram, node + 0x64u))
@@ -96,6 +166,18 @@ namespace vcs::rslnative
                         plugins[pluginCount][2] = rd32(rdram, node + 0x54u);
                         ++pluginCount;
                         continue;
+                    }
+                    if (nativePlugins && cb50 == 0x002F4080u)
+                    {
+                        const uint32_t src = rd32(rdram, node + 0x54u);
+                        if ((src & 0xF0000000u) == 0u && (rd32(rdram, src + 0x24u) & 1u) == 0u)
+                            continue;
+                    }
+                    if (nativePlugins && cb50 == 0x002A9538u)
+                    {
+                        const uint32_t src = rd32(rdram, node + 0x54u);
+                        if ((src & 0xF0000000u) == 0u && rd32(rdram, src + 0x18u) == 0u)
+                            continue;
                     }
                     if ((dirty & 0x1u) ? (rd32(rdram, node + 0x48u) | rd32(rdram, node + 0x4Cu)) != 0u : rd32(rdram, node + 0x50u) != 0u)
                     {
@@ -132,6 +214,8 @@ namespace vcs::rslnative
                 put64(out, (uint64_t(rd32(rdram, 0x4882A8u)) << 32) | 0x50000000u);
                 put64(out, 0x1000000000000000ull);
             }
+            if (dirty & 0x4u)
+                emitCfae0(rdram, context, out);
             for (uint32_t i = 0; i < pluginCount; ++i) // step 5f: the +0x50 callbacks, in the list's order
             {
                 const uint32_t vu = plugins[i][1], src = plugins[i][2];

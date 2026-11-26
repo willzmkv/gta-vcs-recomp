@@ -372,21 +372,27 @@ void EeScheduler::postEvent(EeEvent event)
     m_eventCv.notify_one();
 }
 
+extern bool ps2CheckpointDeferConsume() noexcept; // [gta-recomp] ps2_runtime.cpp
+
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
     accountCycles(cycles >> m_clock.chargeShift); // [gta-recomp] setGuestChargeShift
 
-    if (m_checkpointPending.load(std::memory_order_acquire) ||
-        m_stopRequested.load(std::memory_order_acquire))
+    if (m_stopRequested.load(std::memory_order_acquire))
     {
         return true;
+    }
+
+    if (m_checkpointPending.load(std::memory_order_acquire))
+    {
+        return !ps2CheckpointDeferConsume(); // [gta-recomp]
     }
 
     const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
     if (nextEventCycle != 0u && m_clock.cycle >= nextEventCycle)
     {
         m_checkpointPending.store(true, std::memory_order_release);
-        return true;
+        return !ps2CheckpointDeferConsume(); // [gta-recomp]
     }
 
     if (m_clock.cycle < m_clock.sliceEnd)
@@ -399,7 +405,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     {
         m_rescheduleRequested = true;
         m_timeSliceExpired = true;
-        return true;
+        return !ps2CheckpointDeferConsume(); // [gta-recomp]
     }
 
     renewTimeSlice();

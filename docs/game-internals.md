@@ -4257,6 +4257,17 @@ measured with `tools/melee_check.py`.
 - **Cold normal-cache / pointer safety fallback:** falls back cleanly to guest `0x002B8ED0` only when a `CColModel` triangle list has `numTris != 0 && pNormals == 0` (cold LRU normal cache) or out-of-range pointers.
 - **VU0 microprogram MXCSR rounding (`RC = 3` vs `RC = 0`):** `PS2Runtime::executeVU0Microprogram` (`third_party/PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp:2171-2174`) runs VU0 microcode with **round-toward-zero** (`MXCSR RC = 3`, `(csr & ~0x6000u) | 0x6000u`), whereas EE code runs under host round-to-nearest-even (`RC = 0`). Matching that with `Vu0RoundGuard` around VU0 triangle tests while collecting sphere-hit distances and running `FPU_SUB_S` outside the guard (in EE rounding) eliminated `1..57 ULP` mismatches in `lineT` and achieved `0 diffs` across 65,536 verified calls (`[col-verify] checked=65536 diffs=0 fallbacks=18`).
 
+## 12g. Native RSL/RW submission & RenderWare object internals (Passo 2.1, `2026-11-26`)
+
+- **`clumpRender` (`FUN_002C0270`) `rpATOMICRENDER` gate:** bit `0x04` at `atomic + 0x02` (`rd8(rdram, atomic + 2u) & 4u`) gates the entire atomic draw including `dispatchAtomicCallback` (`beql $v0, $zero, label_2c02f0`); skipping only LTM updates while still invoking callbacks draws hidden/damaged/LOD vehicle/ped parts.
+- **`uvSet` (`FUN_00317D48`) & `kUvMtxInitFlag` (`0x00520F80`):** guest `FUN_00317D48` skips UV matrix upload when `envObj + 0x00`/`+0x04` already match `(uScale, vScale)`, initializing `kUvMtxInitFlag = 1` on first real update. Native `uvSetImpl` must check `kUvMtxInitFlag == 0` *before* writing `envObj + 0x00/0x04` (routed consistently via `invokeUvSetHook`), otherwise falling back to `FUN_00317D48` reads the freshly written values and leaves `0x00520F80 == 0` forever.
+- **`setupLights` (`FUN_001A73E0`):** when `!(flags & 8u)`, guest calls `resetLights` (`FUN_001A7038`); when `(flags & 8u)`, it conditionally calls `setLightAmbientGlobal` if `kAmbientEnableFlag != 0u` and *unconditionally* emits `setLightSpecGlobal` (`FUN_001CED88`) from `kOverrideAmbientRgb` (`0x004E5BB8`).
+- **Packet/state parity details (`FUN_003298D8`, `FUN_002F62B8`, VU0 `0x0032E440`):**
+  - `FUN_003298D8` upload-header BST (`0x006EE3F0` root, pool `*0x488760`, used `*0x4CD58C * 0x70`) and `renderSys` `0x1C/0x20` mutate during tag emission; parity snapshots must restore them before guest replay.
+  - `FUN_002F62B8` leaves unused mip slots (`>= 1 + MXL` from preceding `TEX1_1` `0x14`) uninitialized on stack when constructing GS `0x34..0x37` (`MIPTBP1/2`), and `drawModel` emits a `FLUSHE` (`0x10000000`) word in `vif2` before the GIF tag.
+  - `FUN_0032E440` (VU0 norm3 / directional light helper used in EE) runs under host round-to-nearest-even (RN), not VU0 RZ.
+- **`CheckpointDeferGuard` (`EeScheduler::checkpointDue`):** native C++ hooks calling bounded guest sub-calls (`FUN_003298D8`, `FUN_002F8710`, etc.) mid-packet must bracket those calls with `ps2PushCheckpointDefer()` / `ps2PopCheckpointDefer()`, preventing mid-packet `g_checkpointUnwind` aborts while retaining cycle accounting and interrupts.
+
 ## 13. Open questions / next research targets
 
 - Main loop, frame limiter, CTimer (section 4) - milestone 4 (60 fps).
