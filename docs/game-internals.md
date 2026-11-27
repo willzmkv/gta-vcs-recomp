@@ -4285,9 +4285,13 @@ measured with `tools/melee_check.py`.
   - Sector grid scale is **`1/80 m` (`0.0125f`, `0x3C4CCCCD`)** in `toSectorXY`, top-down box clip, and the `farClip > 300.0f` BigBuilding triangle scan (not `1/40 m` / `0.025f`).
   - `idxA` selection reads camera `at.z` at `camMat + 0x28u` (`0x35e8b4`), not `up.z` (`+ 0x18u`).
   - `scanWorldWrapperImpl` must restore caller saved registers (`$s0..$s7`, `$fp`) via `bak.restoreSavedOnly(ctx)` on fast-path return as well as fallback.
-- **Entity visibility setup (`0x0035EFD8` `setupEntityVisibilityImpl`):**
+- **`0x0035EFD8` `setupEntityVisibilityImpl`:**
   - `camBase = 0x006F44D0`, `modeOff = rd8(camBase + 0x50) * 0x270`: the camera-target check at `0x35F2BC..0x35F300` runs only when `camType (camBase + modeOff + 0x70) == 0x10` and `vehPtr == 0u`, and reads the target entity pointer at `camBase + modeOff + 0xE4u` (`0x74($a2)` relative to `camBase + modeOff + 0x70u`).
   - For `miType == 3u`, updates visibility byte only when `rVt != 0u`, and when `rVt == 0u` jumps straight to distance calculation with `s5_isVehicleOrType = 0`.
+
+## 12i. Cutscene `SET_CHAR_VISIBLE` bit 51 & `CClouds::Render` Moon (`2026-11-27`)
+- **`op_0200` (`0x00416630`) vs `CPed::Render` (`0x00201300`) / `CPlayerPed::Render` (`0x0023A2C8`):** `SET_CHAR_VISIBLE(ped, FALSE)` clears `entity + 0x48` bit 19 (`~(1ULL << 19)`) and sets bit 51 (`1ULL << 51`). Only `CPlayerPed::Render` checks bit 51 before reaching `CEntity::Render` (`0x003C3E58`); non-player `CPed::Render` does not, so hidden non-player `CPed` models (such as cutscene dummy `L19` in `ch_mart` `MAR_A3`) render if scanned. `vcs_script_fixes.cpp` (`pedRenderVisibilityFix`, toggle `VCS_CUTSCENE_VISIBILITY_FIX=0`) adds the bit-51 early return on `0x00201300`.
+- **`CClouds::Render` (`0x0018CE80`) Moon gate & Hor+ scaling (`vcs_display.cpp`, `VCS_MOON_FIX=0`):** calls `FUN_0039FED8` (`0x0018CF44`, return `0x0018CF4C`) before Moon setup, tests `fabsf(Hours*60 + Minutes + Seconds/60 - 180.0f) < 180.0f` (hiding the Moon from dusk until midnight), and sizes `RenderOneXLUSprite` (`0x003A03A8`, called at `0x0018D1AC`) from `CalcScreenCoors` (`0x0039FC48`) `outW` without correcting for Hor+ `aspectWidening()`. `drawFixedMoon` renders across `20:00..06:00` (peak `180 * (1 - max(fog, cloud))` during `21:00..05:00`) with `halfW = halfH * (640.0f / 448.0f) / ((4.0f / 3.0f) * aspectWidening())`.
 
 ## 13. Open questions / next research targets
 

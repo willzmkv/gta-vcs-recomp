@@ -161,8 +161,39 @@ namespace vcs
         }
     }
 
+    namespace
+    {
+        PS2Runtime::RecompiledFunction g_origPedRenderVisibility = nullptr;
+
+        // CPed::Render (0x00201300) omits the entity+0x48 bit 51 (hidden) check that CPlayerPed::Render (0x0023A2C8)
+        // performs, so non-player CPeds hidden with SET_CHAR_VISIBLE(..., FALSE) (0x00416630, e.g. L19 in ch_mart
+        // MAR_A3) still draw if scanned. VCS_CUTSCENE_VISIBILITY_FIX=0 restores original behaviour.
+        PS2_GUEST_CC void pedRenderVisibilityFix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t entity = GPR_U32(ctx, 4);
+            const uint32_t ramOff = entity & PS2_RAM_MASK;
+            if (entity >= 0x00100000u && ramOff + 0x50u <= PS2_RAM_SIZE)
+            {
+                uint64_t flags = 0;
+                std::memcpy(&flags, rdram + ramOff + 0x48u, 8);
+                if ((flags & (1ULL << 51)) != 0ULL)
+                {
+                    ctx->pc = GPR_U32(ctx, 31);
+                    return;
+                }
+            }
+            if (g_origPedRenderVisibility)
+                g_origPedRenderVisibility(rdram, ctx, runtime);
+        }
+    }
+
     void installScriptFixHooks(PS2Runtime &runtime)
     {
+        if (const char *v = std::getenv("VCS_CUTSCENE_VISIBILITY_FIX"); !v || *v != '0')
+        {
+            if ((g_origPedRenderVisibility = runtime.lookupFunction(0x00201300u)))
+                runtime.replaceFunction(0x00201300u, &pedRenderVisibilityFix);
+        }
         g_origAnyBitSet = runtime.lookupFunction(kHandlerAnyBitSet);
         g_origCreateChar = runtime.lookupFunction(kHandlerCreateChar);
         if (!g_origAnyBitSet || !g_origCreateChar)

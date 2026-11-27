@@ -27,6 +27,7 @@
 #include "runtime/gs/gs_hw.h"
 #include <ps2_recompiled_functions.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -179,6 +180,162 @@ namespace vcs
             FUN_002af660_0x2af660(rdram, ctx, runtime);
         }
 
+        PS2Runtime::RecompiledFunction g_origCloudsRender = nullptr;
+        PS2Runtime::RecompiledFunction g_origCloudsFogReset = nullptr;
+        PS2Runtime::RecompiledFunction g_origCalcScreenCoors = nullptr;
+        PS2Runtime::RecompiledFunction g_origRwRenderStateSet = nullptr;
+        PS2Runtime::RecompiledFunction g_origRenderOneXluSprite = nullptr;
+        bool g_moonFix = true;
+        thread_local bool g_inCloudsRender = false;
+
+        uint16_t load16(const uint8_t *rdram, uint32_t addr)
+        {
+            uint16_t v;
+            std::memcpy(&v, rdram + (addr & kRamMask), 2);
+            return v;
+        }
+
+        void storeBytes(uint8_t *rdram, uint32_t addr, const void *src, size_t n)
+        {
+            std::memcpy(rdram + (addr & kRamMask), src, n);
+        }
+
+        // Fixed Moon pass for CClouds::Render (0x0018CE80):
+        // 1) Vanilla skips Moon whenever |Hours*60+Min+Sec/60 - 180| >= 180 (missing from dusk until 00:01 and very dim
+        //    near midnight). Draw across night hours (fade in 20:00..21:00, peak 180 across 21:00..05:00, fade out
+        //    05:00..06:00) using the same weather fade (1 - max(fog, cloud)).
+        // 2) Normalize halfW for the actual display aspect ratio so Hor+ widescreen does not stretch the Moon into a
+        //    wide horizontal oval.
+        void drawFixedMoon(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (!g_origCalcScreenCoors || !g_origRwRenderStateSet || !g_origRenderOneXluSprite)
+                return;
+            const uint8_t hours = rdram[0x004CD148u & kRamMask];
+            const uint8_t mins = rdram[0x004CD149u & kRamMask];
+            const uint16_t secs = load16(rdram, 0x004CD2C4u);
+            const float t = static_cast<float>(hours) * 60.0f + static_cast<float>(mins) + static_cast<float>(secs) / 60.0f;
+            float timeFrac = 0.0f;
+            if (t >= 1200.0f && t < 1260.0f)
+                timeFrac = (t - 1200.0f) / 60.0f;
+            else if (t >= 1260.0f || t <= 300.0f)
+                timeFrac = 1.0f;
+            else if (t > 300.0f && t < 360.0f)
+                timeFrac = (360.0f - t) / 60.0f;
+            if (timeFrac <= 0.0f)
+                return;
+
+            const float fog = loadFloat(rdram, 0x004CD14Cu);
+            const float cloud = loadFloat(rdram, 0x004CD2C8u);
+            const float weatherFade = std::clamp(1.0f - std::max(fog, cloud), 0.0f, 1.0f);
+            const int alpha = std::clamp(static_cast<int>(timeFrac * 180.0f * weatherFade), 0, 255);
+            if (alpha <= 0)
+                return;
+
+            const uint32_t sp = (GPR_U32(ctx, 29) - 64u) & ~0xFu;
+            if (sp < 0x00100000u || (sp & kRamMask) + 64u > PS2_RAM_SIZE)
+                return;
+
+            const float moonPos[3] = {loadFloat(rdram, 0x006F4500u), loadFloat(rdram, 0x006F4504u) - 100.0f,
+                                      loadFloat(rdram, 0x006F4508u) + 15.0f};
+            const float zeros[5] = {};
+            storeBytes(rdram, sp, moonPos, sizeof(moonPos));
+            storeBytes(rdram, sp + 16u, zeros, 20u);
+
+            SET_GPR_U64(ctx, 4, sp);
+            SET_GPR_U64(ctx, 5, sp + 16u);
+            SET_GPR_U64(ctx, 6, sp + 32u);
+            SET_GPR_U64(ctx, 7, sp + 36u);
+            SET_GPR_U64(ctx, 8, 0u);
+            SET_GPR_U32(ctx, 29, sp);
+            SET_GPR_U32(ctx, 31, 0x0018CF4Cu);
+            ctx->pc = 0x0039FC48u;
+            g_origCalcScreenCoors(rdram, ctx, runtime);
+            if (GPR_S32(ctx, 2) == 0)
+                return;
+
+            const float sx = loadFloat(rdram, sp + 16u);
+            const float sy = loadFloat(rdram, sp + 20u);
+            const float sz = loadFloat(rdram, sp + 24u);
+            const float outH = loadFloat(rdram, sp + 36u);
+            if (!(sz > 0.0f) || !(outH > 0.0f))
+                return;
+
+            const uint32_t texPtr = load32(rdram, 0x00487760u);
+            if (texPtr < 0x00100000u || (texPtr & kRamMask) + 4u > PS2_RAM_SIZE)
+                return;
+            const uint32_t tex = load32(rdram, texPtr);
+            if (tex == 0u)
+                return;
+
+            SET_GPR_U64(ctx, 4, 1u);
+            SET_GPR_U64(ctx, 5, tex);
+            SET_GPR_U32(ctx, 29, sp);
+            SET_GPR_U32(ctx, 31, 0x0018CF4Cu);
+            ctx->pc = 0x00175198u;
+            g_origRwRenderStateSet(rdram, ctx, runtime);
+
+            const uint32_t moonSize = load32(rdram, 0x004878B4u);
+            const uint8_t activeCam = rdram[0x006F4520u & kRamMask];
+            const float fov = loadFloat(rdram, 0x006F44D0u + static_cast<uint32_t>(activeCam) * 0x270u + 0x1A8u);
+            const float sizeBase = static_cast<float>(moonSize) * 2.0f + 4.0f;
+            const float halfH = sizeBase * outH * fov;
+            const float wid = std::clamp(g_widening.load(std::memory_order_relaxed), 0.5f, 4.0f);
+            const float displayAspect = (4.0f / 3.0f) * wid;
+            const float halfW = halfH * (640.0f / 448.0f) / displayAspect;
+
+            ctx->f[12] = sx;
+            ctx->f[13] = sy;
+            ctx->f[14] = sz;
+            ctx->f[15] = halfW;
+            ctx->f[16] = halfH;
+            ctx->f[17] = 1.0f / sz;
+            SET_GPR_U64(ctx, 4, static_cast<uint64_t>(alpha));
+            SET_GPR_U64(ctx, 5, static_cast<uint64_t>(alpha));
+            SET_GPR_U64(ctx, 6, static_cast<uint64_t>(alpha));
+            SET_GPR_U64(ctx, 7, 255u);
+            SET_GPR_U64(ctx, 8, 255u);
+            SET_GPR_U32(ctx, 29, sp);
+            SET_GPR_U32(ctx, 31, 0x0018CF4Cu);
+            ctx->pc = 0x003A03A8u;
+            g_origRenderOneXluSprite(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void cloudsRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            struct Guard
+            {
+                bool prev;
+                explicit Guard() : prev(g_inCloudsRender) { g_inCloudsRender = true; }
+                ~Guard() { g_inCloudsRender = prev; }
+            } guard;
+            g_origCloudsRender(rdram, ctx, runtime);
+        }
+
+        PS2_GUEST_CC void cloudsFogReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const bool fromClouds = g_moonFix && g_inCloudsRender && GPR_U32(ctx, 31) == 0x0018CF4Cu;
+            g_origCloudsFogReset(rdram, ctx, runtime);
+            if (fromClouds)
+            {
+                const uint32_t ra = GPR_U32(ctx, 31);
+                const R5900Context saved = *ctx;
+                drawFixedMoon(rdram, ctx, runtime);
+                *ctx = saved;
+                ctx->pc = ra;
+            }
+        }
+
+        PS2_GUEST_CC void renderOneXluSprite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            // Skip vanilla Moon call inside CClouds::Render (drawn by drawFixedMoon instead).
+            if (g_moonFix && g_inCloudsRender && GPR_U32(ctx, 31) == 0x0018D1ACu)
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
+            g_origRenderOneXluSprite(rdram, ctx, runtime);
+        }
+
         // FUN_002804C8(cutscene manager a0): the cutscene letterbox - two black bars, 0..34 and 238..272 of the 2D pass's
         // 272, while the manager's +0x34 is set and the widescreen preference is off. Draws nothing else.
         PS2_GUEST_CC void cutsceneBars(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -217,6 +374,23 @@ namespace vcs
         if (g_gamePreference.load(std::memory_order_relaxed) >= 0)
             runtime.replaceFunction(0x002AF660u, &setWidescreenPreference);
         runtime.replaceFunction(0x002804C8u, &cutsceneBars);
+        if (const char *e = std::getenv("VCS_MOON_FIX"); e && *e == '0')
+            g_moonFix = false;
+        if (g_moonFix)
+        {
+            g_origCloudsRender = runtime.lookupFunction(0x0018CE80u);
+            g_origCloudsFogReset = runtime.lookupFunction(0x0039FED8u);
+            g_origCalcScreenCoors = runtime.lookupFunction(0x0039FC48u);
+            g_origRwRenderStateSet = runtime.lookupFunction(0x00175198u);
+            g_origRenderOneXluSprite = runtime.lookupFunction(0x003A03A8u);
+            if (g_origCloudsRender && g_origCloudsFogReset && g_origCalcScreenCoors &&
+                g_origRwRenderStateSet && g_origRenderOneXluSprite)
+            {
+                runtime.replaceFunction(0x0018CE80u, &cloudsRender);
+                runtime.replaceFunction(0x0039FED8u, &cloudsFogReset);
+                runtime.replaceFunction(0x003A03A8u, &renderOneXluSprite);
+            }
+        }
         // VCS's render targets by what they are (game-internals.md 6g; docs/FULLY_NATIVE.md step 3d). The reflection map
         // is only ever sampled (vehicles' paint), so it follows "Internal resolution: Match window" like the picture.
         gsHwSetTargetRole(140u, 10u, "frame", false);

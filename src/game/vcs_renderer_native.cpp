@@ -2331,7 +2331,20 @@ namespace
         wrVec(0x40u, (-vw) * farClip, (-vh) * farClip, farClip);
 
         const float invFar = 1.0f / farClip;
-        const float r300 = 300.0f;
+        static const float kSectorExtendMax = []() -> float {
+        const char *e = std::getenv("VCS_SECTOR_EXTEND");
+        if (e && *e)
+        {
+            if (e[0] == '0' && e[1] == '\0')
+                return 300.0f;
+            char *end = nullptr;
+            const float v = std::strtof(e, &end);
+            if (end != e && v > 300.0f)
+                return v;
+        }
+        return 650.0f;
+    }();
+    const float r300 = std::min(farClip, std::max(300.0f, kSectorExtendMax));
         const uint32_t idxA = ps2Le(rdF32(rdram, camMat + 0x28u), 0.0f) ? 0x10u : 0x40u;
         const uint32_t idxB = (idxA == 0x10u) ? 0x20u : 0x30u;
         const float ax0 = invFar * (rdF32(rdram, baseSp + idxA + 0u) * r300);
@@ -2506,7 +2519,7 @@ namespace
             return true;
         }
 
-        if (ps2Lt(300.0f, farClip))
+        if (ps2Lt(r300, farClip))
         {
             float sx0, sy0, sx7, sy7, sx8, sy8;
             const float c = 0.0125f;
