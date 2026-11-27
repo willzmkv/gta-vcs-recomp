@@ -1340,6 +1340,21 @@ Dense 4K Little Havana driving and Fort Baxter -> Airport -> Washington Bridge s
   - `havana_exact` (stationary Little Havana): `parked_vulkan_uncap 115.9 fps` (`8.63 ms`, `host 212.7 fps`), `parked_d3d12_uncap 102.1 fps` (`9.80 ms`, `host 185.0 fps`). `r3_profile` uncapped: `r3_prof_game 138.8 fps` (`game 5.75 ms`), `r3_prof_main_d3d12 138.4 fps`, `r3_prof_main_vk 133.0 fps`.
   - Parity verified (`0` differences in `rsl_skip_verify`, `rsl_items_verify`, `scenes compare` 8/8 `ok`).
 
+### 50. Little Havana night `RenderWorker` / `GsStage` bottleneck & jump physics parity (`2026-11-27`)
+
+Following commit `3b08fb1` (mission cutscene props `ch_jerr` / `lou_a1` and unlocked present rate), unlocked Little Havana night (`00:30`–`01:00`, `VCS_HD_RADIUS=3`, `VCS_CROWD_BANDS=1`, `VCS_VIEW_DISTANCE=100`, `VCS_DETAIL_DISTANCE=100`, `VCS_POPULATION_DISTANCE=100`, `VCS_VEHICLE_DENSITY=100`, `VCS_PEDESTRIAN_DENSITY=100`, `VCS_DISTANT_TRAFFIC=100`, `VCS_DISTANT_CROWDS=100`, `VCS_ASPECT=219`) still dropped into the low 60s (`60.5`–`62.8` fps) due to `RenderWorker` + `GsStage` saturation (`worker_ms = 14.5`–`15.8 ms`), and Vic's jump still surged on frame-step jitter / high FPS.
+
+- **`vcs_hle_world.cpp` (`sendKicksBatched`, `PS2X_CLIP_BATCH=0`):** Coalesces consecutive C++-clipped triangle/fan packets (`PRIM=3`/`5`/`4` 3-vert) per draw into `GS_PRIM_TRIANGLE` (`TRILIST`) packets up to `32766` vertices without altering `vcsclip::clipWorld`, reducing ~62,000 tiny GIF packets/frame down to ~1,200 packed batches.
+- **Lockstep SPSC upload & native mesh cache (`gs_upload_cache.h`, `vcs_rsl_world.cpp` `Op::directHash`, `ps2_vif1_interpreter.cpp`, `gs_frontend.cpp`; `PS2X_HW_UPLOAD_CACHE=0`, `PS2X_HW_NATIVE_CACHE=0`):** `8192`-slot GIF cache (`2048x4`) and `16384`-slot Native mesh cache (`4096x4`) between `RenderWorker` (`SenderCache`) and `GsStage` (`ReceiverCache`), eliminating `imagePacket` builds, ring `memcpy`s, and redundant `XXH3` hashes on 99.7%+ cache hits while pinning live GIF slots directly inside `PendingUpload` (`deferPinned 1,386,115 deferCopied 0` under `PS2X_HW_UPSTATS`).
+- **`gs_hw.cpp` (`recordPacked`, `PendingDeque`, block metadata, lazy `NativeGroup::parts`):**
+  - `recordPacked`: tracks `anyFar |= hv[i].z >= 0.99999f` and enables the packed 3D path on widescreen `fbw == 10u` when `!anyFar` (`PS2X_HW_PACKED_3D_WIDE=0`), writing pre-sized raw `HwVertex` pointers directly.
+  - Replaced `std::deque<PendingUpload>` with circular `PendingDeque<PendingUpload>`, added flat `m_uploadAtFlat` (`kBlocks = 16384` + overflow map), `128`-entry `m_rectBlocksMemo`, `m_soleBlockWriter` fast path, and lazy `NativeGroup::parts` (`materializeGroupParts`, `onEvictPinnedNativeSlot`) skipping eager `g.bytes.assign`/strip copies on `m_meshLru` hits.
+- **Vic jump distance & jitter surge fix (`vcs_physics_timing.{h,cpp}`, `vcs_overrides.cpp` `markFrameKick`, `VCS_JUMP_FIX=0`):** Fixes `kPlayerAirStuckPush` (`0x00233114`) re-checking `ped + 0x108` against `g_prevFrameStep` (preventing unscaled `3.0` mid-air surges on step jitter) and scales `kJumpTakeoffImpulse` (`0x002128C4`) from the second-to-first `ms_fTimeStep` moment ratio (`g_avgStep2 / g_avgStep1`) to match PS2 30 fps apex/airtime (`stand_jump` `2.80` -> `2.77–2.78 m`, `run_jump` `4.74` -> `4.69 m`, `sprint_jump` `6.10` -> `6.04–6.05 m`, `v9_curb_nojump` `0.00 m`).
+- **Measured `--opt lto` ThinLTO results:**
+  - `VSYNC=0`: `Verdi` **`119.3 fps`** (`frame_ms=8.4`, `worker_ms=6.9`, `gs_ms=7.9`), `LittleHavana_Hotel` **`87.4 fps`** (`frame_ms=11.4`, `worker_ms=11.0`), `LittleHavana_Ave` **`93.5 fps`** (`frame_ms=10.7`, `worker_ms=10.7`, `gs_ms=9.7`).
+  - `VSYNC=1` (75 Hz): locked **`74.9 fps`** on all three (`Verdi wait_ms=4.9`, `Hotel wait_ms=4.6`, `Ave wait_ms=4.2`).
+  - Parity verified on ThinLTO: `PS2X_HW_PACKED_VERIFY=1` (`320,000+` packed draws, `0 differ`), `PS2X_HW_CLUT_VERIFY=1` (`400,000+` CLUT checks, `0 differ`), `PS2X_HW_DECODE_VERIFY=1` (`0` diffs), `VCS_SELFTEST=1` (`[selftest] 0 failure(s)`), `scenes.py compare` `8/8 ok`, `cutscene_check.py` `PASS` (sky band black to `152`, max step `18`).
+
 ## Next
 
 - **The heavy views (~120 fps)**: the game thread's chain submission there (1.4-1.6 ms: the VIF1 chain copy, the walker

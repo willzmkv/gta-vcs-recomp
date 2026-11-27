@@ -1,6 +1,8 @@
 // Vehicle physics that acts a fixed amount every frame, put on the game's time step (docs/game-internals.md 4).
 #pragma once
 
+#include <cstdint>
+
 class PS2Runtime;
 
 namespace vcs
@@ -13,4 +15,5 @@ namespace vcs
     // timing at 60). VCS_PHYSICS_TIMESTEP=0 keeps the game's per-frame amounts. Needed by the ProcessWheel patches in
     // game/vcs/overrides.toml: install it whenever the game runs.
     void installPhysicsTimingHooks(PS2Runtime &runtime);
+    void onPhysicsFrame(const uint8_t *rdram);
 }

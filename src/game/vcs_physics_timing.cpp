@@ -189,6 +189,23 @@ namespace vcs
                          (tx * f(0x00) + ty * f(0x04) + tz * f(0x08)) / turnMass);
         }
 
+        constexpr uint32_t kJumpTakeoffImpulse = 0x002128C4u; // CTaskSimpleJump vertical impulse (8.5 / 70 = 0.12143)
+        constexpr uint32_t kPlayerAirStuckPush = 0x00233114u; // CPlayerPed airborne anti-stuck push (0, 3.0, 0.05)
+
+        bool jumpFixEnabled()
+        {
+            static const bool on = [] {
+                const char *v = std::getenv("VCS_JUMP_FIX");
+                return !(v && v[0] == '0');
+            }();
+            return on;
+        }
+
+        bool g_hasStepHistory = false;
+        float g_prevFrameStep = 0.0f;
+        float g_avgStep1 = kPs2Step;
+        float g_avgStep2 = kPs2Step * kPs2Step;
+
         void scaleForce3(R5900Context *ctx, float s)
         {
             ctx->f[12] *= s;
@@ -208,6 +225,31 @@ namespace vcs
                 const float scale = frameScale(rdram);
                 if (scale > 1e-4f)
                     scaleForce3(ctx, 1.0f / scale);
+            }
+            else if (ra == kPlayerAirStuckPush && active() && jumpFixEnabled())
+            {
+                // FUN_00232de8 compares *(ped + 0x108) (displacement from the previous frame, over prevFrameStep)
+                // against 0.02f * currStep. Frame-time jitter (short frame followed by long frame) triggers this
+                // unscaled 3.0 forward boost in free air; re-check against prevFrameStep and scale by frameScale.
+                const uint32_t ped = GPR_U32(ctx, 4);
+                const float distMoved = ped ? rdF(rdram, ped + 0x108u) : 0.0f;
+                const float prevStep = g_prevFrameStep > 1e-4f ? g_prevFrameStep : rdF(rdram, kTimeStep);
+                if (distMoved >= 0.02f * prevStep)
+                    scaleForce3(ctx, 0.0f);
+                else
+                    scaleForce3(ctx, frameScale(rdram));
+            }
+            else if (ra == kJumpTakeoffImpulse && active() && jumpFixEnabled())
+            {
+                // Semi-implicit Euler in ApplyGravity subtracts 0.008 * step before z += vz * step, losing
+                // ~0.5 * 0.008 * (sum step^2 / sum step) effective initial velocity (+6..9cm apex at 75..240 fps).
+                // Match 30 fps (kPs2Step) discrete apex/airtime using the second-to-first step moment ratio.
+                const float effStep = (g_hasStepHistory && g_avgStep1 > 1e-4f)
+                                          ? (g_avgStep2 / g_avgStep1)
+                                          : rdF(rdram, kTimeStep);
+                const float avgScale = std::clamp(effStep / kPs2Step, 0.05f, 1.0f);
+                const float factor = 1.0f - 0.05490196f * (1.0f - avgScale);
+                scaleForce3(ctx, std::clamp(factor, 0.90f, 1.0f));
             }
             g_origMoveForce(rdram, ctx, runtime);
         }
@@ -683,5 +725,25 @@ namespace vcs
         if (!g_origWheelCar || !g_origWheelBike)
             std::fprintf(stderr, "[physics-timing] ProcessWheel 0x%x / 0x%x not found: vehicles roll without resistance\n",
                          kProcessWheelCar, kProcessWheelBike);
+    }
+
+    void onPhysicsFrame(const uint8_t *rdram)
+    {
+        if (!rdram)
+            return;
+        const float step = rdF(rdram, kTimeStep);
+        g_prevFrameStep = step;
+        const float clamped = active() ? std::clamp(step, 0.05f * kPs2Step, kPs2Step) : kPs2Step;
+        if (!g_hasStepHistory)
+        {
+            g_avgStep1 = clamped;
+            g_avgStep2 = clamped * clamped;
+            g_hasStepHistory = true;
+        }
+        else
+        {
+            g_avgStep1 = 0.75f * g_avgStep1 + 0.25f * clamped;
+            g_avgStep2 = 0.75f * g_avgStep2 + 0.25f * (clamped * clamped);
+        }
     }
 }

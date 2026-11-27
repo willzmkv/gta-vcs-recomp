@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_gpu.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_hw.h"            // [gta-recomp] the upload source handed to the GS stage
+#include "runtime/gs/gs_upload_cache.h"  // [gta-recomp] SPSC upload & native mesh byte cache
 #include "runtime/ps2_render_worker.h"   // [gta-recomp] the GS stage
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
@@ -180,6 +181,13 @@ namespace
         kGsRegister = 4,
     };
     GS *g_stageGs = nullptr;
+    thread_local const uint8_t *t_cachedImageData = nullptr;
+    thread_local uint32_t t_cachedImageBytes = 0u;
+
+    inline uint64_t nativeCacheKey(const GSNativeDraw &d)
+    {
+        return ps2_upload_cache::mix64(d.meshKey, uint64_t(d.kind) ^ (uint64_t(d.vertexStride) << 8));
+    }
 
     void gsStageHandler(const ps2_render_worker::GsCommand &c, const uint8_t *payload)
     {
@@ -197,14 +205,87 @@ namespace
             if (!gs.submitPackedKick(payload, c.bytes))
                 gs.processGIFPacket(payload, c.bytes);
             break;
+        case ps2_upload_cache::kCmdGifCachedPacket:
+        {
+            const uint32_t sizeBytes = static_cast<uint32_t>(c.a);
+            const uint64_t key = ps2_upload_cache::mix64(c.b, 0xB22DF002ull);
+            auto &rc = ps2_upload_cache::receiverCache();
+            const uint32_t slot = rc.findGif(key, sizeBytes);
+            ps2_upload_cache::ActiveGifSlotScope scope(slot);
+            gs.processGIFPacket(rc.gifSlots[slot].bytes.data(), sizeBytes);
+            break;
+        }
+        case ps2_upload_cache::kCmdGifStorePacket:
+        {
+            const uint64_t key = ps2_upload_cache::mix64(c.b, 0xB22DF002ull);
+            auto &rc = ps2_upload_cache::receiverCache();
+            const uint32_t slot = rc.insertGif(key, c.bytes, payload, false, 0ull);
+            ps2_upload_cache::ActiveGifSlotScope scope(slot);
+            gs.processGIFPacket(rc.gifSlots[slot].bytes.data(), c.bytes);
+            break;
+        }
+        case ps2_upload_cache::kCmdGifCachedImage:
+        {
+            const uint32_t sizeBytes = static_cast<uint32_t>(c.a & 0x7FFFull) * 16u;
+            const uint64_t key = ps2_upload_cache::mix64(c.b, 0xA11CE001ull);
+            auto &rc = ps2_upload_cache::receiverCache();
+            const uint32_t slot = rc.findGif(key, sizeBytes);
+            ps2_upload_cache::ActiveGifSlotScope scope(slot);
+            uint8_t hdr[16]{};
+            std::memcpy(hdr, &c.a, 8u);
+            t_cachedImageData = rc.gifSlots[slot].bytes.data();
+            t_cachedImageBytes = sizeBytes;
+            gs.processGIFPacket(hdr, 16u);
+            t_cachedImageData = nullptr;
+            t_cachedImageBytes = 0u;
+            break;
+        }
+        case ps2_upload_cache::kCmdGifStoreImage:
+        {
+            const uint64_t key = ps2_upload_cache::mix64(c.b, 0xA11CE001ull);
+            auto &rc = ps2_upload_cache::receiverCache();
+            const uint32_t slot = rc.insertGif(key, c.bytes, payload, true, c.b);
+            ps2_upload_cache::ActiveGifSlotScope scope(slot);
+            uint8_t hdr[16]{};
+            std::memcpy(hdr, &c.a, 8u);
+            t_cachedImageData = rc.gifSlots[slot].bytes.data();
+            t_cachedImageBytes = c.bytes;
+            gs.processGIFPacket(hdr, 16u);
+            t_cachedImageData = nullptr;
+            t_cachedImageBytes = 0u;
+            break;
+        }
         case kGsNative:
+        case ps2_upload_cache::kCmdNativeCached:
+        case ps2_upload_cache::kCmdNativeStore:
         {
             // [gta-recomp] a: bit 0 the vertices follow the draw, bit 1 the instances follow them (GS::submitNative)
             GSNativeDraw draw;
             std::memcpy(&draw, payload, sizeof(draw));
             const uint32_t vertexBytes = (c.a & 1u) ? draw.vertexCount * draw.vertexStride : 0u;
-            draw.vertices = (c.a & 1u) ? payload + sizeof(GSNativeDraw) : nullptr;
-            draw.instances = (c.a & 2u) ? reinterpret_cast<const float *>(payload + sizeof(GSNativeDraw) + vertexBytes) : nullptr;
+            uint32_t activeNatSlot = UINT32_MAX;
+            if (c.type == ps2_upload_cache::kCmdNativeStore)
+            {
+                auto &rc = ps2_upload_cache::receiverCache();
+                const uint32_t slot = rc.insertNative(nativeCacheKey(draw), vertexBytes, payload + sizeof(GSNativeDraw));
+                draw.vertices = rc.nativeSlots[slot].bytes.data();
+                draw.instances = (c.a & 2u) ? reinterpret_cast<const float *>(payload + sizeof(GSNativeDraw) + vertexBytes) : nullptr;
+                activeNatSlot = slot;
+            }
+            else if (c.type == ps2_upload_cache::kCmdNativeCached)
+            {
+                auto &rc = ps2_upload_cache::receiverCache();
+                const uint32_t slot = rc.findNative(nativeCacheKey(draw), vertexBytes);
+                draw.vertices = rc.nativeSlots[slot].bytes.data();
+                draw.instances = (c.a & 2u) ? reinterpret_cast<const float *>(payload + sizeof(GSNativeDraw)) : nullptr;
+                activeNatSlot = slot;
+            }
+            else
+            {
+                draw.vertices = (c.a & 1u) ? payload + sizeof(GSNativeDraw) : nullptr;
+                draw.instances = (c.a & 2u) ? reinterpret_cast<const float *>(payload + sizeof(GSNativeDraw) + vertexBytes) : nullptr;
+            }
+            ps2_upload_cache::ActiveNativeSlotScope scope(activeNatSlot);
             gs.submitNative(c.b, draw);
             break;
         }
@@ -902,9 +983,15 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             if ((nloop * nreg) & 1)
                 offset += 8;
         }
-        else if (flg == GIF_FMT_IMAGE)
+        if (flg == GIF_FMT_IMAGE)
         {
             uint32_t imageBytes = nloop * 16;
+            if (t_cachedImageData && t_cachedImageBytes == imageBytes && sizeBytes == 16u)
+            {
+                processImageData(t_cachedImageData, imageBytes);
+                offset = sizeBytes;
+                continue;
+            }
             if (offset + imageBytes > sizeBytes)
                 imageBytes = sizeBytes - offset;
             processImageData(data + offset, imageBytes);
@@ -2196,6 +2283,59 @@ bool GS::submitNative(uint64_t prim, const GSNativeDraw &draw)
             return false;
         }
         const uint32_t vertexBytes = draw.vertices ? draw.vertexCount * draw.vertexStride : 0u;
+        const bool canCacheNative = !draw.transient && draw.meshKey != 0ull && vertexBytes > 0u &&
+                                    vertexBytes <= ps2_upload_cache::kMaxCachedBytes && !m_gpu &&
+                                    ps2_upload_cache::nativeCacheEnabled();
+        if (canCacheNative)
+        {
+            auto &sc = ps2_upload_cache::senderCache();
+            const uint64_t key = nativeCacheKey(draw);
+            uint32_t slot = 0;
+            if (sc.findNative(key, vertexBytes, slot))
+            {
+                if (draw.instanceCount && draw.instances)
+                {
+                    const uint32_t instanceBytes = draw.instanceCount * GSNativeDraw::kInstanceFloats * 4u;
+                    if (toGsStage(ps2_upload_cache::kCmdNativeCached, &draw, sizeof(GSNativeDraw), 3u, prim, draw.instances,
+                                  instanceBytes))
+                    {
+                        ++sc.statNatHit;
+                        return true;
+                    }
+                }
+                else if (toGsStage(ps2_upload_cache::kCmdNativeCached, &draw, sizeof(GSNativeDraw), 1u, prim))
+                {
+                    ++sc.statNatHit;
+                    return true;
+                }
+            }
+            else
+            {
+                if (draw.instanceCount && draw.instances)
+                {
+                    const uint32_t instanceBytes = draw.instanceCount * GSNativeDraw::kInstanceFloats * 4u;
+                    static thread_local std::vector<uint8_t> data;
+                    data.resize(size_t(vertexBytes) + instanceBytes);
+                    std::memcpy(data.data(), draw.vertices, vertexBytes);
+                    std::memcpy(data.data() + vertexBytes, draw.instances, instanceBytes);
+                    if (toGsStage(ps2_upload_cache::kCmdNativeStore, &draw, sizeof(GSNativeDraw), 3u, prim, data.data(),
+                                  vertexBytes + instanceBytes))
+                    {
+                        sc.insertNative(key, vertexBytes);
+                        ++sc.statNatMiss;
+                        return true;
+                    }
+                }
+                else if (toGsStage(ps2_upload_cache::kCmdNativeStore, &draw, sizeof(GSNativeDraw), 1u, prim, draw.vertices, vertexBytes))
+                {
+                    sc.insertNative(key, vertexBytes);
+                    ++sc.statNatMiss;
+                    return true;
+                }
+            }
+        }
+        else if (vertexBytes > 0u)
+            ++ps2_upload_cache::senderCache().statNatSkip;
         if (draw.instanceCount && draw.instances)
         {
             // [gta-recomp] an instanced draw: its instances after its vertices, in one payload
@@ -2278,4 +2418,76 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
         m_preferredDisplayDestFbp = ctx.frame.fbp;
         m_hasPreferredDisplaySource = true;
     }
+}
+
+bool ps2GsSendVif1CachedImage(uint64_t imageTag, const uint8_t *data, uint32_t sizeBytes, uint64_t dataHash, bool directHl)
+{
+    (void)directHl;
+    if (!g_stageGs || g_stageGs->gpuRenderer() || !data || sizeBytes == 0u || !ps2_render_worker::gsStage())
+        return false;
+    auto &sc = ps2_upload_cache::senderCache();
+    const uint64_t key = ps2_upload_cache::mix64(dataHash, 0xA11CE001ull);
+    uint32_t slot = 0;
+    const bool hit = sc.findGif(key, sizeBytes, slot);
+    ps2_render_worker::GsCommand c;
+    c.type = hit ? ps2_upload_cache::kCmdGifCachedImage : ps2_upload_cache::kCmdGifStoreImage;
+    c.bytes = hit ? 0u : sizeBytes;
+    c.a = imageTag;
+    c.b = dataHash;
+    c.gifPath = 2u;
+    c.producer = g_path1Producer;
+    gsHwTakeUploadSource(c.uploadAddress, c.uploadBytes);
+    uint8_t *p = ps2_render_worker::gsReserve(c);
+    if (!p)
+    {
+        if (c.uploadBytes)
+            gsHwSetUploadSource(c.uploadAddress, c.uploadBytes);
+        return false;
+    }
+    if (!hit)
+    {
+        std::memcpy(p, data, sizeBytes);
+        sc.insertGif(key, sizeBytes);
+        ++sc.statImgMiss;
+    }
+    else
+        ++sc.statImgHit;
+    ps2_render_worker::gsSend();
+    return true;
+}
+
+bool ps2GsSendDirectPacketCached(uint8_t path, const uint8_t *data, uint32_t sizeBytes, uint64_t packetHash, bool directHl)
+{
+    (void)directHl;
+    if (!g_stageGs || g_stageGs->gpuRenderer() || !data || sizeBytes < 16u || !ps2_render_worker::gsStage())
+        return false;
+    auto &sc = ps2_upload_cache::senderCache();
+    const uint64_t key = ps2_upload_cache::mix64(packetHash, 0xB22DF002ull);
+    uint32_t slot = 0;
+    const bool hit = sc.findGif(key, sizeBytes, slot);
+    ps2_render_worker::GsCommand c;
+    c.type = hit ? ps2_upload_cache::kCmdGifCachedPacket : ps2_upload_cache::kCmdGifStorePacket;
+    c.bytes = hit ? 0u : sizeBytes;
+    c.a = sizeBytes;
+    c.b = packetHash;
+    c.gifPath = path;
+    c.producer = g_path1Producer;
+    gsHwTakeUploadSource(c.uploadAddress, c.uploadBytes);
+    uint8_t *p = ps2_render_worker::gsReserve(c);
+    if (!p)
+    {
+        if (c.uploadBytes)
+            gsHwSetUploadSource(c.uploadAddress, c.uploadBytes);
+        return false;
+    }
+    if (!hit)
+    {
+        std::memcpy(p, data, sizeBytes);
+        sc.insertGif(key, sizeBytes);
+        ++sc.statPktMiss;
+    }
+    else
+        ++sc.statPktHit;
+    ps2_render_worker::gsSend();
+    return true;
 }

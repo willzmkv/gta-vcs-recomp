@@ -564,6 +564,89 @@ namespace
                      (unsigned long long)s.envClipped);
     }
 
+    // [gta-recomp] Coalesce consecutive C++-clipped triangle/fan GIF kicks from a single draw into one TRILIST
+    // packet so RenderWorker/GsStage process ~160 kicks/frame instead of ~62,000 individual 160-byte packets.
+    void sendKicksBatched(const std::vector<std::vector<uint8_t>> &kicks)
+    {
+        static const bool batchOn = [] {
+            const char *e = std::getenv("PS2X_CLIP_BATCH");
+            return !(e && e[0] == '0');
+        }();
+        if (!batchOn || kicks.size() <= 1u)
+        {
+            for (const auto &k : kicks)
+                sendKick(k);
+            return;
+        }
+        static thread_local std::vector<uint8_t> batch;
+        batch.clear();
+        uint32_t verts = 0, curTag1NoPrim = 0, curTag2 = 0, curTag3 = 0;
+        auto flush = [&] {
+            if (verts == 0u)
+                return;
+            uint32_t t[4] = {0x8000u | verts, curTag1NoPrim | (3u << 15), curTag2, curTag3};
+            std::memcpy(batch.data(), t, 16u);
+            sendKick(batch);
+            batch.clear();
+            verts = 0u;
+        };
+        auto appendVerts = [&](const uint8_t *vsrc, uint32_t a, uint32_t b, uint32_t c) {
+            const size_t base = batch.size();
+            batch.resize(base + 144u);
+            std::memcpy(batch.data() + base, vsrc + a * 48u, 48u);
+            std::memcpy(batch.data() + base + 48u, vsrc + b * 48u, 48u);
+            std::memcpy(batch.data() + base + 96u, vsrc + c * 48u, 48u);
+            verts += 3u;
+        };
+        for (const auto &k : kicks)
+        {
+            if (k.size() < 16u + 3u * 48u)
+            {
+                flush();
+                sendKick(k);
+                continue;
+            }
+            uint32_t t[4];
+            std::memcpy(t, k.data(), 16u);
+            const uint32_t n = t[0] & 0x7FFFu;
+            const uint32_t prim = (t[1] >> 15) & 7u;
+            const uint32_t tag1NoPrim = t[1] & ~(7u << 15);
+            if (n < 3u || k.size() != 16u + size_t(n) * 48u || !(prim == 5u || prim == 3u || (prim == 4u && n == 3u)))
+            {
+                flush();
+                sendKick(k);
+                continue;
+            }
+            const uint32_t addedVerts = (prim == 5u) ? ((n - 2u) * 3u) : n;
+            if (verts != 0u &&
+                (tag1NoPrim != curTag1NoPrim || t[2] != curTag2 || t[3] != curTag3 || verts + addedVerts > 32766u))
+            {
+                flush();
+            }
+            if (verts == 0u)
+            {
+                batch.resize(16u);
+                curTag1NoPrim = tag1NoPrim;
+                curTag2 = t[2];
+                curTag3 = t[3];
+            }
+            const uint8_t *vsrc = k.data() + 16u;
+            if (prim == 5u)
+            {
+                for (uint32_t j = 1u; j + 1u < n; ++j)
+                    appendVerts(vsrc, 0u, j, j + 1u);
+            }
+            else
+            {
+                const size_t base = batch.size();
+                batch.resize(base + size_t(n) * 48u);
+                std::memcpy(batch.data() + base, vsrc, size_t(n) * 48u);
+                verts += n;
+            }
+        }
+        flush();
+    }
+
     // PS2X_CLIP_DUMP=<dir>[,<n>]: the first n (default 300) world packets the VU sends through its clipper, as
     // <dir>/clip_NNNN.bin - u32 magic 'CLP1', u32 top, u32 rigid, VU1 data memory before the program (16 KB), u32
     // kick count, then per XGKICK u32 size + the packet. For developing / checking vcs_vu_clipper.cpp offline: load
@@ -2118,8 +2201,7 @@ namespace
             setSseRounding(g_callerRounding); // the GS runs in the caller's mode, as for the VU's kicks
             gsSetPath1Producer(c.startPc, true); // draw sources: a C++ reproduction sends these
             gsSetCurrentGifPath(1u);
-            for (const auto &p : packets)
-                sendKick(p);
+            sendKicksBatched(packets);
             gsSetCurrentGifPath(3u);
             setSseRounding(rounding);
             const int32_t variant = 711; // 52.z, as the VU leaves it after its clipper

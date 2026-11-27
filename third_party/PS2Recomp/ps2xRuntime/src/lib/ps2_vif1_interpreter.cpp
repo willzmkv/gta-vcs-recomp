@@ -3,6 +3,8 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu_code_log.h" // [gta-recomp]
 #include "runtime/ps2_render_worker.h" // [gta-recomp]
+#include "runtime/gs/gs_upload_cache.h" // [gta-recomp]
+#include "render/texture_replacements.h" // [gta-recomp]
 #include "runtime/ps2_chain_observer.h" // [gta-recomp]
 #include <cstring>
 #include "runtime/ps2_host_std.h"
@@ -340,21 +342,71 @@ void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
 // [gta-recomp] Feed DIRECT/DIRECTHL data to GIF PATH2. An IMAGE GIFtag left short by an
 // earlier DIRECT is finished first: its data arrives through later DIRECTs, never as raw
 // VIF stream bytes (those are VIFcodes, e.g. the NOP/DIRECTHL in the next DMAtag).
+static bool isNativeImageUploadDirectPacket(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (!data || sizeBytes < 96u)
+        return false;
+    uint64_t setupLo = 0, setupHi = 0;
+    std::memcpy(&setupLo, data, 8u);
+    std::memcpy(&setupHi, data + 8u, 8u);
+    const uint32_t setupNloop = static_cast<uint32_t>(setupLo & 0x7FFFu);
+    const uint8_t setupFlg = static_cast<uint8_t>((setupLo >> 58u) & 0x3u);
+    uint32_t setupNreg = static_cast<uint32_t>((setupLo >> 60u) & 0xFu);
+    if (setupNreg == 0u)
+        setupNreg = 16u;
+    if (setupNloop != 4u || setupFlg != 0u || setupNreg != 1u || (setupHi & 0xFull) != 0xEull)
+        return false;
+    static constexpr uint8_t kExpected[4] = {0x50u, 0x51u, 0x52u, 0x53u}; // BITBLTBUF, TRXPOS, TRXREG, TRXDIR
+    uint64_t trxdirVal = 0;
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        uint64_t val = 0, reg = 0;
+        std::memcpy(&val, data + 16u + i * 16u, 8u);
+        std::memcpy(&reg, data + 24u + i * 16u, 8u);
+        if ((reg & 0xFFu) != kExpected[i])
+            return false;
+        trxdirVal = val;
+    }
+    if ((trxdirVal & 0x3ull) != 0u)
+        return false;
+    uint64_t imgLo = 0;
+    std::memcpy(&imgLo, data + 80u, 8u);
+    const uint32_t imgNloop = static_cast<uint32_t>(imgLo & 0x7FFFu);
+    const uint8_t imgFlg = static_cast<uint8_t>((imgLo >> 58u) & 0x3u);
+    return imgFlg == 2u && imgNloop != 0u && (96ull + static_cast<uint64_t>(imgNloop) * 16ull) == sizeBytes;
+}
+
 void PS2Memory::submitVif1DirectData(const uint8_t *data, uint32_t qwCount, bool directHl)
 {
+    const uint64_t directHintHash = ps2_upload_cache::takeDirectHint(qwCount * 16u);
     if (m_vif1PendingPath2ImageQwc != 0u && qwCount != 0u)
     {
         const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, qwCount);
-        thread_local std::vector<uint8_t> imagePacket; // [gta-recomp] reused: one allocation per texture upload before
-        imagePacket.resize(16u + static_cast<size_t>(chunkQw) * 16u);
-        std::memset(imagePacket.data() + 8u, 0, 8u);
         const uint64_t imageTag =
             static_cast<uint64_t>(chunkQw & 0x7FFFu) |
             ((m_vif1PendingPath2ImageQwc == chunkQw) ? (1ull << 15) : 0ull) |
             (static_cast<uint64_t>(kGifFmtImage) << 58);
-        std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
-        std::memcpy(imagePacket.data() + 16u, data, static_cast<size_t>(chunkQw) * 16u);
-        submitGifPacket(GifPathId::Path2, imagePacket.data(), static_cast<uint32_t>(imagePacket.size()), true, m_vif1PendingPath2DirectHl);
+        uint64_t imgHash = (chunkQw == qwCount) ? directHintHash : 0ull;
+        const uint32_t imgBytes = chunkQw * 16u;
+        const bool canStageCache = imgBytes >= 64u && imgBytes <= ps2_upload_cache::kMaxCachedBytes &&
+                                   ps2_upload_cache::gifCacheEnabled() && ps2_render_worker::gsStage() &&
+                                   m_gifArbiter && m_gifArbiter->empty() && m_gifPacketCallback;
+        if (imgHash == 0ull && canStageCache)
+            imgHash = render::textureHash(data, imgBytes);
+        const bool sentCached =
+            imgHash != 0ull && canStageCache &&
+            ps2GsSendVif1CachedImage(imageTag, data, imgBytes, imgHash, m_vif1PendingPath2DirectHl);
+        if (!sentCached)
+        {
+            if (ps2_render_worker::gsStage())
+                ++ps2_upload_cache::senderCache().statImgFallback;
+            thread_local std::vector<uint8_t> imagePacket; // [gta-recomp] reused: one allocation per texture upload before
+            imagePacket.resize(16u + static_cast<size_t>(chunkQw) * 16u);
+            std::memset(imagePacket.data() + 8u, 0, 8u);
+            std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
+            std::memcpy(imagePacket.data() + 16u, data, static_cast<size_t>(chunkQw) * 16u);
+            submitGifPacket(GifPathId::Path2, imagePacket.data(), static_cast<uint32_t>(imagePacket.size()), true, m_vif1PendingPath2DirectHl);
+        }
         m_vif1PendingPath2ImageQwc -= chunkQw;
         if (m_vif1PendingPath2ImageQwc == 0u)
             m_vif1PendingPath2DirectHl = false;
@@ -409,8 +461,22 @@ void PS2Memory::submitVif1DirectData(const uint8_t *data, uint32_t qwCount, bool
             }
         }
     }
-    submitGifPacket(GifPathId::Path2, data, qwCount * 16u, true, directHl);
-    const uint32_t pendingImageQw = pendingGifImageQwc(data, qwCount * 16u);
+    const uint32_t sizeBytes = qwCount * 16u;
+    uint64_t pktHash = directHintHash;
+    const bool canPktCache =
+        sizeBytes >= 64u && sizeBytes <= ps2_upload_cache::kMaxCachedBytes && ps2_upload_cache::gifCacheEnabled() &&
+        ps2_render_worker::gsStage() && m_gifArbiter && m_gifArbiter->empty() && m_gifPacketCallback;
+    if (pktHash == 0ull && canPktCache && isNativeImageUploadDirectPacket(data, sizeBytes))
+        pktHash = render::textureHash(data, sizeBytes);
+    const bool sentCached =
+        pktHash != 0ull && canPktCache && ps2GsSendDirectPacketCached(2u, data, sizeBytes, pktHash, directHl);
+    if (!sentCached)
+    {
+        if (ps2_render_worker::gsStage() && sizeBytes >= 64u)
+            ++ps2_upload_cache::senderCache().statGifFallback;
+        submitGifPacket(GifPathId::Path2, data, sizeBytes, true, directHl);
+    }
+    const uint32_t pendingImageQw = pendingGifImageQwc(data, sizeBytes);
     if (pendingImageQw != 0u)
     {
         m_vif1PendingPath2ImageQwc = pendingImageQw;

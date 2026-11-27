@@ -395,6 +395,15 @@ disassembly with names from `game/vcs/functions.csv`), `tools/vudis.py` (VU micr
       `*speed` orthogonal to `fwd` by `frameScale` strictly when `ctx->f[13] <= adh` (leaving `brake > adh`, e.g.
       handbrake `20000.0` where `$f26 = -v_fwd / n` is also unscaled and normalized jointly onto `adh`, untouched) aligns
       `S` braking, `S + D` counter-steering, and `Space` handbrake turns across `30 / 60 / 144 fps`.
+    - *Ped jump apex & airborne anti-stuck jitter boost* (`src/game/vcs_physics_timing.cpp`, `VCS_JUMP_FIX=0`):
+      - `kPlayerAirStuckPush` (`0x00233114` in `FUN_00232de8`): compares `*(ped + 0x108)` (displacement integrated over
+        `g_prevFrameStep`) against `0.02f * currStep`; frame-step jitter (a short frame followed by a longer one)
+        tripped the unscaled `(0, 3.0, 0.05)` mid-air surge boost, flinging Vic extra meters forward. Re-checking
+        `distMoved >= 0.02f * prevStep` and scaling by `frameScale` eliminates the mid-air surge.
+      - `kJumpTakeoffImpulse` (`0x002128C4` in `CTaskSimpleJump`): `ApplyGravity` subtracts `0.008 * step` before
+        integrating `z += vz * step`, raising high-FPS jump apex/airtime relative to `1/30 s`. Scaling the takeoff
+        impulse from the second-to-first `ms_fTimeStep` moment ratio (`g_avgStep2 / g_avgStep1` updated per frame in
+        `onPhysicsFrame`) matches PS2 30 fps apex and airtime (`560 ms` vs `561 ms`).
 - **Moving platforms: `1 / max(step, 1.0)`** (found 2026-10-31 from GitHub issue 10: Vic fell out of the ferris wheel
   at 60 fps, not at 30). Objects that the game places itself each frame get the move speed `(new position - old) * 1 /
   max(ms_fTimeStep, 1.0)`, so that a ped standing on them moves with them. On the PS2 the step is 1.67 and the 1.0 never

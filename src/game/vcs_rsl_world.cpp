@@ -7,6 +7,8 @@
 #include "ps2_runtime.h"
 #include "runtime/ps2_chain_observer.h"
 #include "runtime/gs/gs_hw.h"
+#include "runtime/gs/gs_upload_cache.h"
+#include "render/texture_replacements.h"
 #include "runtime/ps2_hle_survey.h"
 #include "runtime/ps2_write_watch.h"
 
@@ -208,6 +210,7 @@ namespace vcs::rslworld
             uint32_t rasterAddress = 0, rasterBytes = 0; // DIRECT: the raster upload it sends (step 3d), if known
             uint32_t vuAddr = 0, qwords = 0; // UNPACK: VU address (relative to TOPS when topRelative); DIRECT: qwords
             std::vector<uint8_t> data;       // UNPACK: the qwords as written; DIRECT: the GS data
+            uint64_t directHash = 0;         // [gta-recomp] SPSC upload-cache hash (Direct >= 64B, once per block capture)
         };
 
         struct Recording
@@ -286,6 +289,8 @@ namespace vcs::rslworld
                 op.type = Op::Direct;
                 op.directHl = directHl;
                 op.qwords = qwords;
+                if (qwords >= 4u)
+                    op.directHash = render::textureHash(data, static_cast<size_t>(qwords) * 16u);
                 op.data.assign(data, data + size_t(qwords) * 16u);
                 if (const RasterRef *r = rasterAt(data, qwords * 16u))
                 {
@@ -560,7 +565,9 @@ namespace vcs::rslworld
                 {
                     if (op.rasterBytes) // the texture keeps its name when its upload comes from a recording
                         gsHwSetUploadSource(op.rasterAddress, op.rasterBytes);
+                    ps2_upload_cache::setDirectHint(op.directHash, op.qwords * 16u);
                     memory.submitVif1DirectData(op.data.data(), op.qwords, op.directHl);
+                    ps2_upload_cache::setDirectHint(0ull, 0u);
                 }
                 else
                 {

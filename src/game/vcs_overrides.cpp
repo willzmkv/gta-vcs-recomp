@@ -39,6 +39,7 @@
 #include "game/vcs_freecam.h"
 #include "game/vcs_frontend.h"
 #include "game/vcs_hud.h"
+#include "game/vcs_physics_timing.h"
 #include "game/vcs_prompts.h"
 #include "game/vcs_renderer_native.h"
 #include "game/vcs_rsl_native.h"
@@ -1666,6 +1667,7 @@ namespace
     PS2_GUEST_CC void markFrameKick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         ps2perf::markGameFrame();
+        vcs::onPhysicsFrame(rdram);
         vcs::profilerFrame(); // VCS_PROFILE_SPIKES (debug/profiler.h)
         vcs::applyDisplay(rdram); // widescreen preference / aspect (settings menu)
         vcs::rig::onGameFrame(rdram, ctx, runtime); // automation rig jobs (debug/rig.h)
