@@ -2850,9 +2850,9 @@ namespace
                 continue;
             }
 
+            bool s2_skip = false;
             if (tb == 4u)
             {
-                bool s2_skip = false;
                 const uint32_t cMode = rd32(rdram, ent + 0x354u);
                 if (cMode == 1u || cMode == 2u)
                 {
@@ -2916,7 +2916,8 @@ namespace
                 {
                     s2_skip = (rd64(rdram, ent + 0xE8u) & (1ULL << 58)) != 0ULL;
                 }
-                if (!s2_skip)
+            }
+            if (!s2_skip)
                 {
                     const float dx = rdF32(rdram, 0x006F3C00u) - rdF32(rdram, ent + 0x30u);
                     const float dy = rdF32(rdram, 0x006F3C04u) - rdF32(rdram, ent + 0x34u);
@@ -2942,7 +2943,6 @@ namespace
                         }
                     }
                 }
-            }
         }
 
         if (!callWrapped(rdram, ctx, runtime, g_hooks[kH_RenderFadingInEntities].outer, 0x0036F0A0u, 0x0035D044u, 0x20u) ||

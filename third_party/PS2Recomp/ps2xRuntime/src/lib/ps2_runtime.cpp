@@ -3270,14 +3270,24 @@ void PS2Runtime::run()
             return !(e && e[0] == '0');
         }();
         static bool prePresentTicked = false;
+        static bool prevPresentThisTick = false;
+        static uint32_t unpacedStreak = 0u;
         bool hostTickedThisFrame = false;
+        SpikeClock::time_point topTickAt{};
         platform::pumpEvents(); // [gta-recomp]
+        const bool leadRan = platform::frameLeadRan();
+        const bool frameSlept = platform::frameSlept();
+        if (!leadRan && !frameSlept && prevPresentThisTick)
+            ++unpacedStreak;
+        else if (leadRan || (frameSlept && prevPresentThisTick))
+            unpacedStreak = 0u;
         // [gta-recomp] host-paced game frames start on fresh input (ps2_present.h): here, unless the frame lead or the
         // pre-present tick (VSync/uncap overlap) started this one already
-        if (!platform::frameLeadRan() && !prePresentTicked)
+        if (!leadRan && !prePresentTicked)
         {
-            ps2HostTick(false, platform::frameSlept());
+            ps2HostTick(false, frameSlept);
             hostTickedThisFrame = true;
+            topTickAt = SpikeClock::now();
         }
         prePresentTicked = false;
         spikeT[0] = SpikeClock::now();
@@ -3459,8 +3469,10 @@ void PS2Runtime::run()
         }
         ps2control::pump(capturePng, shootPng, [this] { requestStop(); });
         present::setFrameInputTime(gsHwShownInputNs()); // [gta-recomp] input-to-screen delay (PS2X_RHI_STATS)
-        if (prePresentTickOn && g_hostPaced.load(std::memory_order_relaxed) && !platform::frameLeadRan() &&
-            (!prePresentGuardOn || !hostTickedThisFrame))
+        prevPresentThisTick = presentThisTick;
+        const bool canOverlapBottom = !prePresentGuardOn || !hostTickedThisFrame ||
+            (unpacedStreak >= 4u && std::chrono::duration<double, std::milli>(SpikeClock::now() - topTickAt).count() >= 4.0);
+        if (prePresentTickOn && g_hostPaced.load(std::memory_order_relaxed) && !leadRan && canOverlapBottom)
         {
             platform::pumpEvents(false);
             ps2HostTick(false, false);

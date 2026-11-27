@@ -8,6 +8,7 @@
 #include <immintrin.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -18,7 +19,6 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 #if defined(VCS_ANIM_WORKER)
@@ -61,15 +61,19 @@ namespace vcs::anim
             Verify,
             Slices, // the slices against the copies in one piece
         };
+        constexpr uint32_t kEntityUpdateRpHAnim = 0x003C50A8u;
+        constexpr uint32_t kCutsceneStatePtr = 0x0048F820u;
         Mode g_mode = Mode::Parallel;
-        PS2Runtime::RecompiledFunction g_origLoop = nullptr, g_origUpdate = nullptr;
+        PS2Runtime::RecompiledFunction g_origLoop = nullptr, g_origUpdate = nullptr, g_origEntityUpdate = nullptr;
         struct PrevClumpDt
         {
+            uint32_t clump = 0;
             uint32_t ad = 0;
             float dt = 0.0f;
         };
         bool g_stepFixOn = true;
-        std::unordered_map<uint32_t, PrevClumpDt> g_prevClumpDt;
+        thread_local bool t_allowPedStepFix = false;
+        std::array<PrevClumpDt, 2048> g_prevClumpDt{};
         PS2Runtime *g_runtime = nullptr;
 
         uint32_t rd32(const uint8_t *rdram, uint32_t a)
@@ -447,17 +451,41 @@ namespace vcs::anim
         }
 
         // verify only: the last loop compared before the next clump update begins, then the update as it is;
-        // also rescales root-motion delta from the clump's previous update dt to dtCurr so step fluctuations do
-        // not amplify velocity when the game divides delta by the current frame's time step (VCS_ANIM_STEP_FIX=0 disables)
+        // also rescales ped root-motion delta from the clump's previous update dt to dtCurr so step fluctuations do
+        // not amplify ped jump/curb velocity when FUN_001F1D38 divides delta by the current frame's step.
+        // Only runs for CPed ((entity+0x48 & 0xE) == 6) outside cutscenes so CCutsceneObject / cutscene choreography
+        // preserves exact cumulative translation (VCS_ANIM_STEP_FIX=0 disables)
+        PS2_GUEST_CC void entityUpdateAnim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const bool enter = ctx->pc == kEntityUpdateRpHAnim;
+            bool allow = false;
+            if (enter && g_stepFixOn)
+            {
+                const uint32_t entity = GPR_U32(ctx, 4);
+                if (entity >= 0x00010000u && entity < 0x01FFFF00u &&
+                    (rd32(rdram, entity + 0x48u) & 0xEu) == 6u)
+                {
+                    const uint32_t cs = rd32(rdram, kCutsceneStatePtr);
+                    const bool inCutscene = cs >= 0x00010000u && cs < 0x01FFFF00u && rd32(rdram, cs + 0x1Cu) != 0u;
+                    allow = !inCutscene;
+                }
+            }
+            const bool prevAllow = t_allowPedStepFix;
+            t_allowPedStepFix = allow;
+            g_origEntityUpdate(rdram, ctx, runtime);
+            t_allowPedStepFix = prevAllow;
+        }
+
         PS2_GUEST_CC void clumpUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const bool enter = ctx->pc == kClumpUpdate;
             if (enter && g_mode == Mode::Verify)
                 compare(rdram);
+            const bool fixThis = enter && g_stepFixOn && t_allowPedStepFix;
             uint32_t clump = 0u, ad = 0u, deltaPtr = 0u;
             float dtCurr = 0.0f, prevDt = 0.0f;
             bool hasAssoc = false, applyScale = false;
-            if (enter && g_stepFixOn)
+            if (fixThis)
             {
                 clump = GPR_U32(ctx, 4);
                 dtCurr = ctx->f[12];
@@ -467,16 +495,16 @@ namespace vcs::anim
                 deltaPtr = hasAssoc ? rd32(rdram, ad + 0xCu) : 0u;
                 if (deltaPtr && dtCurr >= 1e-4f)
                 {
-                    const auto it = g_prevClumpDt.find(clump);
-                    if (it != g_prevClumpDt.end() && it->second.ad == ad && it->second.dt >= 1e-4f)
+                    const PrevClumpDt &slot = g_prevClumpDt[(clump >> 4) & 2047u];
+                    if (slot.clump == clump && slot.ad == ad && slot.dt >= 1e-4f)
                     {
-                        prevDt = it->second.dt;
+                        prevDt = slot.dt;
                         applyScale = std::fabs(dtCurr - prevDt) > 1e-7f;
                     }
                 }
             }
             g_origUpdate(rdram, ctx, runtime);
-            if (enter && g_stepFixOn && hasAssoc && dtCurr >= 1e-4f)
+            if (fixThis && hasAssoc && dtCurr >= 1e-4f)
             {
                 if (applyScale && deltaPtr)
                 {
@@ -494,9 +522,7 @@ namespace vcs::anim
                         }
                     }
                 }
-                if (g_prevClumpDt.size() > 4096u)
-                    g_prevClumpDt.clear();
-                g_prevClumpDt[clump] = PrevClumpDt{ad, dtCurr};
+                g_prevClumpDt[(clump >> 4) & 2047u] = PrevClumpDt{clump, ad, dtCurr};
             }
         }
 
@@ -613,7 +639,10 @@ namespace vcs::anim
         const char *e = std::getenv("VCS_NATIVE_ANIM");
         const std::string mode = e ? e : "";
         g_mode = mode == "0" ? Mode::Off : mode == "serial" ? Mode::Serial : mode == "verify" ? Mode::Verify : mode == "slices" ? Mode::Slices : Mode::Parallel;
-        if ((g_mode == Mode::Verify || g_stepFixOn) && (g_origUpdate = runtime.lookupFunction(kClumpUpdate)))
+        if (g_stepFixOn && (g_origEntityUpdate = runtime.lookupFunction(kEntityUpdateRpHAnim)))
+            runtime.replaceFunction(kEntityUpdateRpHAnim, &entityUpdateAnim);
+        if ((g_mode == Mode::Verify || (g_stepFixOn && g_origEntityUpdate)) &&
+            (g_origUpdate = runtime.lookupFunction(kClumpUpdate)))
             runtime.replaceFunction(kClumpUpdate, &clumpUpdate);
         if (g_mode == Mode::Off)
         {

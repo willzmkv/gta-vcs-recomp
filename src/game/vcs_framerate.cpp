@@ -352,7 +352,8 @@ namespace vcs
             if (g_appliedFpsMilli.exchange(static_cast<int64_t>(fps * 1000.0), std::memory_order_relaxed) !=
                 static_cast<int64_t>(fps * 1000.0))
                 std::fprintf(stderr, "[framerate] cap %.2f fps (%s timing)\n", fps, independent() ? "independent" : "original");
-            platform::setFrameRate(independent() ? (fps > 0.0 ? std::max(60.0, fps) : 1000.0) : 60.0);
+            const int cap = g_cap.load(std::memory_order_relaxed);
+            platform::setFrameRate(independent() ? (cap != kCapUnlimited && fps > 0.0 ? std::max(60.0, fps) : 1000.0) : 60.0);
             // the host runs at the cap: its frames can pace the game's (docs/PERFORMANCE.md 19)
             ps2SetHostPacedFrames(independent() && (fps <= 0.0 || fps >= 60.0) && !forcedStepFps());
         }

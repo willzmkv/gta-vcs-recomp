@@ -353,6 +353,24 @@ namespace
         return !runtime->isStopRequested() && !g_checkpointUnwind && postPc == retAddr;
     }
 
+    // Preserves MIPS stack-frame depth on $sp across native hooks so vcs::rslworld's sp < g_captureSp check matches.
+    struct GuestSpFrame
+    {
+        R5900Context *ctx;
+        uint32_t savedSp;
+        GuestSpFrame(R5900Context *c, uint32_t bytes) noexcept : ctx(c), savedSp(GPR_U32(c, 29))
+        {
+            const uint32_t nextSp = (savedSp - bytes) & ~0xFu;
+            SET_GPR_U64(ctx, 29, static_cast<uint64_t>(static_cast<int32_t>(nextSp)));
+        }
+        ~GuestSpFrame() noexcept
+        {
+            SET_GPR_U64(ctx, 29, static_cast<uint64_t>(static_cast<int32_t>(savedSp)));
+        }
+        GuestSpFrame(const GuestSpFrame &) = delete;
+        GuestSpFrame &operator=(const GuestSpFrame &) = delete;
+    };
+
     // -------------------------------------------------------------------------
     // Packet buffer / leaf utility helpers
     // -------------------------------------------------------------------------
@@ -1680,6 +1698,7 @@ namespace
         const uint32_t texPsm = (fmtBits == 0x8000u) ? 0x13u : 0x14u;
         const uint32_t numColors = (fmtBits == 0x8000u) ? 0x100u : 0x10u;
         const uint32_t tcc = (clamp < 1u) ? 1u : 0u;
+        GuestSpFrame spGuard(ctx, 0x60u);
 
         if (g_hooks[kH_SetClut].outer != g_hooks[kH_SetClut].hook)
         {
@@ -1688,7 +1707,7 @@ namespace
             SET_GPR_U64(ctx, 6, 0ULL);
             SET_GPR_U64(ctx, 7, static_cast<uint64_t>(static_cast<int32_t>(numColors)));
             SET_GPR_U64(ctx, 8, 0ULL);
-            if (!callWrapped(rdram, ctx, runtime, g_hooks[kH_SetClut].outer, 0x002F6A78u, 0x003180CCu, 0x60u))
+            if (!callWrapped(rdram, ctx, runtime, g_hooks[kH_SetClut].outer, 0x002F6A78u, 0x003180CCu, 0u))
                 return false;
         }
         else if (!setClutImpl(rdram, ctx, runtime, unit, curPtr, 0u, numColors, 0u))
@@ -1697,11 +1716,9 @@ namespace
         const uint32_t mipFlags = rd8(rdram, raster + 0x0Fu);
         if (g_hooks[kH_SetTexture].outer != g_hooks[kH_SetTexture].hook)
         {
-            const uint32_t newSp = (GPR_U32(ctx, 29) - 0x60u) & ~0xFu;
-            const uint32_t savedSp = GPR_U32(ctx, 29);
+            const uint32_t curSp = GPR_U32(ctx, 29);
             const uint32_t savedRa = GPR_U32(ctx, 31);
-            wr32(rdram, newSp, mipFlags);
-            SET_GPR_U64(ctx, 29, static_cast<uint64_t>(static_cast<int32_t>(newSp)));
+            wr32(rdram, curSp, mipFlags);
             SET_GPR_U64(ctx, 31, static_cast<uint64_t>(static_cast<int32_t>(0x003180F8u)));
             SET_GPR_U64(ctx, 4, static_cast<uint64_t>(static_cast<int32_t>(unit)));
             SET_GPR_U64(ctx, 5, static_cast<uint64_t>(static_cast<int32_t>(texPsm)));
@@ -1714,7 +1731,7 @@ namespace
             ctx->pc = 0x002F62B8u;
             g_hooks[kH_SetTexture].outer(rdram, ctx, runtime);
             const uint32_t postPc = ctx->pc;
-            SET_GPR_U64(ctx, 29, static_cast<uint64_t>(static_cast<int32_t>(savedSp)));
+            SET_GPR_U64(ctx, 29, static_cast<uint64_t>(static_cast<int32_t>(curSp)));
             SET_GPR_U64(ctx, 31, static_cast<uint64_t>(static_cast<int32_t>(savedRa)));
             return !runtime->isStopRequested() && !g_checkpointUnwind && postPc == 0x003180F8u;
         }
@@ -1725,6 +1742,7 @@ namespace
     {
         if (raster != 0u && ((raster - 0x00100001u) > 0x07EFFFFFu || (raster & 3u) != 0u))
             return true;
+        GuestSpFrame spGuard(ctx, 0x10u);
         return texApplyImpl(rdram, ctx, runtime, kEnvStateBase, raster, 0u, 0u);
     }
 
@@ -1795,7 +1813,7 @@ namespace
         {
             SET_GPR_U64(ctx, 4, static_cast<uint64_t>(static_cast<int32_t>(raster)));
             ctx->f[12] = 1.0f;
-            return callWrapped(rdram, ctx, runtime, g_hooks[kH_TexBind].outer, 0x00408F30u, retAddr, 0x20u);
+            return callWrapped(rdram, ctx, runtime, g_hooks[kH_TexBind].outer, 0x00408F30u, retAddr, 0u);
         }
         return texBindImpl(rdram, ctx, runtime, raster);
     }
@@ -1805,7 +1823,7 @@ namespace
         if (g_hooks[kH_DrawModel].outer != g_hooks[kH_DrawModel].hook)
         {
             SET_GPR_U64(ctx, 4, static_cast<uint64_t>(static_cast<int32_t>(pktAddr)));
-            return callWrapped(rdram, ctx, runtime, g_hooks[kH_DrawModel].outer, 0x002F7D58u, retAddr, 0x40u);
+            return callWrapped(rdram, ctx, runtime, g_hooks[kH_DrawModel].outer, 0x002F7D58u, retAddr, 0u);
         }
         return drawPacketImpl(rdram, ctx, runtime, pktAddr, 0u, 0, 0x002F7D84u);
     }
@@ -1874,6 +1892,7 @@ namespace
 
     inline bool stripRenderImpl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t atomic) noexcept
     {
+        GuestSpFrame spGuard(ctx, 0x60u);
         const uint32_t geom = rd32(rdram, atomic + 0x14u);
         const uint32_t ps = kRenderSysBase;
         if (!setupLights(rdram, ctx, runtime, atomic, 1u))
@@ -1937,6 +1956,7 @@ namespace
             return false;
         if (!validRam(atomic, 0x34u))
             return false;
+        GuestSpFrame spGuard(ctx, 0x1E0u);
 
         const uint32_t geom = rd32(rdram, atomic + 0x14u);
         if (!validRam(geom, 0x60u))
@@ -2032,7 +2052,7 @@ namespace
             return (g_hooks[kH_StripRender].outer != g_hooks[kH_StripRender].hook)
                        ? [&]() {
                              SET_GPR_U64(ctx, 4, static_cast<uint64_t>(static_cast<int32_t>(atomic)));
-                             return callWrapped(rdram, ctx, runtime, g_hooks[kH_StripRender].outer, 0x0039E828u, 0x0039F064u, 0x60u);
+                             return callWrapped(rdram, ctx, runtime, g_hooks[kH_StripRender].outer, 0x0039E828u, 0x0039F064u, 0u);
                          }()
                        : stripRenderImpl(rdram, ctx, runtime, atomic);
         }
@@ -2183,7 +2203,7 @@ namespace
             if (g_hooks[kH_AtomicRender].outer != g_hooks[kH_AtomicRender].hook)
             {
                 SET_GPR_U64(ctx, 4, static_cast<uint64_t>(static_cast<int32_t>(objAddr)));
-                return callWrapped(rdram, ctx, runtime, g_hooks[kH_AtomicRender].outer, 0x0039EC18u, retAddr, 0x30u);
+                return callWrapped(rdram, ctx, runtime, g_hooks[kH_AtomicRender].outer, 0x0039EC18u, retAddr, 0u);
             }
             return atomicRenderImpl(rdram, ctx, runtime, objAddr);
         }
@@ -2191,9 +2211,7 @@ namespace
             return atomicRenderImpl(rdram, ctx, runtime, objAddr);
         const uint32_t savedSp = GPR_U32(ctx, 29);
         const uint32_t savedRa = GPR_U32(ctx, 31);
-        const uint32_t newSp = (savedSp - 0x30u) & ~0xFu;
         SET_GPR_U64(ctx, 4, static_cast<uint64_t>(static_cast<int32_t>(objAddr)));
-        SET_GPR_U64(ctx, 29, static_cast<uint64_t>(static_cast<int32_t>(newSp)));
         SET_GPR_U64(ctx, 31, static_cast<uint64_t>(static_cast<int32_t>(retAddr)));
         ctx->pc = cb;
         const bool ok = runtime->dispatchGuestBranch(rdram, ctx, cb, sourcePc, retAddr,
@@ -2207,6 +2225,7 @@ namespace
     {
         if (!validRam(clump, 0x20u))
             return false;
+        GuestSpFrame spGuard(ctx, 0x30u);
         const uint32_t head = clump + 8u;
         uint32_t cur = rd32(rdram, head);
         uint32_t guardCount = 0u;
@@ -2238,6 +2257,7 @@ namespace
             return false;
         if (!validRam(entity, 0x1E8u))
             return false;
+        GuestSpFrame spGuard(ctx, 0x20u);
         const uint32_t rwObj = rd32(rdram, entity + 0x50u);
         if (rwObj == 0u)
             return true;
@@ -2263,7 +2283,7 @@ namespace
         if (g_hooks[kH_ClumpRender].outer != g_hooks[kH_ClumpRender].hook)
         {
             SET_GPR_U64(ctx, 4, static_cast<uint64_t>(static_cast<int32_t>(rwObj)));
-            return callWrapped(rdram, ctx, runtime, g_hooks[kH_ClumpRender].outer, 0x002C0270u, 0x003C3F40u, 0x20u);
+            return callWrapped(rdram, ctx, runtime, g_hooks[kH_ClumpRender].outer, 0x002C0270u, 0x003C3F40u, 0u);
         }
         return clumpRenderImpl(rdram, ctx, runtime, rwObj);
     }
