@@ -212,9 +212,11 @@ namespace vcs
 
         // Fixed Moon pass for CClouds::Render (0x0018CE80):
         // 1) Vanilla skips Moon whenever |Hours*60+Min+Sec/60 - 180| >= 180 (missing from dusk until 00:01 and very dim
-        //    near midnight), and sets alpha=0 whenever CloudCoverage==1.0 (e.g. clear-looking cloudy night weather=1).
-        //    Draw across night hours (fade in 19:30..20:30, peak 180 across 20:30..05:00, fade out 05:00..06:00),
-        //    damping by fog/rain while keeping clouds semi-transparent (1 - 0.55*cloud).
+        //    near midnight), and zeroes alpha whenever CloudCoverage==1.0 (weather 1/6) or Foggyness==1.0 (weather 3,
+        //    plus Rockstar's CWeather::Update bug at 0x3E3D10..0x3E3D64 that leaves Foggyness pinned at 1.0 for the whole
+        //    hour transitioning out of weather 3 even under clear skies). Draw across dusk-to-dawn night hours
+        //    (fade in 19:00..20:30, peak 180 across 20:30..05:00, fade out 05:00..06:00) with bounded weather attenuation
+        //    so cloudy, rainy, and foggy nights soften the Moon without erasing it under open night skies.
         // 2) Normalize halfW for the actual display aspect ratio so Hor+ widescreen keeps a 1:1 circular Moon.
         // 3) Bracket guest sub-calls with CheckpointDeferGuard and match unique return PCs (0x0018CF4C / 0x0018D1AC)
         //    rather than a thread-local bool, preventing EE scheduler unwinds from leaking a stretched vanilla Moon.
@@ -227,8 +229,8 @@ namespace vcs
             const uint16_t secs = load16(rdram, 0x004CD2C4u);
             const float t = static_cast<float>(hours) * 60.0f + static_cast<float>(mins) + static_cast<float>(secs) / 60.0f;
             float timeFrac = 0.0f;
-            if (t >= 1170.0f && t < 1230.0f)
-                timeFrac = (t - 1170.0f) / 60.0f;
+            if (t >= 1140.0f && t < 1230.0f)
+                timeFrac = (t - 1140.0f) / 90.0f;
             else if (t >= 1230.0f || t <= 300.0f)
                 timeFrac = 1.0f;
             else if (t > 300.0f && t < 360.0f)
@@ -236,17 +238,17 @@ namespace vcs
             if (timeFrac <= 0.0f)
                 return;
 
-            const float fog = loadFloat(rdram, 0x004CD14Cu);
-            const float rain = loadFloat(rdram, 0x004CD144u);
-            const float cloud = loadFloat(rdram, 0x004CD2C8u);
-            const float weatherFade = std::clamp(1.0f - std::max(fog, rain * 0.8f), 0.0f, 1.0f) *
-                                      (1.0f - 0.55f * std::clamp(cloud, 0.0f, 1.0f));
+            const float fog = std::clamp(loadFloat(rdram, 0x004CD14Cu), 0.0f, 1.0f);
+            const float rain = std::clamp(loadFloat(rdram, 0x004CD144u), 0.0f, 1.0f);
+            const float cloud = std::clamp(loadFloat(rdram, 0x004CD2C8u), 0.0f, 1.0f);
+            const float weatherFade =
+                (1.0f - 0.40f * fog) * (1.0f - 0.35f * rain) * (1.0f - 0.35f * cloud);
             const int alpha = std::clamp(static_cast<int>(timeFrac * 180.0f * weatherFade), 0, 255);
             if (alpha <= 0)
                 return;
 
-            const uint32_t sp = (GPR_U32(ctx, 29) - 64u) & ~0xFu;
-            if (sp < 0x00100000u || (sp & kRamMask) + 64u > PS2_RAM_SIZE)
+            const uint32_t sp = (GPR_U32(ctx, 29) - 128u) & ~0xFu;
+            if (sp < 0x00100000u || (sp & kRamMask) + 128u > PS2_RAM_SIZE)
                 return;
 
             CheckpointDeferGuard deferGuard;
@@ -254,13 +256,17 @@ namespace vcs
             const float moonPos[3] = {loadFloat(rdram, 0x006F4500u), loadFloat(rdram, 0x006F4504u) - 100.0f,
                                       loadFloat(rdram, 0x006F4508u) + 15.0f};
             const float zeros[5] = {};
-            storeBytes(rdram, sp, moonPos, sizeof(moonPos));
-            storeBytes(rdram, sp + 16u, zeros, 20u);
+            const uint32_t bufPos = sp + 64u;
+            const uint32_t bufScreen = sp + 80u;
+            const uint32_t bufOutW = sp + 96u;
+            const uint32_t bufOutH = sp + 100u;
+            storeBytes(rdram, bufPos, moonPos, sizeof(moonPos));
+            storeBytes(rdram, bufScreen, zeros, 20u);
 
-            SET_GPR_U64(ctx, 4, sp);
-            SET_GPR_U64(ctx, 5, sp + 16u);
-            SET_GPR_U64(ctx, 6, sp + 32u);
-            SET_GPR_U64(ctx, 7, sp + 36u);
+            SET_GPR_U64(ctx, 4, bufPos);
+            SET_GPR_U64(ctx, 5, bufScreen);
+            SET_GPR_U64(ctx, 6, bufOutW);
+            SET_GPR_U64(ctx, 7, bufOutH);
             SET_GPR_U64(ctx, 8, 0u);
             SET_GPR_U32(ctx, 29, sp);
             SET_GPR_U32(ctx, 31, 0x0018CF4Cu);
@@ -269,10 +275,10 @@ namespace vcs
             if (GPR_S32(ctx, 2) == 0)
                 return;
 
-            const float sx = loadFloat(rdram, sp + 16u);
-            const float sy = loadFloat(rdram, sp + 20u);
-            const float sz = loadFloat(rdram, sp + 24u);
-            const float outH = loadFloat(rdram, sp + 36u);
+            const float sx = loadFloat(rdram, bufScreen);
+            const float sy = loadFloat(rdram, bufScreen + 4u);
+            const float sz = loadFloat(rdram, bufScreen + 8u);
+            const float outH = loadFloat(rdram, bufOutH);
             if (!(sz > 0.0f) || !(outH > 0.0f))
                 return;
 
@@ -291,8 +297,11 @@ namespace vcs
             g_origRwRenderStateSet(rdram, ctx, runtime);
 
             const uint32_t moonSize = load32(rdram, 0x004878B4u);
-            const uint8_t activeCam = rdram[0x006F4520u & kRamMask];
-            const float fov = loadFloat(rdram, 0x006F44D0u + static_cast<uint32_t>(activeCam) * 0x270u + 0x1A8u);
+            const uint32_t activeCam = rdram[0x006F4520u & kRamMask];
+            const uint32_t camIdx = activeCam < 3u ? activeCam : 0u;
+            const float fov = loadFloat(rdram, 0x006F44D0u + camIdx * 0x270u + 0x1A8u);
+            if (!(fov > 0.05f))
+                return;
             const float sizeBase = static_cast<float>(moonSize) * 2.0f + 4.0f;
             const float halfH = sizeBase * outH * fov;
             const float wid = std::clamp(g_widening.load(std::memory_order_relaxed), 0.5f, 4.0f);
