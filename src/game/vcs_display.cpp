@@ -35,10 +35,22 @@
 #include <cstdlib>
 #include <cstring>
 
+extern void ps2PushCheckpointDefer() noexcept;
+extern void ps2PopCheckpointDefer() noexcept;
+
 namespace vcs
 {
     namespace
     {
+        class CheckpointDeferGuard
+        {
+        public:
+            CheckpointDeferGuard() noexcept { ps2PushCheckpointDefer(); }
+            ~CheckpointDeferGuard() noexcept { ps2PopCheckpointDefer(); }
+            CheckpointDeferGuard(const CheckpointDeferGuard &) = delete;
+            CheckpointDeferGuard &operator=(const CheckpointDeferGuard &) = delete;
+        };
+
         constexpr uint32_t kPrefsPointer = 0x0048F3D0u; // -> the game's preferences / menu object
         constexpr uint32_t kWidescreenField = 0x30u;    // int: 1 = the game's (Vert-) widescreen; FUN_002af658 reads it
         constexpr uint32_t kRamMask = PS2_RAM_MASK;
@@ -180,13 +192,11 @@ namespace vcs
             FUN_002af660_0x2af660(rdram, ctx, runtime);
         }
 
-        PS2Runtime::RecompiledFunction g_origCloudsRender = nullptr;
         PS2Runtime::RecompiledFunction g_origCloudsFogReset = nullptr;
         PS2Runtime::RecompiledFunction g_origCalcScreenCoors = nullptr;
         PS2Runtime::RecompiledFunction g_origRwRenderStateSet = nullptr;
         PS2Runtime::RecompiledFunction g_origRenderOneXluSprite = nullptr;
         bool g_moonFix = true;
-        thread_local bool g_inCloudsRender = false;
 
         uint16_t load16(const uint8_t *rdram, uint32_t addr)
         {
@@ -202,10 +212,12 @@ namespace vcs
 
         // Fixed Moon pass for CClouds::Render (0x0018CE80):
         // 1) Vanilla skips Moon whenever |Hours*60+Min+Sec/60 - 180| >= 180 (missing from dusk until 00:01 and very dim
-        //    near midnight). Draw across night hours (fade in 20:00..21:00, peak 180 across 21:00..05:00, fade out
-        //    05:00..06:00) using the same weather fade (1 - max(fog, cloud)).
-        // 2) Normalize halfW for the actual display aspect ratio so Hor+ widescreen does not stretch the Moon into a
-        //    wide horizontal oval.
+        //    near midnight), and sets alpha=0 whenever CloudCoverage==1.0 (e.g. clear-looking cloudy night weather=1).
+        //    Draw across night hours (fade in 19:30..20:30, peak 180 across 20:30..05:00, fade out 05:00..06:00),
+        //    damping by fog/rain while keeping clouds semi-transparent (1 - 0.55*cloud).
+        // 2) Normalize halfW for the actual display aspect ratio so Hor+ widescreen keeps a 1:1 circular Moon.
+        // 3) Bracket guest sub-calls with CheckpointDeferGuard and match unique return PCs (0x0018CF4C / 0x0018D1AC)
+        //    rather than a thread-local bool, preventing EE scheduler unwinds from leaking a stretched vanilla Moon.
         void drawFixedMoon(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             if (!g_origCalcScreenCoors || !g_origRwRenderStateSet || !g_origRenderOneXluSprite)
@@ -215,9 +227,9 @@ namespace vcs
             const uint16_t secs = load16(rdram, 0x004CD2C4u);
             const float t = static_cast<float>(hours) * 60.0f + static_cast<float>(mins) + static_cast<float>(secs) / 60.0f;
             float timeFrac = 0.0f;
-            if (t >= 1200.0f && t < 1260.0f)
-                timeFrac = (t - 1200.0f) / 60.0f;
-            else if (t >= 1260.0f || t <= 300.0f)
+            if (t >= 1170.0f && t < 1230.0f)
+                timeFrac = (t - 1170.0f) / 60.0f;
+            else if (t >= 1230.0f || t <= 300.0f)
                 timeFrac = 1.0f;
             else if (t > 300.0f && t < 360.0f)
                 timeFrac = (360.0f - t) / 60.0f;
@@ -225,8 +237,10 @@ namespace vcs
                 return;
 
             const float fog = loadFloat(rdram, 0x004CD14Cu);
+            const float rain = loadFloat(rdram, 0x004CD144u);
             const float cloud = loadFloat(rdram, 0x004CD2C8u);
-            const float weatherFade = std::clamp(1.0f - std::max(fog, cloud), 0.0f, 1.0f);
+            const float weatherFade = std::clamp(1.0f - std::max(fog, rain * 0.8f), 0.0f, 1.0f) *
+                                      (1.0f - 0.55f * std::clamp(cloud, 0.0f, 1.0f));
             const int alpha = std::clamp(static_cast<int>(timeFrac * 180.0f * weatherFade), 0, 255);
             if (alpha <= 0)
                 return;
@@ -234,6 +248,8 @@ namespace vcs
             const uint32_t sp = (GPR_U32(ctx, 29) - 64u) & ~0xFu;
             if (sp < 0x00100000u || (sp & kRamMask) + 64u > PS2_RAM_SIZE)
                 return;
+
+            CheckpointDeferGuard deferGuard;
 
             const float moonPos[3] = {loadFloat(rdram, 0x006F4500u), loadFloat(rdram, 0x006F4504u) - 100.0f,
                                       loadFloat(rdram, 0x006F4508u) + 15.0f};
@@ -300,24 +316,13 @@ namespace vcs
             g_origRenderOneXluSprite(rdram, ctx, runtime);
         }
 
-        PS2_GUEST_CC void cloudsRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-        {
-            struct Guard
-            {
-                bool prev;
-                explicit Guard() : prev(g_inCloudsRender) { g_inCloudsRender = true; }
-                ~Guard() { g_inCloudsRender = prev; }
-            } guard;
-            g_origCloudsRender(rdram, ctx, runtime);
-        }
-
         PS2_GUEST_CC void cloudsFogReset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            const bool fromClouds = g_moonFix && g_inCloudsRender && GPR_U32(ctx, 31) == 0x0018CF4Cu;
+            const uint32_t ra = GPR_U32(ctx, 31);
+            const bool fromClouds = g_moonFix && ra == 0x0018CF4Cu;
             g_origCloudsFogReset(rdram, ctx, runtime);
             if (fromClouds)
             {
-                const uint32_t ra = GPR_U32(ctx, 31);
                 const R5900Context saved = *ctx;
                 drawFixedMoon(rdram, ctx, runtime);
                 *ctx = saved;
@@ -327,10 +332,11 @@ namespace vcs
 
         PS2_GUEST_CC void renderOneXluSprite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            // Skip vanilla Moon call inside CClouds::Render (drawn by drawFixedMoon instead).
-            if (g_moonFix && g_inCloudsRender && GPR_U32(ctx, 31) == 0x0018D1ACu)
+            // Skip vanilla Moon call inside CClouds::Render (drawn by drawFixedMoon instead),
+            // matched strictly by unique return address 0x0018D1AC so scheduler unwinds cannot bypass it.
+            if (g_moonFix && GPR_U32(ctx, 31) == 0x0018D1ACu)
             {
-                ctx->pc = GPR_U32(ctx, 31);
+                ctx->pc = 0x0018D1ACu;
                 return;
             }
             g_origRenderOneXluSprite(rdram, ctx, runtime);
@@ -378,15 +384,13 @@ namespace vcs
             g_moonFix = false;
         if (g_moonFix)
         {
-            g_origCloudsRender = runtime.lookupFunction(0x0018CE80u);
             g_origCloudsFogReset = runtime.lookupFunction(0x0039FED8u);
             g_origCalcScreenCoors = runtime.lookupFunction(0x0039FC48u);
             g_origRwRenderStateSet = runtime.lookupFunction(0x00175198u);
             g_origRenderOneXluSprite = runtime.lookupFunction(0x003A03A8u);
-            if (g_origCloudsRender && g_origCloudsFogReset && g_origCalcScreenCoors &&
+            if (g_origCloudsFogReset && g_origCalcScreenCoors &&
                 g_origRwRenderStateSet && g_origRenderOneXluSprite)
             {
-                runtime.replaceFunction(0x0018CE80u, &cloudsRender);
                 runtime.replaceFunction(0x0039FED8u, &cloudsFogReset);
                 runtime.replaceFunction(0x003A03A8u, &renderOneXluSprite);
             }
